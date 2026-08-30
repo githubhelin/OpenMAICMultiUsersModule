@@ -38,18 +38,29 @@ cd OpenMAIC
 
 ### 步骤二：打入多用户模块补丁
 
-#### 方式 1：一键自动化脚本（推荐）
+#### 方式 1：一键自动化安装与冲突检测脚本（推荐）
 ```bash
 # 在 OpenMAIC 根目录下执行
 git clone https://github.com/githubhelin/OpenMAICMultiUsersModule.git /tmp/openmaic-patch
+
+# 选项 A: 仅执行预检查 (Dry-run 只检不改，验证是否有冲突)
+/tmp/openmaic-patch/apply.sh --check
+
+# 选项 B: 正式执行一键安装打补丁
 /tmp/openmaic-patch/apply.sh
+
 rm -rf /tmp/openmaic-patch
 ```
 
-#### 方式 2：手动下载并打入补丁文件
+#### 方式 2：手动检查并打入补丁文件
 ```bash
-# 下载 patch 文件并直接应用
+# 下载 patch 文件
 curl -sSL https://raw.githubusercontent.com/githubhelin/OpenMAICMultiUsersModule/main/openmaic-multi-user.patch -o openmaic-multi-user.patch
+
+# 1. 预检查是否有冲突 (不产生任何修改)
+git apply --check openmaic-multi-user.patch
+
+# 2. 确认无冲突后正式打入
 git apply openmaic-multi-user.patch
 rm openmaic-multi-user.patch
 ```
