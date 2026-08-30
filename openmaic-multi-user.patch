@@ -1,0 +1,2750 @@
+diff --git a/README-MULTIUSER.md b/README-MULTIUSER.md
+new file mode 100644
+index 00000000..1fd236b7
+--- /dev/null
++++ b/README-MULTIUSER.md
+@@ -0,0 +1,127 @@
++# OpenMAIC 多用户管理与认证模块 (Multi-Users Module)
++
++本模块为 **OpenMAIC** 增加了开箱即用的**多用户身份认证（Authentication）、多端数据漫游、分权权限控制（RBAC）与全局用户管理后台**。
++
++---
++
++## 🌟 核心特性
++
++1. **统一账号认证与云端漫游**：
++   - 支持用户名/密码注册与登录，支持个人昵称、头像设置与密码自主修改。
++   - 用户在不同电脑、平板或手机上登录同一个账号，即可**无缝加载并继续编辑**该账号创建的所有互动课程、智能体会话（Session）、自定义技能（Skill）与素材库。
++2. **多用户严格数据隔离（Owner Isolation）**：
++   - 用户 A 与用户 B 的课程大纲、对话历史、私有技能 100% 物理隔离，互不可见。
++3. **分权权限控制（RBAC）**：
++   - **普通用户（User）**：管理自己的专属课程空间、个人资料与偏好设置。
++   - **超级管理员（Admin）**：享有“全站多用户管理控制台”，支持查询全站用户、手动创建用户、切换管理员权限、封禁/启用账号、重置密码及注销账号。
++4. **安全与轻量**：
++   - 采用 Node.js 原生安全加密（`scrypt` 密码哈希 + 随机 Salt，HMAC-SHA256 JWT Token）。
++   - 采用 `HttpOnly` + `SameSite=Lax` Cookie 存储会话，杜绝 XSS 风险。
++   - 零额外重量级依赖，无缝融合 PostgreSQL 持久化与 Next.js 16 架构。
++
++---
++
++## 🔑 默认初始管理员账号
++
++首次启动并连接 PostgreSQL 时，系统会自动检测并初始化 `users` 表，同时自动预置默认初始超级管理员：
++
++- **初始管理员账号**：`admin`
++- **初始管理员密码**：`admin123456`
++- **自定义配置**：可在 `.env.local` 中通过 `INITIAL_ADMIN_PASSWORD=自定义密码` 覆盖。
++
++> ⚠️ **安全提示**：首次登录后，请点击右上角头像进入 **“个人资料与密码”** 修改默认管理员密码！
++
++---
++
++## ⚙️ 环境变量配置
++
++在 `.env.local` 中可配置以下参数：
++
++```env
++# --- 多用户与身份认证配置 ---------------------------------------------
++# 会话加密密钥（建议设为高强度随机字符串）
++AUTH_SECRET=your-super-secret-auth-key-string
++
++# 是否允许公开注册（默认 true，若设为 false 则仅管理员可在后台手动添加账号）
++ALLOW_REGISTRATION=true
++
++# 默认管理员初始密码（仅在初次生成 admin 账号时生效）
++INITIAL_ADMIN_USERNAME=admin
++INITIAL_ADMIN_PASSWORD=admin123456
++```
++
++---
++
++## 📡 接口设计概览 (API Routes)
++
++| 请求方法 | 路由 | 权限 | 功能说明 |
++| :--- | :--- | :--- | :--- |
++| `POST` | `/api/auth/register` | 公开 | 新用户注册 |
++| `POST` | `/api/auth/login` | 公开 | 用户登录（签发 HttpOnly Session Cookie） |
++| `POST` | `/api/auth/logout` | 已登录 | 退出登录（清除 Cookie） |
++| `GET` | `/api/auth/me` | 公开/已登录 | 获取当前登录用户的基本信息与角色 |
++| `PUT` | `/api/auth/profile` | 已登录 | 修改当前用户昵称、头像、简介或修改密码 |
++| `GET` | `/api/admin/users` | 仅 Admin | 管理员获取全站用户列表（支持搜索、分页） |
++| `POST` | `/api/admin/users` | 仅 Admin | 管理员手动创建新用户 |
++| `PATCH` | `/api/admin/users/:id` | 仅 Admin | 管理员修改用户角色、禁用/解封账号、重置密码 |
++| `DELETE` | `/api/admin/users/:id` | 仅 Admin | 管理员彻底注销并删除用户 |
++
++---
++
++## 🗄️ 数据表结构 (PostgreSQL)
++
++```sql
++CREATE TABLE IF NOT EXISTS users (
++  id TEXT PRIMARY KEY,               -- 格式: usr_<nanoid>
++  username TEXT UNIQUE NOT NULL,     -- 登录用户名 (小写规范)
++  email TEXT UNIQUE,                 -- 电子邮箱
++  password_hash TEXT NOT NULL,       -- scrypt 派生哈希
++  salt TEXT NOT NULL,                -- 16字节安全随机盐
++  nickname TEXT NOT NULL,            -- 显示昵称
++  avatar TEXT NOT NULL DEFAULT '/avatars/user.png',
++  bio TEXT,                          -- 个人简介
++  role TEXT NOT NULL DEFAULT 'user', -- 'admin' | 'user'
++  is_active BOOLEAN NOT NULL DEFAULT TRUE, -- 是否启用
++  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
++  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
++);
++
++CREATE INDEX IF NOT EXISTS idx_users_username ON users(username);
++CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
++```
++
++---
++
++## 💻 快速运行与管理
++
++```bash
++# 启动 / 重启后台 PM2 服务
++pm2 restart openmaic --update-env
++
++# 查看运行状态
++pm2 status
++
++# 运行认证单元测试
++pnpm vitest run tests/auth/auth-crypto.test.ts
++```
++
++---
++
++## 🔄 同步官方更新与打补丁方式
++
++### 方式一：Git 变基同步 (推荐)
++当清华官方 OpenMAIC 仓库有新功能发布时，执行以下命令即可自动完成代码合并与多用户功能保留：
++```bash
++git fetch upstream main
++git rebase upstream/main
++pnpm build
++pm2 restart openmaic --update-env
++```
++
++### 方式二：直接打入独立补丁文件
++仓库根目录已附带完整独立补丁文件 `patches/openmaic-multi-user.patch`。若在全新的官方 OpenMAIC 副本中部署，直接运行：
++```bash
++git apply patches/openmaic-multi-user.patch
++pnpm build
++pm2 restart openmaic --update-env
++```
+diff --git a/app/api/admin/users/[id]/route.ts b/app/api/admin/users/[id]/route.ts
+new file mode 100644
+index 00000000..21ff4344
+--- /dev/null
++++ b/app/api/admin/users/[id]/route.ts
+@@ -0,0 +1,100 @@
++import { type NextRequest, NextResponse } from 'next/server';
++import { getCurrentUser } from '@/lib/server/auth/session';
++import { updateUser, deleteUser, findUserById, toSafeUser } from '@/lib/server/auth/db';
++
++export const runtime = 'nodejs';
++
++export async function GET(
++  req: NextRequest,
++  { params }: { params: Promise<{ id: string }> }
++) {
++  try {
++    const currentUser = await getCurrentUser(req);
++    if (!currentUser || currentUser.role !== 'admin') {
++      return NextResponse.json({ success: false, error: 'Forbidden: Admin access required' }, { status: 403 });
++    }
++
++    const { id } = await params;
++    const user = await findUserById(id);
++    if (!user) {
++      return NextResponse.json({ success: false, error: 'User not found' }, { status: 404 });
++    }
++
++    return NextResponse.json({ success: true, user: toSafeUser(user) });
++  } catch (error: unknown) {
++    const message = error instanceof Error ? error.message : 'Internal Server Error';
++    return NextResponse.json({ success: false, error: message }, { status: 500 });
++  }
++}
++
++export async function PATCH(
++  req: NextRequest,
++  { params }: { params: Promise<{ id: string }> }
++) {
++  try {
++    const currentUser = await getCurrentUser(req);
++    if (!currentUser || currentUser.role !== 'admin') {
++      return NextResponse.json({ success: false, error: 'Forbidden: Admin access required' }, { status: 403 });
++    }
++
++    const { id } = await params;
++    const body = await req.json();
++    const { nickname, avatar, bio, email, role, is_active, password } = body;
++
++    // Prevent admin from accidentally demoting or disabling self
++    if (id === currentUser.id) {
++      if (role && role !== 'admin') {
++        return NextResponse.json({ success: false, error: 'Cannot demote your own admin account' }, { status: 400 });
++      }
++      if (is_active === false) {
++        return NextResponse.json({ success: false, error: 'Cannot disable your own admin account' }, { status: 400 });
++      }
++    }
++
++    const updated = await updateUser(id, {
++      nickname,
++      avatar,
++      bio,
++      email,
++      role,
++      is_active,
++      password,
++    });
++
++    if (!updated) {
++      return NextResponse.json({ success: false, error: 'User not found or update failed' }, { status: 404 });
++    }
++
++    return NextResponse.json({ success: true, user: updated });
++  } catch (error: unknown) {
++    const message = error instanceof Error ? error.message : 'Internal Server Error';
++    return NextResponse.json({ success: false, error: message }, { status: 500 });
++  }
++}
++
++export async function DELETE(
++  req: NextRequest,
++  { params }: { params: Promise<{ id: string }> }
++) {
++  try {
++    const currentUser = await getCurrentUser(req);
++    if (!currentUser || currentUser.role !== 'admin') {
++      return NextResponse.json({ success: false, error: 'Forbidden: Admin access required' }, { status: 403 });
++    }
++
++    const { id } = await params;
++    if (id === currentUser.id) {
++      return NextResponse.json({ success: false, error: 'Cannot delete your own admin account' }, { status: 400 });
++    }
++
++    const deleted = await deleteUser(id);
++    if (!deleted) {
++      return NextResponse.json({ success: false, error: 'User not found or deletion failed' }, { status: 404 });
++    }
++
++    return NextResponse.json({ success: true, message: 'User deleted successfully' });
++  } catch (error: unknown) {
++    const message = error instanceof Error ? error.message : 'Internal Server Error';
++    return NextResponse.json({ success: false, error: message }, { status: 500 });
++  }
++}
+diff --git a/app/api/admin/users/route.ts b/app/api/admin/users/route.ts
+new file mode 100644
+index 00000000..c752acde
+--- /dev/null
++++ b/app/api/admin/users/route.ts
+@@ -0,0 +1,61 @@
++import { type NextRequest, NextResponse } from 'next/server';
++import { getCurrentUser } from '@/lib/server/auth/session';
++import { listUsers, createUser } from '@/lib/server/auth/db';
++
++export const runtime = 'nodejs';
++
++export async function GET(req: NextRequest) {
++  try {
++    const currentUser = await getCurrentUser(req);
++    if (!currentUser || currentUser.role !== 'admin') {
++      return NextResponse.json({ success: false, error: 'Forbidden: Admin access required' }, { status: 403 });
++    }
++
++    const { searchParams } = new URL(req.url);
++    const search = searchParams.get('search') || undefined;
++    const limit = parseInt(searchParams.get('limit') || '50', 10);
++    const offset = parseInt(searchParams.get('offset') || '0', 10);
++
++    const result = await listUsers({ search, limit, offset });
++    return NextResponse.json({
++      success: true,
++      ...result,
++    });
++  } catch (error: unknown) {
++    const message = error instanceof Error ? error.message : 'Internal Server Error';
++    return NextResponse.json({ success: false, error: message }, { status: 500 });
++  }
++}
++
++export async function POST(req: NextRequest) {
++  try {
++    const currentUser = await getCurrentUser(req);
++    if (!currentUser || currentUser.role !== 'admin') {
++      return NextResponse.json({ success: false, error: 'Forbidden: Admin access required' }, { status: 403 });
++    }
++
++    const body = await req.json();
++    const { username, password, email, nickname, role, avatar } = body;
++
++    if (!username || !password) {
++      return NextResponse.json(
++        { success: false, error: 'Username and password are required' },
++        { status: 400 }
++      );
++    }
++
++    const newUser = await createUser({
++      username: username.trim(),
++      password,
++      email: email?.trim() || null,
++      nickname: nickname?.trim() || username.trim(),
++      avatar: avatar || '/avatars/user.png',
++      role: role === 'admin' ? 'admin' : 'user',
++    });
++
++    return NextResponse.json({ success: true, user: newUser }, { status: 201 });
++  } catch (error: unknown) {
++    const message = error instanceof Error ? error.message : 'Internal Server Error';
++    return NextResponse.json({ success: false, error: message }, { status: 400 });
++  }
++}
+diff --git a/app/api/auth/login/route.ts b/app/api/auth/login/route.ts
+new file mode 100644
+index 00000000..8bfa2ca9
+--- /dev/null
++++ b/app/api/auth/login/route.ts
+@@ -0,0 +1,58 @@
++import { type NextRequest, NextResponse } from 'next/server';
++import { findUserByUsername, toSafeUser } from '@/lib/server/auth/db';
++import { verifyPassword } from '@/lib/server/auth/crypto';
++import { createSessionToken, buildSessionCookieHeader } from '@/lib/server/auth/session';
++
++export const runtime = 'nodejs';
++
++export async function POST(req: NextRequest) {
++  try {
++    const body = await req.json();
++    const { username, password } = body;
++
++    if (!username || !password) {
++      return NextResponse.json(
++        { success: false, error: 'Username and password are required' },
++        { status: 400 }
++      );
++    }
++
++    const user = await findUserByUsername(username);
++    if (!user) {
++      return NextResponse.json(
++        { success: false, error: 'Invalid username or password' },
++        { status: 401 }
++      );
++    }
++
++    if (!user.is_active) {
++      return NextResponse.json(
++        { success: false, error: 'This account has been disabled by administrator' },
++        { status: 403 }
++      );
++    }
++
++    const valid = await verifyPassword(password, user.password_hash, user.salt);
++    if (!valid) {
++      return NextResponse.json(
++        { success: false, error: 'Invalid username or password' },
++        { status: 401 }
++      );
++    }
++
++    const safeUser = toSafeUser(user);
++    const token = createSessionToken(safeUser);
++    const cookieHeader = buildSessionCookieHeader(token);
++
++    const response = NextResponse.json({
++      success: true,
++      user: safeUser,
++    });
++    response.headers.set('Set-Cookie', cookieHeader);
++
++    return response;
++  } catch (error: unknown) {
++    const message = error instanceof Error ? error.message : 'Internal Server Error';
++    return NextResponse.json({ success: false, error: message }, { status: 500 });
++  }
++}
+diff --git a/app/api/auth/logout/route.ts b/app/api/auth/logout/route.ts
+new file mode 100644
+index 00000000..754637c4
+--- /dev/null
++++ b/app/api/auth/logout/route.ts
+@@ -0,0 +1,10 @@
++import { NextResponse } from 'next/server';
++import { buildClearSessionCookieHeader } from '@/lib/server/auth/session';
++
++export const runtime = 'nodejs';
++
++export async function POST() {
++  const response = NextResponse.json({ success: true, message: 'Logged out successfully' });
++  response.headers.set('Set-Cookie', buildClearSessionCookieHeader());
++  return response;
++}
+diff --git a/app/api/auth/me/route.ts b/app/api/auth/me/route.ts
+new file mode 100644
+index 00000000..21c7256e
+--- /dev/null
++++ b/app/api/auth/me/route.ts
+@@ -0,0 +1,17 @@
++import { type NextRequest, NextResponse } from 'next/server';
++import { getCurrentUser } from '@/lib/server/auth/session';
++
++export const runtime = 'nodejs';
++
++export async function GET(req: NextRequest) {
++  try {
++    const user = await getCurrentUser(req);
++    return NextResponse.json({
++      success: true,
++      user,
++    });
++  } catch (error: unknown) {
++    const message = error instanceof Error ? error.message : 'Internal Server Error';
++    return NextResponse.json({ success: false, user: null, error: message }, { status: 500 });
++  }
++}
+diff --git a/app/api/auth/profile/route.ts b/app/api/auth/profile/route.ts
+new file mode 100644
+index 00000000..2de9b681
+--- /dev/null
++++ b/app/api/auth/profile/route.ts
+@@ -0,0 +1,73 @@
++import { type NextRequest, NextResponse } from 'next/server';
++import { getCurrentUser, createSessionToken, buildSessionCookieHeader } from '@/lib/server/auth/session';
++import { findUserById, updateUser } from '@/lib/server/auth/db';
++import { verifyPassword } from '@/lib/server/auth/crypto';
++
++export const runtime = 'nodejs';
++
++export async function PUT(req: NextRequest) {
++  try {
++    const currentUser = await getCurrentUser(req);
++    if (!currentUser) {
++      return NextResponse.json({ success: false, error: 'Unauthorized' }, { status: 401 });
++    }
++
++    const body = await req.json();
++    const { nickname, avatar, bio, currentPassword, newPassword } = body;
++
++    const updates: Parameters<typeof updateUser>[1] = {};
++
++    if (nickname !== undefined) updates.nickname = nickname.trim();
++    if (avatar !== undefined) updates.avatar = avatar.trim();
++    if (bio !== undefined) updates.bio = bio ? bio.trim() : null;
++
++    if (newPassword) {
++      if (!currentPassword) {
++        return NextResponse.json(
++          { success: false, error: 'Current password is required to set a new password' },
++          { status: 400 }
++        );
++      }
++      if (newPassword.length < 6) {
++        return NextResponse.json(
++          { success: false, error: 'New password must be at least 6 characters' },
++          { status: 400 }
++        );
++      }
++
++      const fullUser = await findUserById(currentUser.id);
++      if (!fullUser) {
++        return NextResponse.json({ success: false, error: 'User not found' }, { status: 404 });
++      }
++
++      const valid = await verifyPassword(currentPassword, fullUser.password_hash, fullUser.salt);
++      if (!valid) {
++        return NextResponse.json(
++          { success: false, error: 'Incorrect current password' },
++          { status: 400 }
++        );
++      }
++
++      updates.password = newPassword;
++    }
++
++    const updated = await updateUser(currentUser.id, updates);
++    if (!updated) {
++      return NextResponse.json({ success: false, error: 'Failed to update profile' }, { status: 500 });
++    }
++
++    const token = createSessionToken(updated);
++    const cookieHeader = buildSessionCookieHeader(token);
++
++    const response = NextResponse.json({
++      success: true,
++      user: updated,
++    });
++    response.headers.set('Set-Cookie', cookieHeader);
++
++    return response;
++  } catch (error: unknown) {
++    const message = error instanceof Error ? error.message : 'Internal Server Error';
++    return NextResponse.json({ success: false, error: message }, { status: 500 });
++  }
++}
+diff --git a/app/api/auth/register/route.ts b/app/api/auth/register/route.ts
+new file mode 100644
+index 00000000..45201511
+--- /dev/null
++++ b/app/api/auth/register/route.ts
+@@ -0,0 +1,65 @@
++import { type NextRequest, NextResponse } from 'next/server';
++import { createUser } from '@/lib/server/auth/db';
++import { createSessionToken, buildSessionCookieHeader } from '@/lib/server/auth/session';
++
++export const runtime = 'nodejs';
++
++export async function POST(req: NextRequest) {
++  try {
++    const allowRegistration = process.env.ALLOW_REGISTRATION !== 'false';
++    if (!allowRegistration) {
++      return NextResponse.json(
++        { success: false, error: 'Registration is currently disabled by administrator' },
++        { status: 403 }
++      );
++    }
++
++    const body = await req.json();
++    const { username, password, email, nickname, avatar } = body;
++
++    if (!username || typeof username !== 'string' || username.trim().length < 3) {
++      return NextResponse.json(
++        { success: false, error: 'Username must be at least 3 characters' },
++        { status: 400 }
++      );
++    }
++
++    if (!password || typeof password !== 'string' || password.length < 6) {
++      return NextResponse.json(
++        { success: false, error: 'Password must be at least 6 characters' },
++        { status: 400 }
++      );
++    }
++
++    // Basic format check
++    if (!/^[a-zA-Z0-9_-]+$/.test(username.trim())) {
++      return NextResponse.json(
++        { success: false, error: 'Username can only contain letters, numbers, underscores, and hyphens' },
++        { status: 400 }
++      );
++    }
++
++    const safeUser = await createUser({
++      username: username.trim(),
++      password,
++      email: email?.trim() || null,
++      nickname: nickname?.trim() || username.trim(),
++      avatar: avatar || '/avatars/user.png',
++      role: 'user',
++    });
++
++    const token = createSessionToken(safeUser);
++    const cookieHeader = buildSessionCookieHeader(token);
++
++    const response = NextResponse.json(
++      { success: true, user: safeUser },
++      { status: 201 }
++    );
++    response.headers.set('Set-Cookie', cookieHeader);
++
++    return response;
++  } catch (error: unknown) {
++    const message = error instanceof Error ? error.message : 'Registration failed';
++    return NextResponse.json({ success: false, error: message }, { status: 400 });
++  }
++}
+diff --git a/app/page.tsx b/app/page.tsx
+index 6dc44c04..582bf3b0 100644
+--- a/app/page.tsx
++++ b/app/page.tsx
+@@ -36,6 +36,8 @@ import { InputGroup, InputGroupInput, InputGroupButton } from '@/components/ui/i
+ import { Textarea as UITextarea } from '@/components/ui/textarea';
+ import { cn } from '@/lib/utils';
+ import { SettingsDialog } from '@/components/settings';
++import { UserNav } from '@/components/auth/user-nav';
++import { useAuthStore } from '@/lib/store/auth-store';
+ import { GenerationToolbar } from '@/components/generation/generation-toolbar';
+ import { AgentBar } from '@/components/agent/agent-bar';
+ import { useTheme } from '@/lib/hooks/use-theme';
+@@ -224,6 +226,7 @@ function HomePage() {
+ 
+   const [themeOpen, setThemeOpen] = useState(false);
+   const [error, setError] = useState<string | null>(null);
++  const isAdmin = useAuthStore((s) => s.user?.role === 'admin');
+   // True while the Generate click drains upload-time ingests and builds the
+   // generation session. Doubles as the guard flag that freezes the course
+   // material set for the duration of prep and as the switch that disables the
+@@ -790,26 +793,37 @@ function HomePage() {
+           )}
+         </div>
+ 
++        {/* Settings Button (Admin Only) */}
++        {isAdmin && (
++          <>
++            <div className="w-[1px] h-4 bg-gray-200 dark:bg-gray-700" />
++            <div className="relative">
++              <button
++                onClick={() => setSettingsOpen(true)}
++                className="p-2 rounded-full text-gray-400 dark:text-gray-500 hover:bg-white dark:hover:bg-gray-700 hover:text-gray-800 dark:hover:text-gray-200 hover:shadow-sm transition-all group cursor-pointer"
++                title="系统设置 (管理员专属)"
++              >
++                <Settings className="w-4 h-4 group-hover:rotate-90 transition-transform duration-500" />
++              </button>
++            </div>
++          </>
++        )}
++
+         <div className="w-[1px] h-4 bg-gray-200 dark:bg-gray-700" />
+ 
+-        {/* Settings Button */}
+-        <div className="relative">
+-          <button
+-            onClick={() => setSettingsOpen(true)}
+-            className="p-2 rounded-full text-gray-400 dark:text-gray-500 hover:bg-white dark:hover:bg-gray-700 hover:text-gray-800 dark:hover:text-gray-200 hover:shadow-sm transition-all group"
+-          >
+-            <Settings className="w-4 h-4 group-hover:rotate-90 transition-transform duration-500" />
+-          </button>
+-        </div>
++        {/* User Account Navigation */}
++        <UserNav onOpenSettings={() => setSettingsOpen(true)} />
+       </div>
+-      <SettingsDialog
+-        open={settingsOpen}
+-        onOpenChange={(open) => {
+-          setSettingsOpen(open);
+-          if (!open) setSettingsSection(undefined);
+-        }}
+-        initialSection={settingsSection}
+-      />
++      {isAdmin && (
++        <SettingsDialog
++          open={settingsOpen}
++          onOpenChange={(open) => {
++            setSettingsOpen(open);
++            if (!open) setSettingsSection(undefined);
++          }}
++          initialSection={settingsSection}
++        />
++      )}
+ 
+       {/* ═══ Background Decor ═══ */}
+       <div className="absolute inset-0 overflow-hidden pointer-events-none">
+diff --git a/components/admin/user-management-dialog.tsx b/components/admin/user-management-dialog.tsx
+new file mode 100644
+index 00000000..d481e353
+--- /dev/null
++++ b/components/admin/user-management-dialog.tsx
+@@ -0,0 +1,535 @@
++'use client';
++
++import { useState, useEffect, useCallback } from 'react';
++import { useAuthStore } from '@/lib/store/auth-store';
++import type { SafeUser } from '@/lib/server/auth/types';
++import {
++  Dialog,
++  DialogContent,
++  DialogDescription,
++  DialogHeader,
++  DialogTitle,
++} from '@/components/ui/dialog';
++import { Button } from '@/components/ui/button';
++import { Input } from '@/components/ui/input';
++import {
++  Table,
++  TableBody,
++  TableCell,
++  TableHead,
++  TableHeader,
++  TableRow,
++} from '@/components/ui/table';
++import {
++  DropdownMenu,
++  DropdownMenuContent,
++  DropdownMenuItem,
++  DropdownMenuTrigger,
++  DropdownMenuSeparator,
++} from '@/components/ui/dropdown-menu';
++import {
++  Shield,
++  User as UserIcon,
++  Search,
++  MoreHorizontal,
++  KeyRound,
++  UserX,
++  UserCheck,
++  Trash2,
++  UserPlus,
++  Loader2,
++  RefreshCw,
++} from 'lucide-react';
++import { toast } from 'sonner';
++
++export function UserManagementDialog() {
++  const { user, adminModalOpen, setAdminModalOpen } = useAuthStore();
++  const [users, setUsers] = useState<SafeUser[]>([]);
++  const [total, setTotal] = useState(0);
++  const [loading, setLoading] = useState(false);
++  const [search, setSearch] = useState('');
++
++  // Password reset dialog state
++  const [resettingUser, setResettingUser] = useState<SafeUser | null>(null);
++  const [newPassword, setNewPassword] = useState('');
++  const [resetLoading, setResetLoading] = useState(false);
++
++  // New user dialog state
++  const [createUserOpen, setCreateUserOpen] = useState(false);
++  const [newUsername, setNewUsername] = useState('');
++  const [newUserNickname, setNewUserNickname] = useState('');
++  const [newUserPassword, setNewUserPassword] = useState('');
++  const [newUserRole, setNewUserRole] = useState<'admin' | 'user'>('user');
++  const [createLoading, setCreateLoading] = useState(false);
++
++  const fetchUsers = useCallback(async () => {
++    if (!user || user.role !== 'admin') return;
++    setLoading(true);
++    try {
++      const query = new URLSearchParams({ limit: '100' });
++      if (search.trim()) query.set('search', search.trim());
++      const res = await fetch(`/api/admin/users?${query.toString()}`);
++      const data = await res.json();
++      if (data.success) {
++        setUsers(data.users || []);
++        setTotal(data.total || 0);
++      }
++    } catch {
++      toast.error('加载用户列表失败');
++    } finally {
++      setLoading(false);
++    }
++  }, [user, search]);
++
++  useEffect(() => {
++    if (adminModalOpen) {
++      fetchUsers();
++    }
++  }, [adminModalOpen, fetchUsers]);
++
++  if (!user || user.role !== 'admin') return null;
++
++  const handleToggleRole = async (targetUser: SafeUser) => {
++    const nextRole = targetUser.role === 'admin' ? 'user' : 'admin';
++    if (targetUser.id === user.id) {
++      toast.error('不能修改自己的管理员权限');
++      return;
++    }
++
++    try {
++      const res = await fetch(`/api/admin/users/${targetUser.id}`, {
++        method: 'PATCH',
++        headers: { 'Content-Type': 'application/json' },
++        body: JSON.stringify({ role: nextRole }),
++      });
++      const data = await res.json();
++      if (data.success) {
++        toast.success(`已将 ${targetUser.username} 角色更改为 ${nextRole === 'admin' ? '管理员' : '普通用户'}`);
++        fetchUsers();
++      } else {
++        toast.error(data.error || '操作失败');
++      }
++    } catch {
++      toast.error('网络错误');
++    }
++  };
++
++  const handleToggleStatus = async (targetUser: SafeUser) => {
++    if (targetUser.id === user.id) {
++      toast.error('不能禁用自己的管理员账号');
++      return;
++    }
++
++    try {
++      const res = await fetch(`/api/admin/users/${targetUser.id}`, {
++        method: 'PATCH',
++        headers: { 'Content-Type': 'application/json' },
++        body: JSON.stringify({ is_active: !targetUser.is_active }),
++      });
++      const data = await res.json();
++      if (data.success) {
++        toast.success(`已${targetUser.is_active ? '禁用' : '启用'}用户 ${targetUser.username}`);
++        fetchUsers();
++      } else {
++        toast.error(data.error || '操作失败');
++      }
++    } catch {
++      toast.error('网络错误');
++    }
++  };
++
++  const handleDeleteUser = async (targetUser: SafeUser) => {
++    if (targetUser.id === user.id) {
++      toast.error('不能删除自己的管理员账号');
++      return;
++    }
++
++    if (!confirm(`确定要彻底注销并删除用户 [${targetUser.username}] 吗？此操作不可逆！`)) {
++      return;
++    }
++
++    try {
++      const res = await fetch(`/api/admin/users/${targetUser.id}`, {
++        method: 'DELETE',
++      });
++      const data = await res.json();
++      if (data.success) {
++        toast.success(`用户 ${targetUser.username} 已删除`);
++        fetchUsers();
++      } else {
++        toast.error(data.error || '删除失败');
++      }
++    } catch {
++      toast.error('网络错误');
++    }
++  };
++
++  const handleResetPassword = async (e: React.FormEvent) => {
++    e.preventDefault();
++    if (!resettingUser || !newPassword || newPassword.length < 6) {
++      toast.error('新密码至少需要 6 位');
++      return;
++    }
++
++    setResetLoading(true);
++    try {
++      const res = await fetch(`/api/admin/users/${resettingUser.id}`, {
++        method: 'PATCH',
++        headers: { 'Content-Type': 'application/json' },
++        body: JSON.stringify({ password: newPassword }),
++      });
++      const data = await res.json();
++      if (data.success) {
++        toast.success(`已重置用户 ${resettingUser.username} 的密码`);
++        setResettingUser(null);
++        setNewPassword('');
++      } else {
++        toast.error(data.error || '重置失败');
++      }
++    } catch {
++      toast.error('网络错误');
++    } finally {
++      setResetLoading(false);
++    }
++  };
++
++  const handleCreateUser = async (e: React.FormEvent) => {
++    e.preventDefault();
++    if (!newUsername.trim() || !newUserPassword || newUserPassword.length < 6) {
++      toast.error('用户名必填且密码不少于 6 位');
++      return;
++    }
++
++    setCreateLoading(true);
++    try {
++      const res = await fetch('/api/admin/users', {
++        method: 'POST',
++        headers: { 'Content-Type': 'application/json' },
++        body: JSON.stringify({
++          username: newUsername.trim(),
++          password: newUserPassword,
++          nickname: newUserNickname.trim() || undefined,
++          role: newUserRole,
++        }),
++      });
++      const data = await res.json();
++      if (data.success) {
++        toast.success(`用户 ${newUsername} 创建成功`);
++        setCreateUserOpen(false);
++        setNewUsername('');
++        setNewUserNickname('');
++        setNewUserPassword('');
++        fetchUsers();
++      } else {
++        toast.error(data.error || '创建失败');
++      }
++    } catch {
++      toast.error('网络错误');
++    } finally {
++      setCreateLoading(false);
++    }
++  };
++
++  return (
++    <>
++      <Dialog open={adminModalOpen} onOpenChange={setAdminModalOpen}>
++        <DialogContent className="sm:max-w-[780px] max-h-[85vh] flex flex-col p-6 bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 shadow-2xl rounded-2xl">
++          <DialogHeader className="mb-1">
++            <div className="flex items-center justify-between">
++              <div className="flex items-center gap-2">
++                <div className="p-2 rounded-xl bg-amber-500/10 text-amber-600 dark:text-amber-400">
++                  <Shield className="w-5 h-5" />
++                </div>
++                <div>
++                  <DialogTitle className="text-xl font-bold tracking-tight text-zinc-900 dark:text-zinc-100">
++                    全站多用户管理控制台
++                  </DialogTitle>
++                  <DialogDescription className="text-xs text-zinc-500">
++                    查看全站注册用户、分配管理员权限、重置密码或管理账户状态（共 {total} 个用户）。
++                  </DialogDescription>
++                </div>
++              </div>
++              <Button
++                onClick={() => setCreateUserOpen(true)}
++                size="sm"
++                className="rounded-xl h-8.5 text-xs font-semibold gap-1.5 shadow-sm"
++              >
++                <UserPlus className="w-3.5 h-3.5" />
++                添加用户
++              </Button>
++            </div>
++          </DialogHeader>
++
++          {/* Search bar */}
++          <div className="flex items-center gap-2 my-2">
++            <div className="relative flex-1">
++              <Search className="w-3.5 h-3.5 absolute left-3 top-1/2 -translate-y-1/2 text-zinc-400" />
++              <Input
++                placeholder="搜索用户名、昵称或邮箱..."
++                value={search}
++                onChange={(e) => setSearch(e.target.value)}
++                onKeyDown={(e) => e.key === 'Enter' && fetchUsers()}
++                className="pl-8.5 rounded-xl h-9 text-xs"
++              />
++            </div>
++            <Button
++              variant="outline"
++              size="sm"
++              onClick={fetchUsers}
++              disabled={loading}
++              className="rounded-xl h-9 px-3 text-xs"
++            >
++              <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />
++            </Button>
++          </div>
++
++          {/* User Table */}
++          <div className="flex-1 overflow-y-auto border border-zinc-100 dark:border-zinc-800 rounded-xl my-1">
++            <Table>
++              <TableHeader className="bg-zinc-50 dark:bg-zinc-800/50 sticky top-0">
++                <TableRow className="text-[11px]">
++                  <TableHead className="w-[180px]">用户</TableHead>
++                  <TableHead>角色</TableHead>
++                  <TableHead>状态</TableHead>
++                  <TableHead>注册时间</TableHead>
++                  <TableHead className="text-right">操作</TableHead>
++                </TableRow>
++              </TableHeader>
++              <TableBody>
++                {users.length === 0 ? (
++                  <TableRow>
++                    <TableCell colSpan={5} className="text-center py-8 text-xs text-zinc-400">
++                      {loading ? '正在加载用户数据...' : '没有找到相关用户'}
++                    </TableCell>
++                  </TableRow>
++                ) : (
++                  users.map((u) => (
++                    <TableRow key={u.id} className="text-xs hover:bg-zinc-50/50 dark:hover:bg-zinc-800/30">
++                      <TableCell className="font-medium">
++                        <div className="flex items-center gap-2">
++                          <img src={u.avatar || '/avatars/user.png'} alt="" className="w-7 h-7 rounded-full bg-zinc-100 object-cover shrink-0" />
++                          <div className="min-w-0">
++                            <div className="font-semibold text-zinc-800 dark:text-zinc-200 truncate flex items-center gap-1">
++                              {u.nickname || u.username}
++                              {u.id === user.id && (
++                                <span className="text-[9px] bg-primary/10 text-primary px-1 py-0.2 rounded font-normal">您</span>
++                              )}
++                            </div>
++                            <div className="text-[10px] text-zinc-400 font-mono">@{u.username}</div>
++                          </div>
++                        </div>
++                      </TableCell>
++
++                      <TableCell>
++                        {u.role === 'admin' ? (
++                          <span className="inline-flex items-center gap-1 text-[10px] font-semibold bg-amber-500/10 text-amber-600 dark:text-amber-400 px-1.5 py-0.5 rounded-md">
++                            <Shield className="w-2.5 h-2.5" /> 管理员
++                          </span>
++                        ) : (
++                          <span className="inline-flex items-center gap-1 text-[10px] text-zinc-500 bg-zinc-100 dark:bg-zinc-800 px-1.5 py-0.5 rounded-md">
++                            <UserIcon className="w-2.5 h-2.5" /> 普通用户
++                          </span>
++                        )}
++                      </TableCell>
++
++                      <TableCell>
++                        {u.is_active ? (
++                          <span className="text-[10px] font-medium text-emerald-600 dark:text-emerald-400 flex items-center gap-1">
++                            <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" /> 正常
++                          </span>
++                        ) : (
++                          <span className="text-[10px] font-medium text-red-500 flex items-center gap-1">
++                            <span className="w-1.5 h-1.5 rounded-full bg-red-500" /> 已封禁
++                          </span>
++                        )}
++                      </TableCell>
++
++                      <TableCell className="text-[11px] text-zinc-400">
++                        {u.created_at ? new Date(u.created_at).toLocaleDateString() : '-'}
++                      </TableCell>
++
++                      <TableCell className="text-right">
++                        <DropdownMenu>
++                          <DropdownMenuTrigger asChild>
++                            <Button variant="ghost" size="sm" className="h-7 w-7 p-0 rounded-lg">
++                              <MoreHorizontal className="w-3.5 h-3.5" />
++                            </Button>
++                          </DropdownMenuTrigger>
++                          <DropdownMenuContent align="end" className="text-xs w-36 rounded-xl">
++                            <DropdownMenuItem onClick={() => handleToggleRole(u)}>
++                              <Shield className="w-3.5 h-3.5 mr-1.5" />
++                              {u.role === 'admin' ? '降为普通用户' : '设为管理员'}
++                            </DropdownMenuItem>
++
++                            <DropdownMenuItem onClick={() => setResettingUser(u)}>
++                              <KeyRound className="w-3.5 h-3.5 mr-1.5" />
++                              重置密码
++                            </DropdownMenuItem>
++
++                            <DropdownMenuItem onClick={() => handleToggleStatus(u)}>
++                              {u.is_active ? (
++                                <>
++                                  <UserX className="w-3.5 h-3.5 mr-1.5 text-amber-500" />
++                                  封禁账号
++                                </>
++                              ) : (
++                                <>
++                                  <UserCheck className="w-3.5 h-3.5 mr-1.5 text-emerald-500" />
++                                  解封账号
++                                </>
++                              )}
++                            </DropdownMenuItem>
++
++                            <DropdownMenuSeparator />
++
++                            <DropdownMenuItem
++                              onClick={() => handleDeleteUser(u)}
++                              className="text-red-600 dark:text-red-400 focus:text-red-600"
++                            >
++                              <Trash2 className="w-3.5 h-3.5 mr-1.5" />
++                              注销删除
++                            </DropdownMenuItem>
++                          </DropdownMenuContent>
++                        </DropdownMenu>
++                      </TableCell>
++                    </TableRow>
++                  ))
++                )}
++              </TableBody>
++            </Table>
++          </div>
++
++          <div className="flex justify-end pt-2">
++            <Button
++              variant="outline"
++              size="sm"
++              onClick={() => setAdminModalOpen(false)}
++              className="rounded-xl h-8.5 text-xs"
++            >
++              关闭
++            </Button>
++          </div>
++        </DialogContent>
++      </Dialog>
++
++      {/* Admin Reset Password Subdialog */}
++      <Dialog open={!!resettingUser} onOpenChange={(open) => !open && setResettingUser(null)}>
++        <DialogContent className="sm:max-w-[360px] p-5 rounded-2xl">
++          <DialogHeader>
++            <DialogTitle className="text-base font-bold">
++              重置密码: @{resettingUser?.username}
++            </DialogTitle>
++            <DialogDescription className="text-xs">
++              为该用户设置一个新的登录密码。
++            </DialogDescription>
++          </DialogHeader>
++
++          <form onSubmit={handleResetPassword} className="space-y-3 mt-2">
++            <div className="space-y-1.5">
++              <Input
++                type="password"
++                placeholder="输入新密码（不少于 6 位）"
++                value={newPassword}
++                onChange={(e) => setNewPassword(e.target.value)}
++                disabled={resetLoading}
++                className="rounded-xl h-9 text-xs"
++                autoFocus
++              />
++            </div>
++            <div className="flex justify-end gap-2">
++              <Button
++                type="button"
++                variant="outline"
++                size="sm"
++                onClick={() => setResettingUser(null)}
++                className="rounded-xl h-8.5 text-xs"
++              >
++                取消
++              </Button>
++              <Button
++                type="submit"
++                size="sm"
++                disabled={resetLoading}
++                className="rounded-xl h-8.5 text-xs font-semibold"
++              >
++                {resetLoading ? <Loader2 className="w-3 h-3 animate-spin" /> : '确认重置'}
++              </Button>
++            </div>
++          </form>
++        </DialogContent>
++      </Dialog>
++
++      {/* Admin Create User Subdialog */}
++      <Dialog open={createUserOpen} onOpenChange={setCreateUserOpen}>
++        <DialogContent className="sm:max-w-[400px] p-5 rounded-2xl">
++          <DialogHeader>
++            <DialogTitle className="text-base font-bold">手动创建用户</DialogTitle>
++            <DialogDescription className="text-xs">
++              管理员可直接添加新用户并指定初始角色。
++            </DialogDescription>
++          </DialogHeader>
++
++          <form onSubmit={handleCreateUser} className="space-y-3 mt-2">
++            <div className="space-y-1">
++              <Input
++                placeholder="用户名 (必填)"
++                value={newUsername}
++                onChange={(e) => setNewUsername(e.target.value)}
++                disabled={createLoading}
++                className="rounded-xl h-9 text-xs"
++              />
++            </div>
++            <div className="space-y-1">
++              <Input
++                placeholder="显示昵称 (选填)"
++                value={newUserNickname}
++                onChange={(e) => setNewUserNickname(e.target.value)}
++                disabled={createLoading}
++                className="rounded-xl h-9 text-xs"
++              />
++            </div>
++            <div className="space-y-1">
++              <Input
++                type="password"
++                placeholder="初始密码 (至少 6 位)"
++                value={newUserPassword}
++                onChange={(e) => setNewUserPassword(e.target.value)}
++                disabled={createLoading}
++                className="rounded-xl h-9 text-xs"
++              />
++            </div>
++            <div className="space-y-1">
++              <select
++                value={newUserRole}
++                onChange={(e) => setNewUserRole(e.target.value as 'admin' | 'user')}
++                className="w-full h-9 rounded-xl border border-zinc-200 dark:border-zinc-800 bg-transparent px-3 text-xs"
++              >
++                <option value="user">普通用户 (user)</option>
++                <option value="admin">超级管理员 (admin)</option>
++              </select>
++            </div>
++            <div className="flex justify-end gap-2 pt-2">
++              <Button
++                type="button"
++                variant="outline"
++                size="sm"
++                onClick={() => setCreateUserOpen(false)}
++                className="rounded-xl h-8.5 text-xs"
++              >
++                取消
++              </Button>
++              <Button
++                type="submit"
++                size="sm"
++                disabled={createLoading}
++                className="rounded-xl h-8.5 text-xs font-semibold"
++              >
++                {createLoading ? <Loader2 className="w-3 h-3 animate-spin" /> : '立即创建'}
++              </Button>
++            </div>
++          </form>
++        </DialogContent>
++      </Dialog>
++    </>
++  );
++}
+diff --git a/components/auth/auth-dialog.tsx b/components/auth/auth-dialog.tsx
+new file mode 100644
+index 00000000..5fe69b5d
+--- /dev/null
++++ b/components/auth/auth-dialog.tsx
+@@ -0,0 +1,283 @@
++'use client';
++
++import { useState } from 'react';
++import { useAuthStore } from '@/lib/store/auth-store';
++import { useI18n } from '@/lib/hooks/use-i18n';
++import {
++  Dialog,
++  DialogContent,
++  DialogDescription,
++  DialogHeader,
++  DialogTitle,
++} from '@/components/ui/dialog';
++import { Button } from '@/components/ui/button';
++import { Input } from '@/components/ui/input';
++import { Label } from '@/components/ui/label';
++import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
++import { Loader2, LogIn, UserPlus, Sparkles } from 'lucide-react';
++import { toast } from 'sonner';
++
++export function AuthDialog() {
++  const { authModalOpen, authModalTab, setAuthModalOpen, login, register } = useAuthStore();
++  const { t } = useI18n();
++
++  const [activeTab, setActiveTab] = useState<'login' | 'register'>(authModalTab);
++  const [loading, setLoading] = useState(false);
++  const [error, setError] = useState<string | null>(null);
++
++  // Login form state
++  const [loginUsername, setLoginUsername] = useState('');
++  const [loginPassword, setLoginPassword] = useState('');
++
++  // Register form state
++  const [regUsername, setRegUsername] = useState('');
++  const [regNickname, setRegNickname] = useState('');
++  const [regEmail, setRegEmail] = useState('');
++  const [regPassword, setRegPassword] = useState('');
++  const [regConfirmPassword, setRegConfirmPassword] = useState('');
++
++  const handleOpenChange = (open: boolean) => {
++    setAuthModalOpen(open);
++    if (!open) {
++      setError(null);
++    } else {
++      setActiveTab(authModalTab);
++    }
++  };
++
++  const handleLogin = async (e: React.FormEvent) => {
++    e.preventDefault();
++    if (!loginUsername.trim() || !loginPassword) {
++      setError('请输入用户名和密码');
++      return;
++    }
++
++    setError(null);
++    setLoading(true);
++    const res = await login(loginUsername.trim(), loginPassword);
++    setLoading(false);
++
++    if (!res.success) {
++      setError(res.error || '登录失败，请检查账号密码');
++    } else {
++      toast.success('登录成功！');
++    }
++  };
++
++  const handleRegister = async (e: React.FormEvent) => {
++    e.preventDefault();
++    if (!regUsername.trim() || !regPassword) {
++      setError('请输入用户名和密码');
++      return;
++    }
++    if (regPassword !== regConfirmPassword) {
++      setError('两次输入的密码不一致');
++      return;
++    }
++    if (regPassword.length < 6) {
++      setError('密码长度不能少于 6 位');
++      return;
++    }
++
++    setError(null);
++    setLoading(true);
++    const res = await register({
++      username: regUsername.trim(),
++      password: regPassword,
++      nickname: regNickname.trim() || regUsername.trim(),
++      email: regEmail.trim() || undefined,
++    });
++    setLoading(false);
++
++    if (!res.success) {
++      setError(res.error || '注册失败');
++    } else {
++      toast.success('注册成功并已自动登录！');
++    }
++  };
++
++  return (
++    <Dialog open={authModalOpen} onOpenChange={handleOpenChange}>
++      <DialogContent className="sm:max-w-[420px] p-6 bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 shadow-2xl rounded-2xl">
++        <DialogHeader className="mb-2">
++          <div className="flex items-center gap-2 mb-1">
++            <div className="p-2 rounded-xl bg-primary/10 text-primary">
++              <Sparkles className="w-5 h-5" />
++            </div>
++            <DialogTitle className="text-xl font-bold tracking-tight text-zinc-900 dark:text-zinc-100">
++              OpenMAIC 账号中心
++            </DialogTitle>
++          </div>
++          <DialogDescription className="text-xs text-zinc-500 dark:text-zinc-400">
++            登录后可在不同设备间无缝漫游您的课程、智能体会话与定制技能。
++          </DialogDescription>
++        </DialogHeader>
++
++        <Tabs
++          value={activeTab}
++          onValueChange={(v) => {
++            setActiveTab(v as 'login' | 'register');
++            setError(null);
++          }}
++          className="w-full mt-2"
++        >
++          <TabsList className="grid grid-cols-2 w-full mb-4 bg-zinc-100 dark:bg-zinc-800 p-1 rounded-xl">
++            <TabsTrigger value="login" className="rounded-lg font-medium text-xs py-2">
++              <LogIn className="w-3.5 h-3.5 mr-1.5" />
++              账号登录
++            </TabsTrigger>
++            <TabsTrigger value="register" className="rounded-lg font-medium text-xs py-2">
++              <UserPlus className="w-3.5 h-3.5 mr-1.5" />
++              新用户注册
++            </TabsTrigger>
++          </TabsList>
++
++          {error && (
++            <div className="mb-4 p-3 rounded-lg bg-red-50 dark:bg-red-950/50 border border-red-200 dark:border-red-800/50 text-red-600 dark:text-red-400 text-xs font-medium">
++              {error}
++            </div>
++          )}
++
++          <TabsContent value="login">
++            <form onSubmit={handleLogin} className="space-y-3.5">
++              <div className="space-y-1.5">
++                <Label className="text-xs font-medium text-zinc-700 dark:text-zinc-300">
++                  用户名 / 账号
++                </Label>
++                <Input
++                  type="text"
++                  placeholder="例如 admin 或 用户名"
++                  value={loginUsername}
++                  onChange={(e) => setLoginUsername(e.target.value)}
++                  disabled={loading}
++                  className="rounded-xl h-10 text-sm"
++                  autoFocus
++                />
++              </div>
++
++              <div className="space-y-1.5">
++                <Label className="text-xs font-medium text-zinc-700 dark:text-zinc-300">
++                  登录密码
++                </Label>
++                <Input
++                  type="password"
++                  placeholder="••••••••"
++                  value={loginPassword}
++                  onChange={(e) => setLoginPassword(e.target.value)}
++                  disabled={loading}
++                  className="rounded-xl h-10 text-sm"
++                />
++              </div>
++
++              <Button
++                type="submit"
++                disabled={loading}
++                className="w-full rounded-xl h-10 mt-2 font-semibold shadow-md shadow-primary/20"
++              >
++                {loading ? (
++                  <>
++                    <Loader2 className="w-4 h-4 mr-2 animate-spin" />
++                    正在登录...
++                  </>
++                ) : (
++                  '立即登录'
++                )}
++              </Button>
++            </form>
++          </TabsContent>
++
++          <TabsContent value="register">
++            <form onSubmit={handleRegister} className="space-y-3">
++              <div className="space-y-1.5">
++                <Label className="text-xs font-medium text-zinc-700 dark:text-zinc-300">
++                  用户名 <span className="text-red-500">*</span>
++                </Label>
++                <Input
++                  type="text"
++                  placeholder="仅限字母、数字、下划线（不少于3位）"
++                  value={regUsername}
++                  onChange={(e) => setRegUsername(e.target.value)}
++                  disabled={loading}
++                  className="rounded-xl h-9 text-sm"
++                />
++              </div>
++
++              <div className="space-y-1.5">
++                <Label className="text-xs font-medium text-zinc-700 dark:text-zinc-300">
++                  显示昵称（选填）
++                </Label>
++                <Input
++                  type="text"
++                  placeholder="用于课堂与讨论中显示"
++                  value={regNickname}
++                  onChange={(e) => setRegNickname(e.target.value)}
++                  disabled={loading}
++                  className="rounded-xl h-9 text-sm"
++                />
++              </div>
++
++              <div className="space-y-1.5">
++                <Label className="text-xs font-medium text-zinc-700 dark:text-zinc-300">
++                  电子邮箱（选填）
++                </Label>
++                <Input
++                  type="email"
++                  placeholder="you@example.com"
++                  value={regEmail}
++                  onChange={(e) => setRegEmail(e.target.value)}
++                  disabled={loading}
++                  className="rounded-xl h-9 text-sm"
++                />
++              </div>
++
++              <div className="grid grid-cols-2 gap-2">
++                <div className="space-y-1.5">
++                  <Label className="text-xs font-medium text-zinc-700 dark:text-zinc-300">
++                    设置密码 <span className="text-red-500">*</span>
++                  </Label>
++                  <Input
++                    type="password"
++                    placeholder="至少 6 位"
++                    value={regPassword}
++                    onChange={(e) => setRegPassword(e.target.value)}
++                    disabled={loading}
++                    className="rounded-xl h-9 text-sm"
++                  />
++                </div>
++
++                <div className="space-y-1.5">
++                  <Label className="text-xs font-medium text-zinc-700 dark:text-zinc-300">
++                    确认密码 <span className="text-red-500">*</span>
++                  </Label>
++                  <Input
++                    type="password"
++                    placeholder="再次输入密码"
++                    value={regConfirmPassword}
++                    onChange={(e) => setRegConfirmPassword(e.target.value)}
++                    disabled={loading}
++                    className="rounded-xl h-9 text-sm"
++                  />
++                </div>
++              </div>
++
++              <Button
++                type="submit"
++                disabled={loading}
++                className="w-full rounded-xl h-10 mt-2 font-semibold shadow-md shadow-primary/20"
++              >
++                {loading ? (
++                  <>
++                    <Loader2 className="w-4 h-4 mr-2 animate-spin" />
++                    正在创建账号...
++                  </>
++                ) : (
++                  '创建新账号'
++                )}
++              </Button>
++            </form>
++          </TabsContent>
++        </Tabs>
++      </DialogContent>
++    </Dialog>
++  );
++}
+diff --git a/components/auth/user-nav.tsx b/components/auth/user-nav.tsx
+new file mode 100644
+index 00000000..dc5a9ca1
+--- /dev/null
++++ b/components/auth/user-nav.tsx
+@@ -0,0 +1,135 @@
++'use client';
++
++import { useEffect, useState } from 'react';
++import { useAuthStore } from '@/lib/store/auth-store';
++import { Button } from '@/components/ui/button';
++import {
++  DropdownMenu,
++  DropdownMenuContent,
++  DropdownMenuItem,
++  DropdownMenuLabel,
++  DropdownMenuSeparator,
++  DropdownMenuTrigger,
++} from '@/components/ui/dropdown-menu';
++import { LogIn, User as UserIcon, Shield, LogOut, Settings as SettingsIcon } from 'lucide-react';
++import { AuthDialog } from './auth-dialog';
++import { UserProfileDialog } from './user-profile-dialog';
++import { UserManagementDialog } from '../admin/user-management-dialog';
++
++export function UserNav({ onOpenSettings }: { onOpenSettings?: () => void }) {
++  const [mounted, setMounted] = useState(false);
++  const { user, checkAuth, setAuthModalOpen, setProfileModalOpen, setAdminModalOpen, logout } = useAuthStore();
++
++  useEffect(() => {
++    setMounted(true);
++    checkAuth();
++  }, [checkAuth]);
++
++  if (!mounted) {
++    return (
++      <Button
++        variant="outline"
++        size="sm"
++        disabled
++        className="rounded-full h-8 px-3 text-xs font-semibold gap-1.5 opacity-50"
++      >
++        <LogIn className="w-3.5 h-3.5" />
++        登录 / 注册
++      </Button>
++    );
++  }
++
++  return (
++    <>
++      {user ? (
++        <DropdownMenu>
++          <DropdownMenuTrigger asChild>
++            <button className="flex items-center gap-2 p-1.5 pr-2.5 rounded-full hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-all border border-zinc-200/60 dark:border-zinc-700/60 shadow-xs cursor-pointer">
++              <img
++                src={user.avatar || '/avatars/user.png'}
++                alt={user.nickname || user.username}
++                className="w-6 h-6 rounded-full object-cover bg-zinc-100"
++              />
++              <span className="text-xs font-semibold text-zinc-800 dark:text-zinc-200 max-w-[90px] truncate">
++                {user.nickname || user.username}
++              </span>
++            </button>
++          </DropdownMenuTrigger>
++
++          <DropdownMenuContent align="end" className="w-52 p-1.5 rounded-2xl shadow-xl border border-zinc-200 dark:border-zinc-800 text-xs">
++            <DropdownMenuLabel className="p-2 font-normal">
++              <div className="flex items-center gap-2">
++                <img
++                  src={user.avatar || '/avatars/user.png'}
++                  alt=""
++                  className="w-8 h-8 rounded-full object-cover bg-zinc-100 shrink-0"
++                />
++                <div className="min-w-0 flex-1">
++                  <div className="font-bold text-zinc-900 dark:text-zinc-100 truncate text-xs">
++                    {user.nickname || user.username}
++                  </div>
++                  <div className="text-[10px] text-zinc-400 font-mono truncate">
++                    @{user.username}
++                  </div>
++                </div>
++              </div>
++              {user.role === 'admin' && (
++                <div className="mt-2 text-[10px] inline-flex items-center gap-1 font-semibold text-amber-600 dark:text-amber-400 bg-amber-500/10 px-2 py-0.5 rounded-md">
++                  <Shield className="w-2.5 h-2.5" /> 超级管理员
++                </div>
++              )}
++            </DropdownMenuLabel>
++
++            <DropdownMenuSeparator className="my-1" />
++
++            <DropdownMenuItem onClick={() => setProfileModalOpen(true)} className="rounded-xl py-2 cursor-pointer">
++              <UserIcon className="w-3.5 h-3.5 mr-2 text-zinc-500" />
++              个人资料与密码
++            </DropdownMenuItem>
++
++            {user.role === 'admin' && (
++              <>
++                <DropdownMenuItem onClick={() => setAdminModalOpen(true)} className="rounded-xl py-2 cursor-pointer font-medium text-amber-600 dark:text-amber-400 focus:text-amber-600">
++                  <Shield className="w-3.5 h-3.5 mr-2" />
++                  全站多用户管理
++                </DropdownMenuItem>
++
++                {onOpenSettings && (
++                  <DropdownMenuItem onClick={onOpenSettings} className="rounded-xl py-2 cursor-pointer">
++                    <SettingsIcon className="w-3.5 h-3.5 mr-2 text-zinc-500" />
++                    系统服务与模型设置
++                  </DropdownMenuItem>
++                )}
++              </>
++            )}
++
++            <DropdownMenuSeparator className="my-1" />
++
++            <DropdownMenuItem
++              onClick={() => logout()}
++              className="rounded-xl py-2 cursor-pointer text-red-600 dark:text-red-400 focus:text-red-600 focus:bg-red-50 dark:focus:bg-red-950/40"
++            >
++              <LogOut className="w-3.5 h-3.5 mr-2" />
++              退出登录
++            </DropdownMenuItem>
++          </DropdownMenuContent>
++        </DropdownMenu>
++      ) : (
++        <Button
++          variant="outline"
++          size="sm"
++          onClick={() => setAuthModalOpen(true, 'login')}
++          className="rounded-full h-8 px-3 text-xs font-semibold gap-1.5 shadow-xs border-zinc-200 dark:border-zinc-700 hover:border-primary/50 hover:text-primary transition-all"
++        >
++          <LogIn className="w-3.5 h-3.5" />
++          登录 / 注册
++        </Button>
++      )}
++
++      {/* Global Modals */}
++      <AuthDialog />
++      <UserProfileDialog />
++      <UserManagementDialog />
++    </>
++  );
++}
+diff --git a/components/auth/user-profile-dialog.tsx b/components/auth/user-profile-dialog.tsx
+new file mode 100644
+index 00000000..5239f696
+--- /dev/null
++++ b/components/auth/user-profile-dialog.tsx
+@@ -0,0 +1,228 @@
++'use client';
++
++import { useState, useEffect } from 'react';
++import { useAuthStore } from '@/lib/store/auth-store';
++import { AVATAR_OPTIONS } from '@/lib/store/user-profile';
++import {
++  Dialog,
++  DialogContent,
++  DialogDescription,
++  DialogHeader,
++  DialogTitle,
++} from '@/components/ui/dialog';
++import { Button } from '@/components/ui/button';
++import { Input } from '@/components/ui/input';
++import { Label } from '@/components/ui/label';
++import { Loader2, ShieldCheck, User as UserIcon, KeyRound } from 'lucide-react';
++import { toast } from 'sonner';
++
++export function UserProfileDialog() {
++  const { user, profileModalOpen, setProfileModalOpen, updateProfile } = useAuthStore();
++
++  const [nickname, setNickname] = useState('');
++  const [avatar, setAvatar] = useState('/avatars/user.png');
++  const [bio, setBio] = useState('');
++  const [currentPassword, setCurrentPassword] = useState('');
++  const [newPassword, setNewPassword] = useState('');
++  const [confirmPassword, setConfirmPassword] = useState('');
++  
++  const [loading, setLoading] = useState(false);
++  const [error, setError] = useState<string | null>(null);
++
++  useEffect(() => {
++    if (user) {
++      setNickname(user.nickname || '');
++      setAvatar(user.avatar || '/avatars/user.png');
++      setBio(user.bio || '');
++    }
++  }, [user, profileModalOpen]);
++
++  if (!user) return null;
++
++  const handleSubmit = async (e: React.FormEvent) => {
++    e.preventDefault();
++    setError(null);
++
++    if (newPassword) {
++      if (!currentPassword) {
++        setError('修改密码时必须输入当前密码');
++        return;
++      }
++      if (newPassword.length < 6) {
++        setError('新密码长度不能少于 6 位');
++        return;
++      }
++      if (newPassword !== confirmPassword) {
++        setError('两次输入的新密码不一致');
++        return;
++      }
++    }
++
++    setLoading(true);
++    const res = await updateProfile({
++      nickname: nickname.trim(),
++      avatar,
++      bio: bio.trim(),
++      currentPassword: currentPassword || undefined,
++      newPassword: newPassword || undefined,
++    });
++    setLoading(false);
++
++    if (!res.success) {
++      setError(res.error || '更新失败');
++    } else {
++      toast.success('个人资料已更新');
++      setCurrentPassword('');
++      setNewPassword('');
++      setConfirmPassword('');
++      setProfileModalOpen(false);
++    }
++  };
++
++  return (
++    <Dialog open={profileModalOpen} onOpenChange={setProfileModalOpen}>
++      <DialogContent className="sm:max-w-[480px] p-6 bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 shadow-2xl rounded-2xl">
++        <DialogHeader className="mb-2">
++          <div className="flex items-center gap-2">
++            <div className="p-2 rounded-xl bg-primary/10 text-primary">
++              <UserIcon className="w-5 h-5" />
++            </div>
++            <DialogTitle className="text-xl font-bold tracking-tight text-zinc-900 dark:text-zinc-100">
++              个人资料与账户安全
++            </DialogTitle>
++          </div>
++          <DialogDescription className="text-xs text-zinc-500 dark:text-zinc-400">
++            用户名: <span className="font-mono font-medium text-zinc-700 dark:text-zinc-300">{user.username}</span>
++            {user.role === 'admin' && (
++              <span className="ml-2 inline-flex items-center gap-1 text-[10px] bg-amber-500/10 text-amber-600 dark:text-amber-400 px-1.5 py-0.5 rounded-md font-semibold">
++                <ShieldCheck className="w-3 h-3" /> 超级管理员
++              </span>
++            )}
++          </DialogDescription>
++        </DialogHeader>
++
++        {error && (
++          <div className="mb-3 p-3 rounded-lg bg-red-50 dark:bg-red-950/50 border border-red-200 dark:border-red-800/50 text-red-600 dark:text-red-400 text-xs font-medium">
++            {error}
++          </div>
++        )}
++
++        <form onSubmit={handleSubmit} className="space-y-4">
++          {/* Avatar picker */}
++          <div className="space-y-2">
++            <Label className="text-xs font-medium text-zinc-700 dark:text-zinc-300">
++              选择头像
++            </Label>
++            <div className="flex items-center gap-2.5 overflow-x-auto pb-1">
++              {AVATAR_OPTIONS.map((av) => (
++                <button
++                  key={av}
++                  type="button"
++                  onClick={() => setAvatar(av)}
++                  className={`relative p-0.5 rounded-full transition-all shrink-0 ${
++                    avatar === av
++                      ? 'ring-2 ring-primary ring-offset-2 scale-105 shadow-md'
++                      : 'opacity-70 hover:opacity-100 hover:scale-100'
++                  }`}
++                >
++                  <img src={av} alt="Avatar" className="w-10 h-10 rounded-full object-cover bg-zinc-100 dark:bg-zinc-800" />
++                </button>
++              ))}
++            </div>
++          </div>
++
++          <div className="space-y-1.5">
++            <Label className="text-xs font-medium text-zinc-700 dark:text-zinc-300">
++              显示昵称
++            </Label>
++            <Input
++              type="text"
++              value={nickname}
++              onChange={(e) => setNickname(e.target.value)}
++              disabled={loading}
++              className="rounded-xl h-9 text-sm"
++            />
++          </div>
++
++          {/* Password Section */}
++          <div className="pt-2 border-t border-zinc-100 dark:border-zinc-800 space-y-3">
++            <div className="flex items-center gap-1.5 text-xs font-semibold text-zinc-700 dark:text-zinc-300">
++              <KeyRound className="w-3.5 h-3.5" />
++              修改密码（不填则保持不变）
++            </div>
++
++            <div className="space-y-1.5">
++              <Label className="text-[11px] font-medium text-zinc-500">
++                当前密码
++              </Label>
++              <Input
++                type="password"
++                placeholder="若要改密码请输入当前密码"
++                value={currentPassword}
++                onChange={(e) => setCurrentPassword(e.target.value)}
++                disabled={loading}
++                className="rounded-xl h-8.5 text-xs"
++              />
++            </div>
++
++            <div className="grid grid-cols-2 gap-2">
++              <div className="space-y-1.5">
++                <Label className="text-[11px] font-medium text-zinc-500">
++                  新密码
++                </Label>
++                <Input
++                  type="password"
++                  placeholder="至少 6 位"
++                  value={newPassword}
++                  onChange={(e) => setNewPassword(e.target.value)}
++                  disabled={loading}
++                  className="rounded-xl h-8.5 text-xs"
++                />
++              </div>
++
++              <div className="space-y-1.5">
++                <Label className="text-[11px] font-medium text-zinc-500">
++                  确认新密码
++                </Label>
++                <Input
++                  type="password"
++                  placeholder="再次输入"
++                  value={confirmPassword}
++                  onChange={(e) => setConfirmPassword(e.target.value)}
++                  disabled={loading}
++                  className="rounded-xl h-8.5 text-xs"
++                />
++              </div>
++            </div>
++          </div>
++
++          <div className="flex justify-end gap-2 pt-2">
++            <Button
++              type="button"
++              variant="outline"
++              onClick={() => setProfileModalOpen(false)}
++              disabled={loading}
++              className="rounded-xl h-9 text-xs"
++            >
++              取消
++            </Button>
++            <Button
++              type="submit"
++              disabled={loading}
++              className="rounded-xl h-9 text-xs font-semibold shadow-md shadow-primary/20"
++            >
++              {loading ? (
++                <>
++                  <Loader2 className="w-3.5 h-3.5 mr-1.5 animate-spin" />
++                  保存中...
++                </>
++              ) : (
++                '保存修改'
++              )}
++            </Button>
++          </div>
++        </form>
++      </DialogContent>
++    </Dialog>
++  );
++}
+diff --git a/components/settings/index.tsx b/components/settings/index.tsx
+index ab052e6b..a9db1514 100644
+--- a/components/settings/index.tsx
++++ b/components/settings/index.tsx
+@@ -32,6 +32,7 @@ import {
+ } from 'lucide-react';
+ import { useI18n } from '@/lib/hooks/use-i18n';
+ import { useSettingsStore } from '@/lib/store/settings';
++import { useAuthStore } from '@/lib/store/auth-store';
+ import { toast } from 'sonner';
+ import { type ProviderId } from '@/lib/ai/providers';
+ import { PROVIDERS, MONO_LOGO_PROVIDERS } from '@/lib/ai/providers';
+@@ -203,6 +204,7 @@ interface SettingsDialogProps {
+ 
+ export function SettingsDialog({ open, onOpenChange, initialSection }: SettingsDialogProps) {
+   const { t } = useI18n();
++  const isAdmin = useAuthStore((state) => state.user?.role === 'admin');
+ 
+   // Get settings from store
+   const providerId = useSettingsStore((state) => state.providerId);
+@@ -731,6 +733,10 @@ export function SettingsDialog({ open, onOpenChange, initialSection }: SettingsD
+     }
+   };
+ 
++  if (!isAdmin) {
++    return null;
++  }
++
+   return (
+     <Dialog open={open} onOpenChange={onOpenChange}>
+       <DialogContent className="h-[85vh] p-0 gap-0 block" showCloseButton={false}>
+diff --git a/components/stage/header-controls.tsx b/components/stage/header-controls.tsx
+index ae21bfe6..0f9ad784 100644
+--- a/components/stage/header-controls.tsx
++++ b/components/stage/header-controls.tsx
+@@ -37,6 +37,8 @@ import {
+   DropdownMenuSubTrigger,
+   DropdownMenuTrigger,
+ } from '@/components/ui/dropdown-menu';
++import { UserNav } from '../auth/user-nav';
++import { useAuthStore } from '@/lib/store/auth-store';
+ import { cn } from '@/lib/utils';
+ import type { StageMode } from '@/lib/types/stage';
+ 
+@@ -82,6 +84,7 @@ export function HeaderControls({
+   const { theme, setTheme } = useTheme();
+   const [settingsOpen, setSettingsOpen] = useState(false);
+   const [videoDialogOpen, setVideoDialogOpen] = useState(false);
++  const isAdmin = useAuthStore((s) => s.user?.role === 'admin');
+ 
+   // Export plumbing — uses the stage / media task stores to check
+   // readiness, then hands off to the export hooks. Available in both
+@@ -200,14 +203,20 @@ export function HeaderControls({
+           </DropdownMenuContent>
+         </DropdownMenu>
+ 
+-        {/* Settings */}
+-        <button
+-          onClick={() => setSettingsOpen(true)}
+-          className="p-2 rounded-full text-gray-400 dark:text-gray-500 hover:bg-white dark:hover:bg-gray-700 hover:text-gray-800 dark:hover:text-gray-200 hover:shadow-sm transition-all group"
+-          aria-label={t('settings.title')}
+-        >
+-          <Settings className="w-4 h-4 group-hover:rotate-90 transition-transform duration-500" />
+-        </button>
++        {/* Settings (Admin Only) */}
++        {isAdmin && (
++          <button
++            onClick={() => setSettingsOpen(true)}
++            className="p-2 rounded-full text-gray-400 dark:text-gray-500 hover:bg-white dark:hover:bg-gray-700 hover:text-gray-800 dark:hover:text-gray-200 hover:shadow-sm transition-all group cursor-pointer"
++            aria-label={t('settings.title')}
++            title="系统设置 (管理员专属)"
++          >
++            <Settings className="w-4 h-4 group-hover:rotate-90 transition-transform duration-500" />
++          </button>
++        )}
++
++        {/* User Account / Navigation */}
++        <UserNav onOpenSettings={() => setSettingsOpen(true)} />
+       </div>
+ 
+       {/* Pro Switch — toggle property: on/off both clickable, not a
+@@ -390,7 +399,7 @@ export function HeaderControls({
+         </DropdownMenuContent>
+       </DropdownMenu>
+ 
+-      <SettingsDialog open={settingsOpen} onOpenChange={setSettingsOpen} />
++      {isAdmin && <SettingsDialog open={settingsOpen} onOpenChange={setSettingsOpen} />}
+       {videoExportEnabled && (
+         <VideoExportDialog open={videoDialogOpen} onOpenChange={setVideoDialogOpen} />
+       )}
+diff --git a/components/ui/table.tsx b/components/ui/table.tsx
+new file mode 100644
+index 00000000..ad2c5414
+--- /dev/null
++++ b/components/ui/table.tsx
+@@ -0,0 +1,110 @@
++import * as React from "react"
++import { cn } from "@/lib/utils"
++
++function Table({ className, ...props }: React.ComponentProps<"table">) {
++  return (
++    <div className="relative w-full overflow-auto">
++      <table
++        data-slot="table"
++        className={cn("w-full caption-bottom text-sm", className)}
++        {...props}
++      />
++    </div>
++  )
++}
++
++function TableHeader({ className, ...props }: React.ComponentProps<"thead">) {
++  return (
++    <thead
++      data-slot="table-header"
++      className={cn("[&_tr]:border-b", className)}
++      {...props}
++    />
++  )
++}
++
++function TableBody({ className, ...props }: React.ComponentProps<"tbody">) {
++  return (
++    <tbody
++      data-slot="table-body"
++      className={cn("[&_tr:last-child]:border-0", className)}
++      {...props}
++    />
++  )
++}
++
++function TableFooter({ className, ...props }: React.ComponentProps<"tfoot">) {
++  return (
++    <tfoot
++      data-slot="table-footer"
++      className={cn(
++        "bg-muted/50 border-t font-medium [&>tr]:last:border-b-0",
++        className
++      )}
++      {...props}
++    />
++  )
++}
++
++function TableRow({ className, ...props }: React.ComponentProps<"tr">) {
++  return (
++    <tr
++      data-slot="table-row"
++      className={cn(
++        "hover:bg-muted/50 data-[state=selected]:bg-muted border-b transition-colors",
++        className
++      )}
++      {...props}
++    />
++  )
++}
++
++function TableHead({ className, ...props }: React.ComponentProps<"th">) {
++  return (
++    <th
++      data-slot="table-head"
++      className={cn(
++        "text-muted-foreground h-10 px-2 text-left align-middle font-medium [&:has([role=checkbox])]:pr-0 [&>[role=checkbox]]:translate-y-[2px]",
++        className
++      )}
++      {...props}
++    />
++  )
++}
++
++function TableCell({ className, ...props }: React.ComponentProps<"td">) {
++  return (
++    <td
++      data-slot="table-cell"
++      className={cn(
++        "p-2 align-middle [&:has([role=checkbox])]:pr-0 [&>[role=checkbox]]:translate-y-[2px]",
++        className
++      )}
++      {...props}
++    />
++  )
++}
++
++function TableCaption({
++  className,
++  ...props
++}: React.ComponentProps<"caption">) {
++  return (
++    <caption
++      data-slot="table-caption"
++      className={cn("text-muted-foreground mt-4 text-sm", className)}
++      {...props}
++    />
++  )
++}
++
++export {
++  Table,
++  TableHeader,
++  TableBody,
++  TableFooter,
++  TableHead,
++  TableRow,
++  TableCell,
++  TableCaption,
++}
+diff --git a/ecosystem.config.cjs b/ecosystem.config.cjs
+new file mode 100644
+index 00000000..90d79220
+--- /dev/null
++++ b/ecosystem.config.cjs
+@@ -0,0 +1,18 @@
++module.exports = {
++  apps: [
++    {
++      name: 'openmaic',
++      script: 'node_modules/next/dist/bin/next',
++      args: 'start -H 0.0.0.0 -p 3000',
++      cwd: '/home/helin/projects/OpenMAIC',
++      env: {
++        NODE_ENV: 'production',
++        PORT: '3000',
++        HOSTNAME: '0.0.0.0',
++      },
++      max_memory_restart: '2G',
++      autorestart: true,
++      restart_delay: 2000,
++    },
++  ],
++};
+diff --git a/lib/server/agent-runtime/owner.ts b/lib/server/agent-runtime/owner.ts
+index 704baf71..c752f2fe 100644
+--- a/lib/server/agent-runtime/owner.ts
++++ b/lib/server/agent-runtime/owner.ts
+@@ -49,6 +49,8 @@ function anonymousCookieHeader(id: string): string {
+  * call sites, or sessions created under authenticated identities would be
+  * unreachable by their own owner.
+  */
++import { getSessionPayload } from '@/lib/server/auth/session';
++
+ export function resolveRequestOwnerId(
+   req: Pick<Request, 'headers'>,
+   responseHeaders: Headers,
+@@ -56,6 +58,16 @@ export function resolveRequestOwnerId(
+ ): string {
+   if (authenticatedOwnerId) return authenticatedOwnerId;
+ 
++  // Check if caller has an active authenticated user session
++  try {
++    const session = getSessionPayload(req);
++    if (session && session.userId) {
++      return `user:${session.userId}`;
++    }
++  } catch {
++    // Graceful fallback to anonymous cookie on session parsing error
++  }
++
+   const existingId = readCookie(req.headers, ANONYMOUS_COOKIE);
+   if (existingId && UUID_V4.test(existingId)) return `anon:${existingId}`;
+ 
+diff --git a/lib/server/auth/crypto.ts b/lib/server/auth/crypto.ts
+new file mode 100644
+index 00000000..24044056
+--- /dev/null
++++ b/lib/server/auth/crypto.ts
+@@ -0,0 +1,89 @@
++import { scrypt, randomBytes, timingSafeEqual, createHmac } from 'node:crypto';
++import { promisify } from 'node:util';
++import type { AuthSessionPayload } from './types';
++
++const scryptAsync = promisify(scrypt);
++
++const AUTH_SECRET = process.env.AUTH_SECRET || process.env.ACCESS_CODE || 'openmaic-super-secret-auth-key-2026';
++const SESSION_TTL_SECONDS = 30 * 24 * 60 * 60; // 30 days
++
++export async function hashPassword(password: string): Promise<{ hash: string; salt: string }> {
++  const salt = randomBytes(16).toString('hex');
++  const derivedKey = (await scryptAsync(password, salt, 64)) as Buffer;
++  return {
++    hash: derivedKey.toString('hex'),
++    salt,
++  };
++}
++
++export async function verifyPassword(password: string, hash: string, salt: string): Promise<boolean> {
++  try {
++    const derivedKey = (await scryptAsync(password, salt, 64)) as Buffer;
++    const storedKey = Buffer.from(hash, 'hex');
++    if (derivedKey.length !== storedKey.length) return false;
++    return timingSafeEqual(derivedKey, storedKey);
++  } catch {
++    return false;
++  }
++}
++
++function base64UrlEncode(str: string): string {
++  return Buffer.from(str)
++    .toString('base64')
++    .replace(/=/g, '')
++    .replace(/\+/g, '-')
++    .replace(/\//g, '_');
++}
++
++function base64UrlDecode(str: string): string {
++  let base64 = str.replace(/-/g, '+').replace(/_/g, '/');
++  while (base64.length % 4) {
++    base64 += '=';
++  }
++  return Buffer.from(base64, 'base64').toString('utf8');
++}
++
++export function signToken(payload: Omit<AuthSessionPayload, 'exp'>, expiresInSeconds = SESSION_TTL_SECONDS): string {
++  const exp = Math.floor(Date.now() / 1000) + expiresInSeconds;
++  const fullPayload: AuthSessionPayload = { ...payload, exp };
++  
++  const header = { alg: 'HS256', typ: 'JWT' };
++  const encodedHeader = base64UrlEncode(JSON.stringify(header));
++  const encodedPayload = base64UrlEncode(JSON.stringify(fullPayload));
++  
++  const signature = createHmac('sha256', AUTH_SECRET)
++    .update(`${encodedHeader}.${encodedPayload}`)
++    .digest('base64')
++    .replace(/=/g, '')
++    .replace(/\+/g, '-')
++    .replace(/\//g, '_');
++    
++  return `${encodedHeader}.${encodedPayload}.${signature}`;
++}
++
++export function verifyToken(token: string): AuthSessionPayload | null {
++  if (!token || typeof token !== 'string') return null;
++  const parts = token.split('.');
++  if (parts.length !== 3) return null;
++  
++  const [encodedHeader, encodedPayload, signature] = parts;
++  
++  const expectedSignature = createHmac('sha256', AUTH_SECRET)
++    .update(`${encodedHeader}.${encodedPayload}`)
++    .digest('base64')
++    .replace(/=/g, '')
++    .replace(/\+/g, '-')
++    .replace(/\//g, '_');
++    
++  if (signature !== expectedSignature) return null;
++  
++  try {
++    const payload = JSON.parse(base64UrlDecode(encodedPayload)) as AuthSessionPayload;
++    if (payload.exp && payload.exp < Math.floor(Date.now() / 1000)) {
++      return null; // expired
++    }
++    return payload;
++  } catch {
++    return null;
++  }
++}
+diff --git a/lib/server/auth/db.ts b/lib/server/auth/db.ts
+new file mode 100644
+index 00000000..82beacbc
+--- /dev/null
++++ b/lib/server/auth/db.ts
+@@ -0,0 +1,229 @@
++import { Pool } from 'pg';
++import { nanoid } from 'nanoid';
++import { hashPassword } from './crypto';
++import type { User, SafeUser, UserRole } from './types';
++
++let authPool: Pool | null = null;
++let schemaInitPromise: Promise<void> | null = null;
++
++function getPool(): Pool {
++  if (!authPool) {
++    const connectionString = process.env.DATABASE_URL;
++    if (!connectionString) {
++      throw new Error('DATABASE_URL is not configured');
++    }
++    authPool = new Pool({ connectionString });
++  }
++  return authPool;
++}
++
++export function toSafeUser(user: User): SafeUser {
++  const { password_hash, salt, ...safe } = user;
++  return safe;
++}
++
++export async function ensureUserSchema(): Promise<void> {
++  if (schemaInitPromise) return schemaInitPromise;
++
++  schemaInitPromise = (async () => {
++    const pool = getPool();
++    await pool.query(`
++      CREATE TABLE IF NOT EXISTS users (
++        id TEXT PRIMARY KEY,
++        username TEXT UNIQUE NOT NULL,
++        email TEXT UNIQUE,
++        password_hash TEXT NOT NULL,
++        salt TEXT NOT NULL,
++        nickname TEXT NOT NULL,
++        avatar TEXT NOT NULL DEFAULT '/avatars/user.png',
++        bio TEXT,
++        role TEXT NOT NULL DEFAULT 'user',
++        is_active BOOLEAN NOT NULL DEFAULT TRUE,
++        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
++        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
++      );
++      CREATE INDEX IF NOT EXISTS idx_users_username ON users(username);
++      CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
++    `);
++
++    // Ensure default initial admin exists
++    const adminCheck = await pool.query('SELECT id FROM users WHERE role = $1 LIMIT 1', ['admin']);
++    if (adminCheck.rows.length === 0) {
++      const initialAdminUsername = process.env.INITIAL_ADMIN_USERNAME || 'admin';
++      const initialAdminPassword = process.env.INITIAL_ADMIN_PASSWORD || 'admin123456';
++      const { hash, salt } = await hashPassword(initialAdminPassword);
++      const adminId = `usr_${nanoid(12)}`;
++
++      await pool.query(
++        `INSERT INTO users (id, username, password_hash, salt, nickname, role, is_active)
++         VALUES ($1, $2, $3, $4, $5, 'admin', TRUE)
++         ON CONFLICT (username) DO NOTHING`,
++        [adminId, initialAdminUsername, hash, salt, 'Administrator']
++      );
++      console.log(`[Auth] Created default administrator: ${initialAdminUsername}`);
++    }
++  })();
++
++  return schemaInitPromise;
++}
++
++export async function createUser(data: {
++  username: string;
++  password: string;
++  email?: string | null;
++  nickname?: string;
++  avatar?: string;
++  role?: UserRole;
++}): Promise<SafeUser> {
++  await ensureUserSchema();
++  const pool = getPool();
++
++  const existing = await pool.query(
++    'SELECT id FROM users WHERE username = $1 OR (email IS NOT NULL AND email = $2)',
++    [data.username.toLowerCase(), data.email || null]
++  );
++  if (existing.rows.length > 0) {
++    throw new Error('Username or email already exists');
++  }
++
++  const { hash, salt } = await hashPassword(data.password);
++  const id = `usr_${nanoid(12)}`;
++  const nickname = data.nickname || data.username;
++  const avatar = data.avatar || '/avatars/user.png';
++  const role = data.role || 'user';
++
++  const res = await pool.query<User>(
++    `INSERT INTO users (id, username, email, password_hash, salt, nickname, avatar, role, is_active)
++     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, TRUE)
++     RETURNING *`,
++    [id, data.username.toLowerCase(), data.email || null, hash, salt, nickname, avatar, role]
++  );
++
++  return toSafeUser(res.rows[0]);
++}
++
++export async function findUserByUsername(username: string): Promise<User | null> {
++  await ensureUserSchema();
++  const pool = getPool();
++  const res = await pool.query<User>(
++    'SELECT * FROM users WHERE username = $1 LIMIT 1',
++    [username.toLowerCase()]
++  );
++  return res.rows[0] || null;
++}
++
++export async function findUserById(id: string): Promise<User | null> {
++  await ensureUserSchema();
++  const pool = getPool();
++  const res = await pool.query<User>('SELECT * FROM users WHERE id = $1 LIMIT 1', [id]);
++  return res.rows[0] || null;
++}
++
++export async function updateUser(
++  id: string,
++  updates: Partial<{
++    nickname: string;
++    avatar: string;
++    bio: string | null;
++    email: string | null;
++    password?: string;
++    role: UserRole;
++    is_active: boolean;
++  }>
++): Promise<SafeUser | null> {
++  await ensureUserSchema();
++  const pool = getPool();
++
++  const setClauses: string[] = ['updated_at = NOW()'];
++  const values: unknown[] = [id];
++  let paramIndex = 2;
++
++  if (updates.nickname !== undefined) {
++    setClauses.push(`nickname = $${paramIndex++}`);
++    values.push(updates.nickname);
++  }
++  if (updates.avatar !== undefined) {
++    setClauses.push(`avatar = $${paramIndex++}`);
++    values.push(updates.avatar);
++  }
++  if (updates.bio !== undefined) {
++    setClauses.push(`bio = $${paramIndex++}`);
++    values.push(updates.bio);
++  }
++  if (updates.email !== undefined) {
++    setClauses.push(`email = $${paramIndex++}`);
++    values.push(updates.email);
++  }
++  if (updates.role !== undefined) {
++    setClauses.push(`role = $${paramIndex++}`);
++    values.push(updates.role);
++  }
++  if (updates.is_active !== undefined) {
++    setClauses.push(`is_active = $${paramIndex++}`);
++    values.push(updates.is_active);
++  }
++  if (updates.password) {
++    const { hash, salt } = await hashPassword(updates.password);
++    setClauses.push(`password_hash = $${paramIndex++}`);
++    values.push(hash);
++    setClauses.push(`salt = $${paramIndex++}`);
++    values.push(salt);
++  }
++
++  const query = `
++    UPDATE users
++    SET ${setClauses.join(', ')}
++    WHERE id = $1
++    RETURNING *
++  `;
++
++  const res = await pool.query<User>(query, values);
++  return res.rows[0] ? toSafeUser(res.rows[0]) : null;
++}
++
++export async function deleteUser(id: string): Promise<boolean> {
++  await ensureUserSchema();
++  const pool = getPool();
++  const res = await pool.query('DELETE FROM users WHERE id = $1', [id]);
++  return (res.rowCount ?? 0) > 0;
++}
++
++export async function listUsers(options?: {
++  search?: string;
++  limit?: number;
++  offset?: number;
++}): Promise<{ users: SafeUser[]; total: number }> {
++  await ensureUserSchema();
++  const pool = getPool();
++  const limit = options?.limit || 50;
++  const offset = options?.offset || 0;
++  const search = options?.search?.trim();
++
++  let whereClause = '';
++  const values: unknown[] = [];
++
++  if (search) {
++    whereClause = 'WHERE username ILIKE $1 OR nickname ILIKE $1 OR email ILIKE $1';
++    values.push(`%${search}%`);
++  }
++
++  const countRes = await pool.query<{ count: string }>(
++    `SELECT COUNT(*) as count FROM users ${whereClause}`,
++    values
++  );
++  const total = parseInt(countRes.rows[0].count, 10);
++
++  const queryValues = [...values, limit, offset];
++  const limitParam = values.length + 1;
++  const offsetParam = values.length + 2;
++
++  const res = await pool.query<User>(
++    `SELECT * FROM users ${whereClause} ORDER BY created_at DESC LIMIT $${limitParam} OFFSET $${offsetParam}`,
++    queryValues
++  );
++
++  return {
++    users: res.rows.map(toSafeUser),
++    total,
++  };
++}
+diff --git a/lib/server/auth/session.ts b/lib/server/auth/session.ts
+new file mode 100644
+index 00000000..0d877784
+--- /dev/null
++++ b/lib/server/auth/session.ts
+@@ -0,0 +1,60 @@
++import { verifyToken, signToken } from './crypto';
++import type { AuthSessionPayload, SafeUser } from './types';
++import { findUserById, toSafeUser } from './db';
++
++export const SESSION_COOKIE_NAME = 'openmaic_session';
++const SESSION_MAX_AGE_SECONDS = 30 * 24 * 60 * 60; // 30 days
++
++export function readCookieFromHeaders(headers: Headers, name: string): string | undefined {
++  const encoded = headers.get('cookie');
++  if (!encoded) return undefined;
++  for (const item of encoded.split(';')) {
++    const separator = item.indexOf('=');
++    if (separator < 0 || item.slice(0, separator).trim() !== name) continue;
++    try {
++      return decodeURIComponent(item.slice(separator + 1).trim());
++    } catch {
++      return undefined;
++    }
++  }
++  return undefined;
++}
++
++export function buildSessionCookieHeader(token: string): string {
++  const isSecure = process.env.COOKIE_SECURE === 'true';
++  const secure = isSecure ? '; Secure' : '';
++  return (
++    `${SESSION_COOKIE_NAME}=${encodeURIComponent(token)}; ` +
++    `Path=/; HttpOnly; SameSite=Lax; Max-Age=${SESSION_MAX_AGE_SECONDS}${secure}`
++  );
++}
++
++export function buildClearSessionCookieHeader(): string {
++  return `${SESSION_COOKIE_NAME}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0`;
++}
++
++export function getSessionPayload(req: Pick<Request, 'headers'>): AuthSessionPayload | null {
++  const token = readCookieFromHeaders(req.headers, SESSION_COOKIE_NAME);
++  if (!token) return null;
++  return verifyToken(token);
++}
++
++export async function getCurrentUser(req: Pick<Request, 'headers'>): Promise<SafeUser | null> {
++  const payload = getSessionPayload(req);
++  if (!payload || !payload.userId) return null;
++  
++  const user = await findUserById(payload.userId);
++  if (!user || !user.is_active) return null;
++  
++  return toSafeUser(user);
++}
++
++export function createSessionToken(user: SafeUser): string {
++  return signToken({
++    userId: user.id,
++    username: user.username,
++    role: user.role,
++    nickname: user.nickname,
++    avatar: user.avatar,
++  });
++}
+diff --git a/lib/server/auth/types.ts b/lib/server/auth/types.ts
+new file mode 100644
+index 00000000..e347982e
+--- /dev/null
++++ b/lib/server/auth/types.ts
+@@ -0,0 +1,27 @@
++export type UserRole = 'admin' | 'user';
++
++export interface User {
++  id: string;
++  username: string;
++  email?: string | null;
++  password_hash: string;
++  salt: string;
++  nickname: string;
++  avatar: string;
++  bio?: string | null;
++  role: UserRole;
++  is_active: boolean;
++  created_at: Date;
++  updated_at: Date;
++}
++
++export type SafeUser = Omit<User, 'password_hash' | 'salt'>;
++
++export interface AuthSessionPayload {
++  userId: string;
++  username: string;
++  role: UserRole;
++  nickname: string;
++  avatar: string;
++  exp: number;
++}
+diff --git a/lib/store/auth-store.ts b/lib/store/auth-store.ts
+new file mode 100644
+index 00000000..d429cd58
+--- /dev/null
++++ b/lib/store/auth-store.ts
+@@ -0,0 +1,151 @@
++import { create } from 'zustand';
++import { persist } from 'zustand/middleware';
++import type { SafeUser } from '@/lib/server/auth/types';
++
++interface AuthState {
++  user: SafeUser | null;
++  loading: boolean;
++  initialized: boolean;
++  
++  authModalOpen: boolean;
++  authModalTab: 'login' | 'register';
++  profileModalOpen: boolean;
++  adminModalOpen: boolean;
++
++  setAuthModalOpen: (open: boolean, tab?: 'login' | 'register') => void;
++  setProfileModalOpen: (open: boolean) => void;
++  setAdminModalOpen: (open: boolean) => void;
++
++  checkAuth: () => Promise<SafeUser | null>;
++  login: (username: string, password: string) => Promise<{ success: boolean; error?: string }>;
++  register: (data: { username: string; password: string; email?: string; nickname?: string; avatar?: string }) => Promise<{ success: boolean; error?: string }>;
++  logout: () => Promise<void>;
++  updateProfile: (data: { nickname?: string; avatar?: string; bio?: string; currentPassword?: string; newPassword?: string }) => Promise<{ success: boolean; error?: string }>;
++}
++
++export const useAuthStore = create<AuthState>()(
++  persist(
++    (set, get) => ({
++      user: null,
++      loading: false,
++      initialized: false,
++      
++      authModalOpen: false,
++      authModalTab: 'login',
++      profileModalOpen: false,
++      adminModalOpen: false,
++
++      setAuthModalOpen: (open, tab) => set({
++        authModalOpen: open,
++        ...(tab ? { authModalTab: tab } : {}),
++      }),
++      setProfileModalOpen: (open) => set({ profileModalOpen: open }),
++      setAdminModalOpen: (open) => set({ adminModalOpen: open }),
++
++      checkAuth: async () => {
++        try {
++          const res = await fetch('/api/auth/me', { cache: 'no-store' });
++          if (!res.ok) {
++            set({ user: null, loading: false, initialized: true });
++            return null;
++          }
++          const data = await res.json();
++          if (data.success && data.user) {
++            set({ user: data.user, loading: false, initialized: true });
++            return data.user;
++          }
++          set({ user: null, loading: false, initialized: true });
++          return null;
++        } catch {
++          set({ user: null, loading: false, initialized: true });
++          return null;
++        }
++      },
++
++      login: async (username, password) => {
++        try {
++          set({ loading: true });
++          const res = await fetch('/api/auth/login', {
++            method: 'POST',
++            headers: { 'Content-Type': 'application/json' },
++            body: JSON.stringify({ username, password }),
++          });
++          const data = await res.json();
++          if (!res.ok || !data.success) {
++            set({ loading: false });
++            return { success: false, error: data.error || '登录失败' };
++          }
++          set({ user: data.user, loading: false, authModalOpen: false, initialized: true });
++          // Hard reload to sync Next.js SSR and client stages
++          window.location.reload();
++          return { success: true };
++        } catch (err: unknown) {
++          set({ loading: false });
++          const message = err instanceof Error ? err.message : '网络异常';
++          return { success: false, error: message };
++        }
++      },
++
++      register: async (registerData) => {
++        try {
++          set({ loading: true });
++          const res = await fetch('/api/auth/register', {
++            method: 'POST',
++            headers: { 'Content-Type': 'application/json' },
++            body: JSON.stringify(registerData),
++          });
++          const data = await res.json();
++          if (!res.ok || !data.success) {
++            set({ loading: false });
++            return { success: false, error: data.error || '注册失败' };
++          }
++          set({ user: data.user, loading: false, authModalOpen: false, initialized: true });
++          window.location.reload();
++          return { success: true };
++        } catch (err: unknown) {
++          set({ loading: false });
++          const message = err instanceof Error ? err.message : '网络异常';
++          return { success: false, error: message };
++        }
++      },
++
++      logout: async () => {
++        try {
++          set({ loading: true });
++          await fetch('/api/auth/logout', { method: 'POST' });
++          set({ user: null, loading: false, initialized: true });
++          window.location.reload();
++        } catch {
++          set({ user: null, loading: false, initialized: true });
++          window.location.reload();
++        }
++      },
++
++      updateProfile: async (profileData) => {
++        try {
++          set({ loading: true });
++          const res = await fetch('/api/auth/profile', {
++            method: 'PUT',
++            headers: { 'Content-Type': 'application/json' },
++            body: JSON.stringify(profileData),
++          });
++          const data = await res.json();
++          if (!res.ok || !data.success) {
++            set({ loading: false });
++            return { success: false, error: data.error || '更新失败' };
++          }
++          set({ user: data.user, loading: false, profileModalOpen: false });
++          return { success: true };
++        } catch (err: unknown) {
++          set({ loading: false });
++          const message = err instanceof Error ? err.message : '网络异常';
++          return { success: false, error: message };
++        }
++      },
++    }),
++    {
++      name: 'openmaic-user-session',
++      partialize: (state) => ({ user: state.user }),
++    }
++  )
++);
+diff --git a/tests/auth/auth-crypto.test.ts b/tests/auth/auth-crypto.test.ts
+new file mode 100644
+index 00000000..be7682fa
+--- /dev/null
++++ b/tests/auth/auth-crypto.test.ts
+@@ -0,0 +1,58 @@
++import { describe, expect, it } from 'vitest';
++import { hashPassword, verifyPassword, signToken, verifyToken } from '@/lib/server/auth/crypto';
++
++describe('Auth Crypto utilities', () => {
++  it('correctly hashes and verifies passwords', async () => {
++    const password = 'mySecretPassword123!';
++    const { hash, salt } = await hashPassword(password);
++    
++    expect(hash).toBeDefined();
++    expect(salt).toBeDefined();
++    expect(hash.length).toBeGreaterThan(20);
++
++    const valid = await verifyPassword(password, hash, salt);
++    expect(valid).toBe(true);
++
++    const invalid = await verifyPassword('wrongPassword', hash, salt);
++    expect(invalid).toBe(false);
++  });
++
++  it('correctly signs and verifies JWT session tokens', () => {
++    const payload = {
++      userId: 'usr_test123',
++      username: 'testuser',
++      role: 'user' as const,
++      nickname: 'Tester',
++      avatar: '/avatars/user.png',
++    };
++
++    const token = signToken(payload, 3600);
++    expect(token).toBeDefined();
++    expect(token.split('.').length).toBe(3);
++
++    const verified = verifyToken(token);
++    expect(verified).not.toBeNull();
++    expect(verified?.userId).toBe('usr_test123');
++    expect(verified?.username).toBe('testuser');
++    expect(verified?.role).toBe('user');
++  });
++
++  it('rejects tampered or expired tokens', () => {
++    const payload = {
++      userId: 'usr_test123',
++      username: 'testuser',
++      role: 'user' as const,
++      nickname: 'Tester',
++      avatar: '/avatars/user.png',
++    };
++
++    // Tampered token
++    const token = signToken(payload, 3600);
++    const tampered = token.slice(0, -5) + 'xxxxx';
++    expect(verifyToken(tampered)).toBeNull();
++
++    // Expired token (expires in -1 second)
++    const expiredToken = signToken(payload, -1);
++    expect(verifyToken(expiredToken)).toBeNull();
++  });
++});
