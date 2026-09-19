@@ -38,7 +38,13 @@ cd OpenMAIC
 
 ### 步骤二：打入多用户模块补丁
 
-#### 方式 1：一键自动化安装与冲突检测脚本（推荐）
+#### 方式 1：一键远程打补丁（极简 ⭐）
+```bash
+# 在 OpenMAIC 项目根目录下直接运行：
+curl -sSL https://raw.githubusercontent.com/githubhelin/OpenMAICMultiUsersModule/main/apply.sh | bash
+```
+
+#### 方式 2：克隆补丁脚本运行
 ```bash
 # 在 OpenMAIC 根目录下执行
 git clone https://github.com/githubhelin/OpenMAICMultiUsersModule.git /tmp/openmaic-patch
@@ -46,13 +52,13 @@ git clone https://github.com/githubhelin/OpenMAICMultiUsersModule.git /tmp/openm
 # 选项 A: 仅执行预检查 (Dry-run 只检不改，验证是否有冲突)
 /tmp/openmaic-patch/apply.sh --check
 
-# 选项 B: 正式执行一键安装打补丁
+# 选项 B: 正式执行一键安装打补丁（自动检测冲突并引导配置数据库）
 /tmp/openmaic-patch/apply.sh
 
 rm -rf /tmp/openmaic-patch
 ```
 
-#### 方式 2：手动检查并打入补丁文件
+#### 方式 3：手动检查并打入补丁文件
 ```bash
 # 下载 patch 文件
 curl -sSL https://raw.githubusercontent.com/githubhelin/OpenMAICMultiUsersModule/main/openmaic-multi-user.patch -o openmaic-multi-user.patch
@@ -134,11 +140,29 @@ pm2 restart openmaic --update-env
 
 ---
 
+## 🛠️ 运维与管理实用工具
+
+补丁脚本附带了完备的运维管理指令，在项目根目录下可直接调用：
+
+```bash
+# 1. 运行状态一键诊断 (检测补丁、数据库连通性、用户统计与进程)
+./apply.sh --status
+
+# 2. 忘记密码时一键重置管理员密码
+./apply.sh --reset-admin <新密码>
+# 示例: ./apply.sh --reset-admin myNewPassword123
+
+# 3. 一键安全撤销补丁 (完全恢复至官方纯净原版)
+./apply.sh --revert
+```
+
+---
+
 ## 📂 仓库结构说明
 
 ```
 ├── openmaic-multi-user.patch    # 针对官方 OpenMAIC 的完整统一补丁文件
-├── apply.sh                     # 一键打补丁自动化脚本
+├── apply.sh                     # 一键打补丁自动化脚本 (含预检、原生DB装配、诊断与回滚)
 ├── extension/                   # 独立的源码文件副本 (供查阅与手动集成)
 │   ├── app/api/auth/            # 身份认证 API (login, register, logout, me, profile)
 │   ├── app/api/admin/           # 管理员控制台 API
@@ -147,6 +171,7 @@ pm2 restart openmaic --update-env
 │   ├── components/ui/table.tsx  # 表格基础 UI 组件
 │   ├── lib/server/auth/         # 数据库连接、scrypt 加密与 Session 工具
 │   ├── lib/store/auth-store.ts  # 客户端 Zustand 登录态状态管理
+│   ├── scripts/                 # 管理员密码重置等运维脚本
 │   └── tests/auth/              # 认证加解密单元测试
 └── README.md                    # 模块安装与使用说明文档
 ```

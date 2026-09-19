@@ -2,15 +2,11 @@
 set -e
 
 # ==============================================================================
-# OpenMAIC 多用户模块补丁自动检测与安装程序
+# OpenMAIC 多用户模块补丁自动安装、诊断与管理工具
 # ==============================================================================
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd || echo "")"
 PATCH_FILE="${SCRIPT_DIR}/openmaic-multi-user.patch"
-
-echo "=========================================================="
-echo "  🛡️  OpenMAIC 多用户补丁与环境配置安装程序"
-echo "=========================================================="
 
 # 1. 验证运行目录
 if [ ! -f "package.json" ] || ! grep -q '"name": "openmaic"' "package.json" 2>/dev/null; then
@@ -19,12 +15,100 @@ if [ ! -f "package.json" ] || ! grep -q '"name": "openmaic"' "package.json" 2>/d
   exit 1
 fi
 
+# 2. 如果本地不存在补丁文件（例如通过 curl 管道直接执行时），自动从 GitHub 下载
 if [ ! -f "$PATCH_FILE" ]; then
-  echo "❌ 错误: 未找到补丁文件 $PATCH_FILE"
-  exit 1
+  if [ -f "openmaic-multi-user.patch" ]; then
+    PATCH_FILE="$(pwd)/openmaic-multi-user.patch"
+  else
+    echo "📥 本地未检测到补丁包，正在从 GitHub 获取最新补丁..."
+    mkdir -p /tmp/openmaic-patch
+    curl -sSL "https://raw.githubusercontent.com/githubhelin/OpenMAICMultiUsersModule/main/openmaic-multi-user.patch" -o /tmp/openmaic-patch/openmaic-multi-user.patch
+    PATCH_FILE="/tmp/openmaic-patch/openmaic-multi-user.patch"
+  fi
 fi
 
-# 2. 自动预检查 (Pre-check)
+# 功能: 查看当前系统运行状态 (--status)
+if [[ "$1" == "--status" || "$1" == "-s" ]]; then
+  echo "=========================================================="
+  echo "  📊 OpenMAIC 多用户模块运行状态诊断"
+  echo "=========================================================="
+  
+  if [ -f "lib/server/auth/db.ts" ]; then
+    echo "✅ 补丁状态: 已打入多用户模块补丁"
+  else
+    echo "❌ 补丁状态: 尚未安装多用户模块补丁"
+  fi
+
+  if [ -f ".env.local" ]; then
+    DB_URL=$(grep -E "^DATABASE_URL=" .env.local 2>/dev/null | cut -d'=' -f2- | tr -d '"' | tr -d "'" || true)
+    if [ -n "$DB_URL" ]; then
+      echo "✅ 数据库配置: 已配置 DATABASE_URL"
+      if command -v node >/dev/null 2>&1; then
+        DATABASE_URL="$DB_URL" node -e "
+          const { Pool } = require('pg');
+          const pool = new Pool({ connectionString: process.env.DATABASE_URL, connectionTimeoutMillis: 3000 });
+          pool.query('SELECT COUNT(*) FROM users;').then(res => {
+            console.log('✅ 数据库连通性: 正常 (当前注册用户数: ' + res.rows[0].count + ')');
+            pool.end().then(() => process.exit(0));
+          }).catch(err => {
+            console.log('⚠️ 数据库连通性: 连接失败 (' + err.message + ')');
+            pool.end().then(() => process.exit(0));
+          });
+        " 2>/dev/null || true
+      fi
+    else
+      echo "⚠️ 数据库配置: 未在 .env.local 中配置 DATABASE_URL"
+    fi
+  else
+    echo "⚠️ 配置文件: 未找到 .env.local"
+  fi
+
+  if command -v pm2 >/dev/null 2>&1 && pm2 list | grep -q "openmaic"; then
+    echo "✅ PM2 服务: 进程正在运行"
+  else
+    echo "ℹ️  PM2 服务: 未检测到运行中的 openmaic PM2 进程"
+  fi
+  exit 0
+fi
+
+# 功能: 撤销补丁 (--revert / --uninstall)
+if [[ "$1" == "--revert" || "$1" == "--uninstall" ]]; then
+  echo "=========================================================="
+  echo "  🔄 正在撤销多用户补丁并恢复官方原版代码..."
+  echo "=========================================================="
+  if git apply -R --check --whitespace=nowarn "$PATCH_FILE" 2>/dev/null; then
+    git apply -R --whitespace=nowarn "$PATCH_FILE"
+    rm -rf app/api/auth app/api/admin components/auth components/admin lib/server/auth lib/store/auth-store.ts tests/auth scripts/reset-admin-password.mjs README-MULTIUSER.md
+    echo "🎉 多用户补丁已成功撤销，项目已完全恢复至官方原版状态！"
+  else
+    echo "⚠️ 检测到部分代码有后续修改，尝试 3-Way 反向合并..."
+    git apply -R --3way --whitespace=nowarn "$PATCH_FILE" || {
+      echo "❌ 撤销失败，请手动检查 git diff"
+      exit 1
+    }
+    rm -rf app/api/auth app/api/admin components/auth components/admin lib/server/auth lib/store/auth-store.ts tests/auth scripts/reset-admin-password.mjs README-MULTIUSER.md
+    echo "🎉 多用户补丁已成功撤销！"
+  fi
+  exit 0
+fi
+
+# 功能: 重置管理员密码 (--reset-admin [新密码])
+if [[ "$1" == "--reset-admin" ]]; then
+  NEW_PASS="${2:-admin123456}"
+  if [ -f "scripts/reset-admin-password.mjs" ]; then
+    node scripts/reset-admin-password.mjs admin "$NEW_PASS"
+  else
+    echo "❌ 尚未安装多用户模块，无法执行密码重置！"
+    exit 1
+  fi
+  exit 0
+fi
+
+echo "=========================================================="
+echo "  🛡️  OpenMAIC 多用户补丁与环境配置安装程序"
+echo "=========================================================="
+
+# 3. 自动预检查 (Pre-check)
 echo ""
 echo "🔍 [步骤 1/3] 正在自动进行代码冲突与兼容性预检查..."
 
@@ -69,7 +153,7 @@ else
   fi
 fi
 
-# 3. 检查与引导配置 PostgreSQL
+# 4. 检查与引导配置 PostgreSQL
 echo ""
 echo "🐘 [步骤 3/3] 正在检测 PostgreSQL 数据库配置..."
 
@@ -92,7 +176,7 @@ fi
 
 # 确保会话密钥存在
 if ! grep -q "^AUTH_SECRET=" "$ENV_FILE" 2>/dev/null; then
-  RAND_SECRET=$(node -e "console.log(require('crypto').randomBytes(32).toString('hex'))" 2>/dev/null || echo "openmaic-default-auth-secret-$(date +%s)")
+  RAND_SECRET=$(DATABASE_URL="$DB_URL" node -e "console.log(require('crypto').randomBytes(32).toString('hex'))" 2>/dev/null || echo "openmaic-default-auth-secret-$(date +%s)")
   echo "AUTH_SECRET=${RAND_SECRET}" >> "$ENV_FILE"
   echo "🔑 已为您自动生成安全会话密钥 AUTH_SECRET"
 fi
@@ -135,7 +219,7 @@ setup_native_postgresql() {
 
   DB_USER="openmaic"
   DB_NAME="openmaic"
-  DB_PASS=$(node -e "console.log(require('crypto').randomBytes(8).toString('hex'))" 2>/dev/null || echo "openmaic_pwd_$(date +%s)")
+  DB_PASS=$(DATABASE_URL="$DB_URL" node -e "console.log(require('crypto').randomBytes(8).toString('hex'))" 2>/dev/null || echo "openmaic_pwd_$(date +%s)")
 
   echo "⚙️ 正在自动创建 OpenMAIC 专属数据库与用户角色..."
   if sudo -u postgres psql -tc "SELECT 1 FROM pg_roles WHERE rolname = '${DB_USER}'" 2>/dev/null | grep -q 1; then
@@ -253,4 +337,9 @@ echo ""
 echo "🔑 默认超级管理员："
 echo "   用户名: admin"
 echo "   初始密码: admin123456"
+echo ""
+echo "💡 实用维护命令："
+echo "   - 运行状态诊断: ./apply.sh --status"
+echo "   - 重置管理员密码: ./apply.sh --reset-admin <新密码>"
+echo "   - 撤销补丁恢复原版: ./apply.sh --revert"
 echo "=========================================================="
