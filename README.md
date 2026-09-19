@@ -158,11 +158,29 @@ pm2 restart openmaic --update-env
 
 ---
 
+## 🎛️ 开启 Pro Mode 专业工作台（方案 B）
+
+OpenMAIC 原生包含 **Pro Workbench（智能体工作台）** 与 **MAIC Editor（课件专业编辑模式）** 两个层级的专业功能，本仓库提供了完整的独立配置指南与自动化脚本：
+
+- **详细指南文档**：👉 [pro-workbench-guide/README.md](./pro-workbench-guide/README.md)
+- **核心特点**：
+  - 方案 B 在底层天然包含方案 A（课件专业编辑模式）的全部手动排版能力，并增加了左侧 AI Agent 智能对话编排。
+  - 文档提供了**专供 AI Coding Agent 执行的标准工作流规约**，在新电脑上配置时，直接让 Agent 按照此指南执行即可无缝完成环境配置、大模型路由装配与编译部署。
+- **一键自动化配置**：在目标 OpenMAIC 项目根目录下直接运行：
+  ```bash
+  bash pro-workbench-guide/setup-pro-workbench.sh
+  ```
+
+---
+
 ## 📂 仓库结构说明
 
 ```
 ├── openmaic-multi-user.patch    # 针对官方 OpenMAIC 的完整统一补丁文件
 ├── apply.sh                     # 一键打补丁自动化脚本 (含预检、原生DB装配、诊断与回滚)
+├── pro-workbench-guide/         # 方案 B（Pro 工作台 + 专业编辑模式）完整配置指南与脚本
+│   ├── README.md                # 规范化配置说明 (专供 AI Agent 与手动配置参考)
+│   └── setup-pro-workbench.sh   # 一键自动化配置与验证脚本
 ├── extension/                   # 独立的源码文件副本 (供查阅与手动集成)
 │   ├── app/api/auth/            # 身份认证 API (login, register, logout, me, profile)
 │   ├── app/api/admin/           # 管理员控制台 API
