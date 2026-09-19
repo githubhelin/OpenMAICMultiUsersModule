@@ -1839,7 +1839,7 @@ index 00000000..5239f696
 +  );
 +}
 diff --git a/components/settings/index.tsx b/components/settings/index.tsx
-index ab052e6b..a9db1514 100644
+index db5fa6c3..65f6c87d 100644
 --- a/components/settings/index.tsx
 +++ b/components/settings/index.tsx
 @@ -32,6 +32,7 @@ import {
@@ -1850,7 +1850,7 @@ index ab052e6b..a9db1514 100644
  import { toast } from 'sonner';
  import { type ProviderId } from '@/lib/ai/providers';
  import { PROVIDERS, MONO_LOGO_PROVIDERS } from '@/lib/ai/providers';
-@@ -203,6 +204,7 @@ interface SettingsDialogProps {
+@@ -207,6 +208,7 @@ interface SettingsDialogProps {
  
  export function SettingsDialog({ open, onOpenChange, initialSection }: SettingsDialogProps) {
    const { t } = useI18n();
@@ -1858,7 +1858,7 @@ index ab052e6b..a9db1514 100644
  
    // Get settings from store
    const providerId = useSettingsStore((state) => state.providerId);
-@@ -731,6 +733,10 @@ export function SettingsDialog({ open, onOpenChange, initialSection }: SettingsD
+@@ -744,6 +746,10 @@ export function SettingsDialog({ open, onOpenChange, initialSection }: SettingsD
      }
    };
  
@@ -2069,10 +2069,10 @@ index 00000000..90d79220
 +  ],
 +};
 diff --git a/lib/server/agent-runtime/owner.ts b/lib/server/agent-runtime/owner.ts
-index 704baf71..c752f2fe 100644
+index bebd8e71..9d143059 100644
 --- a/lib/server/agent-runtime/owner.ts
 +++ b/lib/server/agent-runtime/owner.ts
-@@ -49,6 +49,8 @@ function anonymousCookieHeader(id: string): string {
+@@ -60,6 +60,8 @@ function anonymousCookieHeader(id: string): string {
   * call sites, or sessions created under authenticated identities would be
   * unreachable by their own owner.
   */
@@ -2081,7 +2081,7 @@ index 704baf71..c752f2fe 100644
  export function resolveRequestOwnerId(
    req: Pick<Request, 'headers'>,
    responseHeaders: Headers,
-@@ -56,6 +58,16 @@ export function resolveRequestOwnerId(
+@@ -67,6 +69,16 @@ export function resolveRequestOwnerId(
  ): string {
    if (authenticatedOwnerId) return authenticatedOwnerId;
  
