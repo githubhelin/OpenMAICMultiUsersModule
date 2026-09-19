@@ -73,6 +73,12 @@ DATABASE_URL=postgres://<用户名>:<密码>@127.0.0.1:5432/<数据库名>
 #### 4. Agent 驱动大模型路由（`maic-agent-driver`）
 Pro Workbench 中的 Agent 是一个持久化运行的服务端会话，需要由指定的大模型驱动，请在 `MODEL_ROUTES` 中配置 `maic-agent-driver`，并在 `.env.local` 中填入对应的 API Key。
 
+> [!IMPORTANT]
+> **关键原理：为什么网页“系统设置”中配置了 LLM，Pro 模式仍然报错 `API key required`？**
+> - **普通生成模式**：属于客户端发起请求，浏览器会自动将你在前端页面“系统设置”里保存的 Key 带给服务端，因此可以在服务端 `.env.local` 留空的情况下运行。
+> - **Pro 模式智能体（Agent Runner）**：属于**服务端全自主运行的后台守护任务**（由 Node.js 后台扫描数据库队列异步执行）。后台进程**完全无法访问用户的浏览器本地缓存**，必须直接从服务端的 `.env.local` 读取对应 Provider 的 API Key！
+> - 因此，开启 Pro 模式**必须在服务端的 `.env.local` 中配置对应的 API Key 和 BASE_URL**，否则 Agent 启动时会抛出 `API key required for provider`！
+
 > **格式约束**：
 > - `model` 必须带有 Provider 前缀（例如 `openai:gpt-5.5`、`deepseek:deepseek-chat`、`qwen:qwen-plus`）。
 > - `api` 字段必须为 `"openai-completions"` 或 `"openai-responses"`。
