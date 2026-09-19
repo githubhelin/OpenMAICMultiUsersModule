@@ -88,6 +88,67 @@ if ! grep -q "^AUTH_SECRET=" "$ENV_FILE" 2>/dev/null; then
   echo "🔑 已为您自动生成安全会话密钥 AUTH_SECRET"
 fi
 
+# 函数: 安装并配置原生 PostgreSQL
+setup_native_postgresql() {
+  echo "📦 正在配置系统原生 PostgreSQL 服务 (免 Docker)..."
+  
+  if ! command -v psql >/dev/null 2>&1; then
+    echo "▶️ 未检测到 psql 命令，正在通过系统包管理器安装 PostgreSQL..."
+    if command -v apt-get >/dev/null 2>&1; then
+      sudo apt-get update -y
+      sudo apt-get install -y postgresql postgresql-contrib
+    elif command -v dnf >/dev/null 2>&1; then
+      sudo dnf install -y postgresql-server postgresql-contrib
+      sudo postgresql-setup --initdb || true
+    elif command -v yum >/dev/null 2>&1; then
+      sudo yum install -y postgresql-server postgresql-contrib
+      sudo postgresql-setup --initdb || true
+    elif command -v pacman >/dev/null 2>&1; then
+      sudo pacman -S --noconfirm postgresql
+      sudo -u postgres initdb -D /var/lib/postgres/data || true
+    elif command -v brew >/dev/null 2>&1; then
+      brew install postgresql@16
+      brew services start postgresql@16
+    else
+      echo "⚠️ 未能识别系统包管理器，请先手动安装并运行 PostgreSQL 服务。"
+      return 1
+    fi
+  else
+    echo "💡 检测到系统已安装原生 PostgreSQL。"
+  fi
+
+  # 启动服务
+  if command -v systemctl >/dev/null 2>&1; then
+    sudo systemctl enable --now postgresql 2>/dev/null || true
+  elif command -v service >/dev/null 2>&1; then
+    sudo service postgresql start 2>/dev/null || true
+  fi
+
+  DB_USER="openmaic"
+  DB_NAME="openmaic"
+  DB_PASS=$(node -e "console.log(require('crypto').randomBytes(8).toString('hex'))" 2>/dev/null || echo "openmaic_pwd_$(date +%s)")
+
+  echo "⚙️ 正在自动创建 OpenMAIC 专属数据库与用户角色..."
+  if sudo -u postgres psql -tc "SELECT 1 FROM pg_roles WHERE rolname = '${DB_USER}'" 2>/dev/null | grep -q 1; then
+    echo "ℹ️  用户角色 ${DB_USER} 已存在，正在更新密码..."
+    sudo -u postgres psql -c "ALTER USER ${DB_USER} WITH ENCRYPTED PASSWORD '${DB_PASS}';"
+  else
+    sudo -u postgres psql -c "CREATE USER ${DB_USER} WITH ENCRYPTED PASSWORD '${DB_PASS}';"
+  fi
+
+  if ! sudo -u postgres psql -tc "SELECT 1 FROM pg_database WHERE datname = '${DB_NAME}'" 2>/dev/null | grep -q 1; then
+    sudo -u postgres psql -c "CREATE DATABASE ${DB_NAME} OWNER ${DB_USER};"
+  fi
+
+  sudo -u postgres psql -c "GRANT ALL PRIVILEGES ON DATABASE ${DB_NAME} TO ${DB_USER};" >/dev/null 2>&1 || true
+  sudo -u postgres psql -d ${DB_NAME} -c "GRANT ALL ON SCHEMA public TO ${DB_USER};" >/dev/null 2>&1 || true
+
+  DB_URL="postgres://${DB_USER}:${DB_PASS}@127.0.0.1:5432/${DB_NAME}"
+  echo "DATABASE_URL=${DB_URL}" >> "$ENV_FILE"
+  echo "✅ 原生 PostgreSQL 配置成功！已写入 $ENV_FILE"
+  echo "   连接串: ${DB_URL}"
+}
+
 # 检查 DATABASE_URL
 CURRENT_DB_URL=$(grep -E "^DATABASE_URL=" "$ENV_FILE" 2>/dev/null | cut -d'=' -f2- | tr -d '"' | tr -d "'" || true)
 
@@ -97,50 +158,66 @@ else
   echo "⚠️  未检测到 PostgreSQL 配置 (DATABASE_URL)！"
   echo "   💡 多用户模块需要 PostgreSQL 存储用户账号信息与跨设备漫游的课程。"
   echo ""
+  echo "请选择配置方式："
+  echo "  1) 本机原生安装与配置 PostgreSQL (系统原生服务，免 Docker，推荐 ⭐)"
+  echo "  2) 手动输入已有的自建 PostgreSQL 连接串"
+  echo "  3) 使用 Docker 容器启动 PostgreSQL"
+  echo "  4) 稍后自行手动配置"
+  echo ""
 
-  # 检查是否安装 Docker
-  if command -v docker >/dev/null 2>&1; then
-    echo "🐳 检测到当前系统已安装 Docker！"
-    read -r -p "是否使用 Docker 一键启动本地 PostgreSQL 容器并自动配置？(Y/n): " DOCKER_CHOICE
-    DOCKER_CHOICE=${DOCKER_CHOICE:-y}
+  if [ -t 0 ]; then
+    read -r -p "请输入选项 [1-4] (默认 1): " DB_OPTION
+    DB_OPTION=${DB_OPTION:-1}
+  else
+    DB_OPTION=1
+  fi
 
-    if [[ "$DOCKER_CHOICE" == "y" || "$DOCKER_CHOICE" == "Y" ]]; then
-      CONTAINER_NAME="openmaic-postgres"
-      if docker ps -a --format '{{.Names}}' | grep -Eq "^${CONTAINER_NAME}\$"; then
-        echo "🔄 容器 ${CONTAINER_NAME} 已存在，正在启动..."
-        docker start "$CONTAINER_NAME" >/dev/null || true
+  case "$DB_OPTION" in
+    1)
+      setup_native_postgresql || {
+        echo "⚠️ 原生安装未能自动完成，请稍后手动在 $ENV_FILE 中配置 DATABASE_URL"
+      }
+      ;;
+    2)
+      read -r -p "请输入您的 PostgreSQL 连接串: " MANUAL_DB
+      if [ -n "$MANUAL_DB" ]; then
+        echo "DATABASE_URL=$MANUAL_DB" >> "$ENV_FILE"
+        echo "✅ 已将连接串写入 $ENV_FILE"
       else
-        echo "🚀 正在启动 PostgreSQL 16 容器..."
-        docker run -d \
-          --name "$CONTAINER_NAME" \
-          --restart always \
-          -e POSTGRES_DB=openmaic \
-          -e POSTGRES_USER=openmaic \
-          -e POSTGRES_PASSWORD=openmaic_password \
-          -p 5432:5432 \
-          postgres:16 >/dev/null
+        echo "已跳过输入，稍后请手动在 $ENV_FILE 中配置 DATABASE_URL"
       fi
-
-      DB_URL="postgres://openmaic:openmaic_password@127.0.0.1:5432/openmaic"
-      echo "DATABASE_URL=$DB_URL" >> "$ENV_FILE"
-      echo "✅ 已自动配置 DATABASE_URL=$DB_URL"
-    else
-      echo "已跳过 Docker 安装。"
-    fi
-  fi
-
-  # 如果仍未配置，提示用户输入
-  CURRENT_DB_URL=$(grep -E "^DATABASE_URL=" "$ENV_FILE" 2>/dev/null | cut -d'=' -f2- | tr -d '"' | tr -d "'" || true)
-  if [ -z "$CURRENT_DB_URL" ]; then
-    echo ""
-    read -r -p "请输入您自建的 PostgreSQL 连接串 (直接回车跳过稍后手动配置): " MANUAL_DB
-    if [ -n "$MANUAL_DB" ]; then
-      echo "DATABASE_URL=$MANUAL_DB" >> "$ENV_FILE"
-      echo "✅ 已将连接串写入 $ENV_FILE"
-    else
-      echo "ℹ️  稍后请务必在 $ENV_FILE 中手动添加 DATABASE_URL=postgres://user:pass@host:5432/dbname"
-    fi
-  fi
+      ;;
+    3)
+      if command -v docker >/dev/null 2>&1; then
+        CONTAINER_NAME="openmaic-postgres"
+        if docker ps -a --format '{{.Names}}' | grep -Eq "^${CONTAINER_NAME}\$"; then
+          echo "🔄 容器 ${CONTAINER_NAME} 已存在，正在启动..."
+          docker start "$CONTAINER_NAME" >/dev/null || true
+        else
+          echo "🚀 正在启动 PostgreSQL 16 容器..."
+          docker run -d \
+            --name "$CONTAINER_NAME" \
+            --restart always \
+            -e POSTGRES_DB=openmaic \
+            -e POSTGRES_USER=openmaic \
+            -e POSTGRES_PASSWORD=openmaic_password \
+            -p 5432:5432 \
+            postgres:16 >/dev/null
+        fi
+        DB_URL="postgres://openmaic:openmaic_password@127.0.0.1:5432/openmaic"
+        echo "DATABASE_URL=$DB_URL" >> "$ENV_FILE"
+        echo "✅ 已自动配置 DATABASE_URL=$DB_URL"
+      else
+        echo "❌ 未检测到 Docker 命令，请使用原生方式或手动配置。"
+      fi
+      ;;
+    4)
+      echo "ℹ️  稍后请在 $ENV_FILE 中手动添加 DATABASE_URL=postgres://user:pass@host:5432/dbname"
+      ;;
+    *)
+      echo "未知选项，跳过数据库自动配置。"
+      ;;
+  esac
 fi
 
 echo ""

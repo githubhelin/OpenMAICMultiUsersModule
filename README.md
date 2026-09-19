@@ -67,14 +67,15 @@ rm openmaic-multi-user.patch
 
 ---
 
-### 步骤三：环境配置与 PostgreSQL 自动检测 (`.env.local`)
+### 步骤三：环境配置与 PostgreSQL 自动配置 (`.env.local`)
 
 > 💡 **关于数据库说明**：
 > 官方原版 OpenMAIC 默认采用免数据库的“纯浏览器本地存储”模式。而多用户账号管理与多端课程漫游**必须依赖中心化的 PostgreSQL 数据库**。
-> `apply.sh` 脚本在打补丁时会**自动检测**您的环境：
-> - 若已有 Docker，可一键自动启动 PostgreSQL 16 容器并写入配置；
-> - 若使用现有数据库，可直接粘贴输入连接串；
-> - 自动生成安全的随机密钥 `AUTH_SECRET`。
+> `apply.sh` 脚本在打补丁时会**自动检测并提供以下一键配置方式**：
+> 1. **本机原生安装与配置 (免 Docker，默认推荐 ⭐)**：自动调用系统包管理器（apt / dnf / yum / pacman / brew）安装系统原生 PostgreSQL 服务，自动创建专用 `openmaic` 角色与数据库，并写入 `.env.local`。
+> 2. **自建数据库连接**：直接粘贴已有 PostgreSQL 连接串。
+> 3. **Docker 容器启动**：若环境偏好容器化，也可一键启动官方 PostgreSQL 16 容器。
+> 4. **自动生成安全密钥**：自动生成 32 位高强度随机 `AUTH_SECRET` 会话密钥。
 
 在 OpenMAIC 项目根目录下 `.env.local` 核心参数示例：
 
