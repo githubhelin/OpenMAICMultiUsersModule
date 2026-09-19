@@ -33,6 +33,11 @@ CHECK_OUTPUT=$(git apply --check --whitespace=nowarn "$PATCH_FILE" 2>&1 || true)
 if [ -z "$CHECK_OUTPUT" ]; then
   echo "✅ 检查通过: 补丁与当前官方代码 100% 匹配，无任何冲突！"
   
+  if [[ "$1" == "--check" || "$1" == "-c" ]]; then
+    echo "💡 当前为只检模式 (--check)，未修改任何文件。"
+    exit 0
+  fi
+
   echo ""
   echo "📦 [步骤 2/3] 正在自动打入多用户模块补丁..."
   git apply --whitespace=nowarn "$PATCH_FILE"
@@ -44,6 +49,10 @@ else
   
   if [ -z "$THREE_WAY_CHECK" ]; then
     echo "⚠️  检测到官方版本有上下文微调，但 3-Way 智能合并可自动平滑解决。"
+    if [[ "$1" == "--check" || "$1" == "-c" ]]; then
+      echo "💡 当前为只检模式 (--check)，可平滑合并，未修改任何文件。"
+      exit 0
+    fi
     echo "📦 [步骤 2/3] 正在执行智能平滑合并打入补丁..."
     git apply --3way --whitespace=nowarn "$PATCH_FILE"
     echo "🎉 补丁代码已成功打入您的项目！"
@@ -158,18 +167,30 @@ else
   echo "⚠️  未检测到 PostgreSQL 配置 (DATABASE_URL)！"
   echo "   💡 多用户模块需要 PostgreSQL 存储用户账号信息与跨设备漫游的课程。"
   echo ""
-  echo "请选择配置方式："
-  echo "  1) 本机原生安装与配置 PostgreSQL (系统原生服务，免 Docker，推荐 ⭐)"
-  echo "  2) 手动输入已有的自建 PostgreSQL 连接串"
-  echo "  3) 使用 Docker 容器启动 PostgreSQL"
-  echo "  4) 稍后自行手动配置"
-  echo ""
 
-  if [ -t 0 ]; then
-    read -r -p "请输入选项 [1-4] (默认 1): " DB_OPTION
-    DB_OPTION=${DB_OPTION:-1}
-  else
+  # 参数优先级
+  if [[ "$*" == *"--skip-db"* ]]; then
+    DB_OPTION=4
+  elif [[ "$*" == *"--native-db"* ]]; then
     DB_OPTION=1
+  elif [[ "$*" == *"--docker-db"* ]]; then
+    DB_OPTION=3
+  else
+    echo "请选择配置方式："
+    echo "  1) 本机原生安装与配置 PostgreSQL (系统原生服务，免 Docker，推荐 ⭐)"
+    echo "  2) 手动输入已有的自建 PostgreSQL 连接串"
+    echo "  3) 使用 Docker 容器启动 PostgreSQL"
+    echo "  4) 稍后自行手动配置"
+    echo ""
+
+    if [ -t 0 ]; then
+      read -r -p "请输入选项 [1-4] (默认 1): " DB_OPTION
+      DB_OPTION=${DB_OPTION:-1}
+    else
+      # 非交互式或管道输入时读取一行，默认 1
+      read -r DB_OPTION 2>/dev/null || DB_OPTION=1
+      DB_OPTION=${DB_OPTION:-1}
+    fi
   fi
 
   case "$DB_OPTION" in
