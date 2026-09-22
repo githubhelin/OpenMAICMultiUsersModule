@@ -557,6 +557,55 @@ index 00000000..45201511
 +    return NextResponse.json({ success: false, error: message }, { status: 400 });
 +  }
 +}
+diff --git a/app/api/classroom/route.ts b/app/api/classroom/route.ts
+index 3cbf7790..cd0a9bad 100644
+--- a/app/api/classroom/route.ts
++++ b/app/api/classroom/route.ts
+@@ -9,9 +9,14 @@ import {
+   isValidClassroomId,
+   persistClassroom,
+   readClassroom,
++  type PersistedClassroomData,
+ } from '@/lib/server/classroom-storage';
+ import { sanitizeSceneContent } from '@/lib/server/sanitize-scene-content';
+ import { createLogger } from '@/lib/logger';
++import { isServerPersistenceConfigured } from '@/lib/config/feature-flags';
++import { resolveStageAccess } from '@/lib/server/stage-access';
++import { getServerPersistenceProvider } from '@/lib/persistence/server-provider';
++import type { Stage, Scene } from '@/lib/types/stage';
+ 
+ const log = createLogger('Classroom API');
+ 
+@@ -144,7 +149,28 @@ export async function GET(request: NextRequest) {
+       return apiError(API_ERROR_CODES.INVALID_REQUEST, 400, 'Invalid classroom id');
+     }
+ 
+-    const classroom = await readClassroom(id);
++    let classroom: PersistedClassroomData | null = await readClassroom(id);
++    if (!classroom && isServerPersistenceConfigured()) {
++      try {
++        const access = await resolveStageAccess(id);
++        if (access?.deletedAt) {
++          return apiError(API_ERROR_CODES.INVALID_REQUEST, 404, 'Classroom not found');
++        }
++        const provider = await getServerPersistenceProvider(process.env.DATABASE_URL ?? '');
++        const doc = await provider.documentStore.loadDocument(id);
++        if (doc && doc.stage) {
++          classroom = {
++            id: doc.stage.id,
++            stage: doc.stage as unknown as Stage,
++            scenes: (doc.scenes || []) as unknown as Scene[],
++            createdAt: new Date(doc.stage.createdAt || Date.now()).toISOString(),
++          };
++        }
++      } catch (dbError) {
++        log.warn(`Database fallback for classroom [id=${id}] failed:`, dbError);
++      }
++    }
++
+     if (!classroom) {
+       return apiError(API_ERROR_CODES.INVALID_REQUEST, 404, 'Classroom not found');
+     }
 diff --git a/app/page.tsx b/app/page.tsx
 index 6dc44c04..582bf3b0 100644
 --- a/app/page.tsx
@@ -2069,19 +2118,17 @@ index 00000000..90d79220
 +  ],
 +};
 diff --git a/lib/server/agent-runtime/owner.ts b/lib/server/agent-runtime/owner.ts
-index bebd8e71..9d143059 100644
+index f582ec1e..2d96848c 100644
 --- a/lib/server/agent-runtime/owner.ts
 +++ b/lib/server/agent-runtime/owner.ts
-@@ -60,6 +60,8 @@ function anonymousCookieHeader(id: string): string {
-  * call sites, or sessions created under authenticated identities would be
-  * unreachable by their own owner.
-  */
+@@ -1,5 +1,6 @@
+ import { randomUUID } from 'node:crypto';
+ 
 +import { getSessionPayload } from '@/lib/server/auth/session';
-+
- export function resolveRequestOwnerId(
-   req: Pick<Request, 'headers'>,
-   responseHeaders: Headers,
-@@ -67,6 +69,16 @@ export function resolveRequestOwnerId(
+ import { resolveSharedOwnerId } from './shared-owner';
+ 
+ const ANONYMOUS_COOKIE = 'anonymous_id';
+@@ -75,6 +76,16 @@ export function resolveRequestOwnerId(
  ): string {
    if (authenticatedOwnerId) return authenticatedOwnerId;
  
@@ -2095,8 +2142,8 @@ index bebd8e71..9d143059 100644
 +    // Graceful fallback to anonymous cookie on session parsing error
 +  }
 +
-   const existingId = readCookie(req.headers, ANONYMOUS_COOKIE);
-   if (existingId && UUID_V4.test(existingId)) return `anon:${existingId}`;
+   const sharedOwnerId = resolveSharedOwnerId();
+   if (sharedOwnerId) return sharedOwnerId;
  
 diff --git a/lib/server/auth/crypto.ts b/lib/server/auth/crypto.ts
 new file mode 100644
@@ -2527,6 +2574,51 @@ index 00000000..e347982e
 +  avatar: string;
 +  exp: number;
 +}
+diff --git a/lib/server/ssrf-guard.ts b/lib/server/ssrf-guard.ts
+index 425c5df2..44cab9b0 100644
+--- a/lib/server/ssrf-guard.ts
++++ b/lib/server/ssrf-guard.ts
+@@ -160,23 +160,36 @@ function isCloudMetadataAddress(value: string): boolean {
+  * IP-literal URL (for which Node never runs `connect.lookup`) and a hostname
+  * that resolves into the same range get the same decision.
+  */
++function isFakeIp(canonical: string): boolean {
++  try {
++    const parsed = ipaddr.parse(canonical);
++    if (parsed.kind() === 'ipv4') {
++      const octets = (parsed as ipaddr.IPv4).octets;
++      return octets[0] === 198 && (octets[1] === 18 || octets[1] === 19);
++    }
++  } catch {
++    return false;
++  }
++  return false;
++}
++
+ function isNeverAllowedRange(value: string): boolean {
+   const canonical = canonicalizeIp(value);
+   if (canonical === null) return false;
++  if (isFakeIp(canonical)) return false;
+   const range = ipaddr.parse(canonical).range();
+   return range === 'reserved' || range === 'multicast' || range === 'broadcast';
+ }
+ 
+ /**
+  * Ranges the `ALLOW_LOCAL_NETWORKS` opt-in governs: private, loopback and
+- * link-local targets, plus carrier-grade NAT (100.64.0.0/10). CGNAT is a
+- * routable unicast range that overlay networks such as Tailscale/Headscale
+- * assign to their nodes, so self-hosted model servers behind one need the same
+- * opt-in as RFC1918 targets. Blocked by default, allowed with the flag.
++ * link-local targets, plus carrier-grade NAT (100.64.0.0/10) and transparent
++ * proxy Fake-IP pools (198.18.0.0/15).
+  */
+ function isOptInGovernedRange(value: string): boolean {
+   const canonical = canonicalizeIp(value);
+   if (canonical === null) return false;
++  if (isFakeIp(canonical)) return true;
+   return isPrivateIP(canonical) || ipaddr.parse(canonical).range() === 'carrierGradeNat';
+ }
+ 
 diff --git a/lib/store/auth-store.ts b/lib/store/auth-store.ts
 new file mode 100644
 index 00000000..d429cd58
@@ -2684,6 +2776,85 @@ index 00000000..d429cd58
 +    }
 +  )
 +);
+diff --git a/scripts/reset-admin-password.mjs b/scripts/reset-admin-password.mjs
+new file mode 100755
+index 00000000..104eb0c7
+--- /dev/null
++++ b/scripts/reset-admin-password.mjs
+@@ -0,0 +1,73 @@
++#!/usr/bin/env node
++import { scrypt, randomBytes } from 'node:crypto';
++import { promisify } from 'node:util';
++import fs from 'node:fs';
++import path from 'node:path';
++import { fileURLToPath } from 'node:url';
++import pg from 'pg';
++
++const { Pool } = pg;
++const scryptAsync = promisify(scrypt);
++const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
++
++// 1. 读取 .env.local
++const envPath = path.join(root, '.env.local');
++let databaseUrl = process.env.DATABASE_URL;
++
++if (!databaseUrl && fs.existsSync(envPath)) {
++  const content = fs.readFileSync(envPath, 'utf8');
++  for (const line of content.split('\n')) {
++    const trimmed = line.trim();
++    if (trimmed.startsWith('DATABASE_URL=')) {
++      databaseUrl = trimmed.slice('DATABASE_URL='.length).trim().replace(/^["']|["']$/g, '');
++      break;
++    }
++  }
++}
++
++if (!databaseUrl) {
++  console.error('❌ 错误: 未在环境或 .env.local 中找到 DATABASE_URL');
++  process.exit(1);
++}
++
++const targetUser = process.argv[2] || 'admin';
++const newPassword = process.argv[3] || 'admin123456';
++
++async function main() {
++  const pool = new Pool({ connectionString: databaseUrl });
++  try {
++    const salt = randomBytes(16).toString('hex');
++    const derivedKey = await scryptAsync(newPassword, salt, 64);
++    const hash = derivedKey.toString('hex');
++
++    const res = await pool.query(
++      `UPDATE users SET password_hash = $1, salt = $2, is_active = TRUE, updated_at = NOW() WHERE username = $3 RETURNING id, username, role`,
++      [hash, salt, targetUser]
++    );
++
++    if (res.rowCount === 0) {
++      console.log(`⚠️ 未找到用户 [${targetUser}]，正在为您创建该管理员账号...`);
++      const adminId = `usr_${randomBytes(6).toString('hex')}`;
++      await pool.query(
++        `INSERT INTO users (id, username, password_hash, salt, nickname, role, is_active)
++         VALUES ($1, $2, $3, $4, $5, 'admin', TRUE)`,
++        [adminId, targetUser, hash, salt, 'Administrator']
++      );
++      console.log(`🎉 管理员账号 [${targetUser}] 创建成功！`);
++    } else {
++      console.log(`🎉 账号 [${targetUser}] 密码已成功重置！`);
++    }
++
++    console.log(`--------------------------------------------------`);
++    console.log(`  用户名: ${targetUser}`);
++    console.log(`  新密码: ${newPassword}`);
++    console.log(`--------------------------------------------------`);
++  } catch (err) {
++    console.error('❌ 操作失败:', err.message);
++    process.exit(1);
++  } finally {
++    await pool.end();
++  }
++}
++
++main();
 diff --git a/tests/auth/auth-crypto.test.ts b/tests/auth/auth-crypto.test.ts
 new file mode 100644
 index 00000000..be7682fa
