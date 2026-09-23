@@ -607,7 +607,7 @@ index 3cbf7790..cd0a9bad 100644
        return apiError(API_ERROR_CODES.INVALID_REQUEST, 404, 'Classroom not found');
      }
 diff --git a/app/page.tsx b/app/page.tsx
-index 6dc44c04..582bf3b0 100644
+index 31059149..dd329425 100644
 --- a/app/page.tsx
 +++ b/app/page.tsx
 @@ -36,6 +36,8 @@ import { InputGroup, InputGroupInput, InputGroupButton } from '@/components/ui/i
@@ -619,7 +619,7 @@ index 6dc44c04..582bf3b0 100644
  import { GenerationToolbar } from '@/components/generation/generation-toolbar';
  import { AgentBar } from '@/components/agent/agent-bar';
  import { useTheme } from '@/lib/hooks/use-theme';
-@@ -224,6 +226,7 @@ function HomePage() {
+@@ -217,6 +219,7 @@ function HomePage() {
  
    const [themeOpen, setThemeOpen] = useState(false);
    const [error, setError] = useState<string | null>(null);
@@ -627,7 +627,7 @@ index 6dc44c04..582bf3b0 100644
    // True while the Generate click drains upload-time ingests and builds the
    // generation session. Doubles as the guard flag that freezes the course
    // material set for the duration of prep and as the switch that disables the
-@@ -790,26 +793,37 @@ function HomePage() {
+@@ -783,26 +786,37 @@ function HomePage() {
            )}
          </div>
  
@@ -1888,10 +1888,10 @@ index 00000000..5239f696
 +  );
 +}
 diff --git a/components/settings/index.tsx b/components/settings/index.tsx
-index db5fa6c3..65f6c87d 100644
+index 4febe100..7f76a15a 100644
 --- a/components/settings/index.tsx
 +++ b/components/settings/index.tsx
-@@ -32,6 +32,7 @@ import {
+@@ -48,6 +48,7 @@ import {
  } from 'lucide-react';
  import { useI18n } from '@/lib/hooks/use-i18n';
  import { useSettingsStore } from '@/lib/store/settings';
@@ -1899,7 +1899,7 @@ index db5fa6c3..65f6c87d 100644
  import { toast } from 'sonner';
  import { type ProviderId } from '@/lib/ai/providers';
  import { PROVIDERS, MONO_LOGO_PROVIDERS } from '@/lib/ai/providers';
-@@ -207,6 +208,7 @@ interface SettingsDialogProps {
+@@ -283,6 +284,7 @@ interface SettingsDialogProps {
  
  export function SettingsDialog({ open, onOpenChange, initialSection }: SettingsDialogProps) {
    const { t } = useI18n();
@@ -1907,8 +1907,8 @@ index db5fa6c3..65f6c87d 100644
  
    // Get settings from store
    const providerId = useSettingsStore((state) => state.providerId);
-@@ -744,6 +746,10 @@ export function SettingsDialog({ open, onOpenChange, initialSection }: SettingsD
-     }
+@@ -879,6 +881,10 @@ export function SettingsDialog({ open, onOpenChange, initialSection }: SettingsD
+     );
    };
  
 +  if (!isAdmin) {
