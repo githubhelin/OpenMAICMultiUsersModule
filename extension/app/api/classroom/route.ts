@@ -19,6 +19,7 @@ import { getServerPersistenceProvider } from '@/lib/persistence/server-provider'
 import { getSessionPayload } from '@/lib/server/auth/session';
 import { resolveRequestOwnerId } from '@/lib/server/agent-runtime/owner';
 import { getOwnerScopedDocumentStore } from '@/lib/server/agent-runtime/owner-scoped-documents';
+import { syncInteractiveLibraryForStage } from '@/lib/server/interactive-library';
 import type { Stage, Scene } from '@/lib/types/stage';
 
 const log = createLogger('Classroom API');
@@ -138,6 +139,14 @@ export async function POST(request: NextRequest) {
         log.warn(`Classroom ${persisted.id} failed to sync to owner store:`, dbError);
       }
     }
+
+    // Automatically package and export interactive scenes to interactive library
+    void syncInteractiveLibraryForStage(
+      { ...safeStage, id: persisted.id },
+      safeScenes.map((scene) => ({ ...scene, stageId: persisted.id })),
+    ).catch((err) => {
+      log.warn(`Classroom ${persisted?.id} failed to sync to interactive library:`, err);
+    });
 
     return apiSuccess({ id: persisted.id, url: persisted.url }, 201);
   } catch (error) {

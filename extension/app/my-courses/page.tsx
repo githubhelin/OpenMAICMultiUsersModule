@@ -26,6 +26,7 @@ import {
   CloudUpload,
   HardDrive,
   Database,
+  Gamepad2,
 } from 'lucide-react';
 import { useAuthStore } from '@/lib/store/auth-store';
 import { UserNav } from '@/components/auth/user-nav';
@@ -331,14 +332,20 @@ export default function MyCoursesPage() {
         console.warn('Failed to delete from local storage:', e);
       }
 
-      // 2. 服务端 PostgreSQL 彻底删除
+      // 2. 服务端彻底删除 (PostgreSQL + 磁盘文件 + 互动展厅)
       try {
-        await fetch(`/api/stages/${encodeURIComponent(deletingCourse.id)}`, {
+        const res = await fetch(`/api/stages/${encodeURIComponent(deletingCourse.id)}`, {
           method: 'DELETE',
           credentials: 'include',
         });
-      } catch (e) {
+        if (!res.ok) {
+          const errData = await res.json().catch(() => null);
+          throw new Error(errData?.error || `HTTP ${res.status}`);
+        }
+      } catch (e: any) {
         console.warn('Failed to delete from server:', e);
+        toast.error(`服务端删除失败: ${e.message || '网络异常'}`);
+        return;
       }
 
       setCourses((prev) => prev.filter((c) => c.id !== deletingCourse.id));
@@ -425,6 +432,16 @@ export default function MyCoursesPage() {
             >
               <Sparkles className="w-3.5 h-3.5" />
               批量快速制课
+            </Button>
+
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => router.push('/interactive-hub')}
+              className="gap-1.5 text-purple-600 dark:text-purple-400 border-purple-500/30 hover:bg-purple-50 dark:hover:bg-purple-950/40 text-xs cursor-pointer"
+            >
+              <Gamepad2 className="w-3.5 h-3.5" />
+              互动展厅
             </Button>
 
             <Button

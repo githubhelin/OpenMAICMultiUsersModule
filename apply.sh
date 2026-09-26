@@ -38,6 +38,9 @@ if [[ "$1" == "--status" || "$1" == "-s" ]]; then
     if [ -f "app/my-courses/page.tsx" ]; then
       echo "✅ 课程中心: 已启用「我的课程」管理中心与双轨存储漫游 (/my-courses)"
     fi
+    if [ -f "app/interactive-hub/page.tsx" ]; then
+      echo "✅ 互动展厅: 已启用「互动实验与游戏工坊」展厅 (/interactive-hub)"
+    fi
   else
     echo "❌ 补丁状态: 尚未安装多用户模块补丁"
   fi
@@ -81,7 +84,7 @@ if [[ "$1" == "--revert" || "$1" == "--uninstall" ]]; then
   echo "=========================================================="
   if git apply -R --check --whitespace=nowarn "$PATCH_FILE" 2>/dev/null; then
     git apply -R --whitespace=nowarn "$PATCH_FILE"
-    rm -rf app/api/auth app/api/admin components/auth components/admin lib/server/auth lib/store/auth-store.ts tests/auth scripts/reset-admin-password.mjs README-MULTIUSER.md app/my-courses
+    rm -rf app/api/auth app/api/admin components/auth components/admin lib/server/auth lib/store/auth-store.ts tests/auth scripts/reset-admin-password.mjs README-MULTIUSER.md app/my-courses app/interactive-hub app/api/interactive-library lib/server/interactive-library
     echo "🎉 多用户补丁已成功撤销，项目已完全恢复至官方原版状态！"
   else
     echo "⚠️ 检测到部分代码有后续修改，尝试 3-Way 反向合并..."
@@ -89,7 +92,7 @@ if [[ "$1" == "--revert" || "$1" == "--uninstall" ]]; then
       echo "❌ 撤销失败，请手动检查 git diff"
       exit 1
     }
-    rm -rf app/api/auth app/api/admin components/auth components/admin lib/server/auth lib/store/auth-store.ts tests/auth scripts/reset-admin-password.mjs README-MULTIUSER.md app/my-courses
+    rm -rf app/api/auth app/api/admin components/auth components/admin lib/server/auth lib/store/auth-store.ts tests/auth scripts/reset-admin-password.mjs README-MULTIUSER.md app/my-courses app/interactive-hub app/api/interactive-library lib/server/interactive-library
     echo "🎉 多用户补丁已成功撤销！"
   fi
   exit 0

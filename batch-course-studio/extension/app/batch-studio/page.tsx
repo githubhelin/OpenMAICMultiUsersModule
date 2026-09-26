@@ -24,6 +24,7 @@ import {
   Zap,
   Target,
   BookOpen,
+  Gamepad2,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
@@ -341,6 +342,15 @@ export default function BatchStudioPage() {
           </div>
 
           <div className="flex items-center gap-2">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => router.push('/interactive-hub')}
+              className="gap-1.5 border-purple-200 dark:border-purple-800 text-purple-600 dark:text-purple-400 hover:bg-purple-50 dark:hover:bg-purple-950/40"
+            >
+              <Gamepad2 className="w-4 h-4" />
+              互动展厅
+            </Button>
             <Button
               variant="outline"
               size="sm"

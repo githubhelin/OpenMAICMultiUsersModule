@@ -44,14 +44,27 @@ export async function GET(req: NextRequest) {
   return withRequestOwnerId(req, async (ownerId, responseHeaders) => {
     const store = await getOwnerScopedDocumentStore(ownerId);
     let stages = await store.listDocuments();
-    if (isAdmin) {
+    if (isAdmin && process.env.DATABASE_URL) {
       try {
-        const provider = await getServerPersistenceProvider(process.env.DATABASE_URL ?? '');
-        const allDocs = await provider.documentStore.listDocuments();
+        const { Pool } = await import('pg');
+        const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+        const res = await pool.query(
+          'SELECT id, name, interactive_mode, task_engine_mode, created_at, updated_at FROM document_stages ORDER BY updated_at DESC',
+        );
         const map = new Map<string, any>();
-        for (const doc of allDocs) map.set(doc.id, doc);
+        for (const doc of res.rows) {
+          map.set(doc.id, {
+            id: doc.id,
+            name: doc.name,
+            interactiveMode: doc.interactive_mode,
+            taskEngineMode: doc.task_engine_mode,
+            createdAt: doc.created_at,
+            updatedAt: doc.updated_at,
+          });
+        }
         for (const s of stages) map.set(s.id, s);
         stages = Array.from(map.values()).sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+        await pool.end();
       } catch {
         // Keep store stages on error
       }

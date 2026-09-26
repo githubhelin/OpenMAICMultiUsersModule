@@ -1,4 +1,4 @@
-# 👥 OpenMAIC 模块化扩展补丁集 (Multi-Users, Batch-Studio & Course-Manager)
+# 👥 OpenMAIC 模块化扩展补丁集 (Multi-Users, Course-Manager, Batch-Studio & Interactive-Hub)
 
 [![OpenMAIC](https://img.shields.io/badge/OpenMAIC-v1.1.0-blue?style=flat-square)](https://github.com/THU-MAIC/OpenMAIC)
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-16+-336791?style=flat-square&logo=postgresql&logoColor=white)](https://www.postgresql.org/)
@@ -7,12 +7,13 @@
 
 本仓库是针对清华大学开源项目 [**THU-MAIC/OpenMAIC**](https://github.com/THU-MAIC/OpenMAIC) 的**高可用模块化生产级扩展套件**。
 
-包含四大核心独立模块，支持按需独立安装或统一全量部署：
+包含五大核心独立模块，支持按需独立安装或统一全量部署：
 1. **👥 多用户管理与统一身份认证模块**：开箱即用的多用户注册/登录、RBAC 角色权限、超级管理员全站控制台与多端云端漫游；
-2. **📚 我的课程管理中心与双轨存储漫游模块 (`/my-courses`)**：本地 IndexedDB 历史课程与 PostgreSQL 云端课程双轨智能聚合、一键上云备份、集中播放、Pro 工作台二次深度编辑、行内重命名与安全删除；
+2. **📚 我的课程管理中心与双轨存储漫游模块 (`/my-courses`)**：本地 IndexedDB 历史课程与 PostgreSQL 云端课程双轨智能聚合、一键上云备份、集中播放、Pro 工作台二次深度编辑、行内重命名与**四维彻底物理级联删除保障**；
 3. **⚡ 批量制课工坊扩展 (`/batch-studio`)**：纯后台异步批处理、三档课时定制（微课/标准/长课）、真·70%+ 深度互动场景、实时任务大屏看板与任务即时中断止损；
-4. **🎛️ Pro Mode 专业工作台方案 B 指南**：智能体多轮对话编排与 MAIC Editor 专业课件排版二次编辑模式。
-5. **🧠 运行时自愈与大模型动态迁移机制**：动态模型白名单校验，历史过期模型（如 `gemini-3.7-flash-high`）自动平滑迁移至新模型（`gemini-3.8-flash-high`）并自动修剪失效配置，杜绝模型漂移与报错。
+4. **🎮 互动实验与游戏工坊 / 互动展厅 (`/interactive-hub`)**：纯脱机单文件 HTML 自动内联打包、断网即开即用、全生命周期联动与极速强制同步归集；
+5. **🎛️ Pro Mode 专业工作台方案 B 指南**：智能体多轮对话编排与 MAIC Editor 专业课件排版二次编辑模式；
+6. **🧠 运行时自愈与大模型动态迁移机制**：动态模型白名单校验，历史过期模型（如 `gemini-3.7-flash-high`）自动平滑迁移至新模型（`gemini-3.8-flash-high`）并自动修剪失效配置，杜绝模型漂移与报错。
 
 ---
 
@@ -27,7 +28,8 @@
 ### 2. 📚 我的课程中心与双轨存储漫游 (`/my-courses`)
 - **双轨数据智能聚合**：同时聚合读取浏览器本地 IndexedDB（Dexie `db.stages`）历史课程与服务端 PostgreSQL 数据库课程，按照 `stageId` 去重合并，确保 29+ 门历史生成课件与批量制课生成的云端课件全量呈现。
 - **状态感知与一键上云备份**：直观区分 <span style="color: #10b981; font-weight: bold;">「云端已存」</span> 与 <span style="color: #f59e0b; font-weight: bold;">「本地缓存 (点击上云)」</span>，支持顶部 **「一键上云备份 (N)」** 自动将所有本地课件推送到服务端 PostgreSQL 数据库，实现永久云端漫游。
-- **全生命周期管理**：支持一键开课演播、进入 Pro 工作台深度编辑画布、行内快捷重命名、本地与云端双层安全删除。
+- **全生命周期管理**：支持一键开课演播、进入 Pro 工作台深度编辑画布、行内快捷重命名。
+- **四维彻底物理级联删除**：确认删除课程时，后端深度同步清理 1) PostgreSQL 数据库所有关联表（`document_scenes`, `stage_meta`, `document_stages` 等）；2) 课堂数据文件 `data/classrooms/<id>.json`；3) 媒体资源目录 `data/classrooms/<id>/`；4) **互动展厅打包目录 `data/interactive-library/*_<id>/`**。前端严格校验 HTTP 响应状态，杜绝任何假性删除与孤儿遗留。
 
 ### 3. ⚡ 批量制课工坊与三档教学课时定制 (`/batch-studio`)
 - **多格式资料提取**：Worker 独立线程解析 PPTX、原生集成 MinerU 解析 PDF/Word、TXT、Markdown。
@@ -39,7 +41,13 @@
 - **真·70%+ 深度交互模式**：硬性约束 70% 以上为物理科学仿真（`simulation`）、闯关游戏（`game`）与动态图解（`diagram`），内置防误降级保护机制。
 - **任务即时中断与 Token 止损**：毫秒级中断大模型生成，排队课件支持精准移除，彻底杜绝 Token 浪费。
 
-### 4. 🧠 大模型配置自愈与自动热迁移
+### 4. 🎮 互动实验与游戏工坊 / 互动展厅 (`/interactive-hub`)
+- **纯脱机单文件 HTML 打包**：系统在生成课件时自动调用 `inlineHtmlAssets`，将所有 CSS、JS 与互动逻辑全部内联封包为约 0.8MB~1.3MB 的独立脱机 HTML，断网状态下即可直接双击运行、演示与分发。
+- **全生命周期双向联动**：单课生成与批量制课完成自动归集；课程重命名自动毫秒级同步重命名展厅目录及 `meta.json`；课程删除自动彻底清除对应互动文件。
+- **极速缓存感知强制同步**：提供顶部「强制同步归集」按钮，支持 `GET /api/interactive-library?refresh=1` 与 `POST /api/interactive-library`，耗时低于 50ms，自动清扫失效孤儿目录。
+- **沉浸式互动展厅**：支持按科学仿真、探究游戏、动态图解、代码工坊分类筛选，支持卡片流与课程分组双视图，提供居中模态弹窗即点即玩、新窗口全屏独占与单文件本地直接下载。
+
+### 5. 🧠 大模型配置自愈与自动热迁移
 - 针对用户配置的旧模型（如 `gemini-3.7-flash-high`），系统在初始化和请求调用时会自动热迁移为最新标准模型（`gemini-3.8-flash-high`）。
 - 动态白名单探针，自动从客户端持久化缓存中剔除无效或弃用的遗留模型，确保大模型调用 100% 稳定可靠。
 
@@ -107,12 +115,28 @@ bash batch-course-studio/apply-batch-studio.sh
 
 ---
 
-### 方案 D：纯手工 Git Patch 安装
+### 方案 D：单独安装「互动实验与游戏工坊」模块 (`interactive-hub`)
+
+如果您只需要沉浸式互动展厅、纯脱机单文件 HTML 打包导出与双向联动：
+
+```bash
+# 方式 1：远程一键安装
+curl -sSL https://raw.githubusercontent.com/githubhelin/OpenMAICMultiUsersModule/main/interactive-hub/apply-interactive-hub.sh | bash
+
+# 方式 2：本地脚本安装
+bash interactive-hub/apply-interactive-hub.sh
+```
+
+- **详细模块说明**：👉 [interactive-hub/README.md](./interactive-hub/README.md)
+
+---
+
+### 方案 E：纯手工 Git Patch 安装
 
 如果您希望通过标准 `git apply` 手动合入：
 
 ```bash
-# 1. 检查补丁是否冲突 (以多用户补丁为例)
+# 1. 检查补丁是否冲突 (以多用户统一全量补丁为例)
 git apply --check openmaic-multi-user.patch
 
 # 2. 正式应用补丁 (自动忽略空白字符差异)
@@ -194,8 +218,13 @@ pm2 restart openmaic --update-env
 
 ```
 OpenMAICMultiUsersModule/
-├── openmaic-multi-user.patch         # 完整多用户与课程中心统一补丁文件 (对齐 v1.1.0)
+├── openmaic-multi-user.patch         # 完整多用户、课程中心与互动展厅统一补丁包 (对齐 v1.1.0)
 ├── apply.sh                          # 多用户模块一键安装、诊断与回滚工具
+├── interactive-hub/                  # 🎮 互动实验与游戏工坊 / 互动展厅独立模块
+│   ├── openmaic-interactive-hub.patch# 互动展厅独立补丁
+│   ├── apply-interactive-hub.sh      # 互动展厅一键安装与诊断脚本
+│   ├── README.md                     # 互动展厅脱机打包与架构设计文档
+│   └── extension/                    # 互动展厅独立源码副本
 ├── course-manager/                   # 📚 我的课程中心与双轨存储漫游独立模块
 │   ├── openmaic-course-manager.patch # 课程中心独立补丁
 │   ├── apply-course-manager.sh       # 课程中心一键安装脚本
@@ -211,9 +240,12 @@ OpenMAICMultiUsersModule/
 │   └── README.md                     # 专业工作台规约与配置文档
 ├── extension/                        # 核心多用户模块独立源码副本 (供比对与手动增量部署)
 │   ├── app/my-courses/page.tsx       # 我的课程中心页面
+│   ├── app/interactive-hub/page.tsx  # 互动实验与游戏工坊展厅页面
 │   ├── app/api/auth/                 # 身份认证 API (login, register, logout, me, profile)
 │   ├── app/api/admin/                # 管理员全站用户管理 API
-│   ├── app/api/stages/               # 课程列表与管理聚合 API
+│   ├── app/api/stages/               # 课程列表与管理聚合 API (含四维级联物理删除)
+│   ├── app/api/interactive-library/  # 展厅索引、离线 HTML 托管与强制归集 API
+│   ├── lib/server/interactive-library/# 离线 HTML 资源内联打包与孤儿清扫引擎
 │   ├── components/auth/              # 登录注册、个人中心与导航栏 UserNav 组件
 │   ├── components/admin/             # 全站用户管理控制台
 │   ├── lib/server/auth/              # 密码加密、数据库连接与会话凭据工具

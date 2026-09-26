@@ -1,9 +1,9 @@
 diff --git a/README-MULTIUSER.md b/README-MULTIUSER.md
 new file mode 100644
-index 00000000..1fd236b7
+index 00000000..36d0fc18
 --- /dev/null
 +++ b/README-MULTIUSER.md
-@@ -0,0 +1,127 @@
+@@ -0,0 +1,142 @@
 +# OpenMAIC 多用户管理与认证模块 (Multi-Users Module)
 +
 +本模块为 **OpenMAIC** 增加了开箱即用的**多用户身份认证（Authentication）、多端数据漫游、分权权限控制（RBAC）与全局用户管理后台**。
@@ -20,7 +20,16 @@ index 00000000..1fd236b7
 +3. **分权权限控制（RBAC）**：
 +   - **普通用户（User）**：管理自己的专属课程空间、个人资料与偏好设置。
 +   - **超级管理员（Admin）**：享有“全站多用户管理控制台”，支持查询全站用户、手动创建用户、切换管理员权限、封禁/启用账号、重置密码及注销账号。
-+4. **安全与轻量**：
++4. **「我的课程」全量课程管理工坊 (`/my-courses`)**：
++   - 跨 IndexedDB 本地课件与 PostgreSQL 云端数据库双向智能聚合。
++   - 支持课程在线进入、重命名、全字段搜索与筛选、一键全量备份至云端。
++   - **四维彻底物理级联删除保障**：删除课程时，同步清空 PostgreSQL 数据库关联行、`data/classrooms/<id>.json` 课堂持久化文件、`data/classrooms/<id>/` 媒体目录以及 `data/interactive-library/` 互动打包文件，杜绝遗留与虚假成功。
++5. **「互动实验与游戏工坊」展厅 (`/interactive-hub`)**：
++   - 自动在课程生成时调用系统资源内联器（`inlineHtmlAssets`），将所有互动场景打包为体积约 0.8MB~1.3MB 的**单文件离线纯前端应用**。
++   - 支持科学实验、闯关游戏、算法图解、代码工坊分类浏览、内置模态弹窗全屏体验、新标签页全屏与离线下载 HTML。
++   - **全生命周期双向联动**：课程新建/批量生成自动归集、课程重命名自动重命名展厅目录及元数据、课程删除自动清理展厅游戏文件。
++   - **强力同步与孤儿探测**：支持一键“强制同步归集”（耗时 <50ms），自动跨文件与数据库扫描并自动清除孤儿残留。
++6. **安全与轻量**：
 +   - 采用 Node.js 原生安全加密（`scrypt` 密码哈希 + 随机 Salt，HMAC-SHA256 JWT Token）。
 +   - 采用 `HttpOnly` + `SameSite=Lax` Cookie 存储会话，杜绝 XSS 风险。
 +   - 零额外重量级依赖，无缝融合 PostgreSQL 持久化与 Next.js 16 架构。
@@ -71,6 +80,12 @@ index 00000000..1fd236b7
 +| `POST` | `/api/admin/users` | 仅 Admin | 管理员手动创建新用户 |
 +| `PATCH` | `/api/admin/users/:id` | 仅 Admin | 管理员修改用户角色、禁用/解封账号、重置密码 |
 +| `DELETE` | `/api/admin/users/:id` | 仅 Admin | 管理员彻底注销并删除用户 |
++| `GET` | `/api/stages` | 已登录 | 获取当前用户所属所有课程（管理员跨权限聚合全站课程） |
++| `PATCH` | `/api/stages/:id` | Owner/Admin | 课程重命名（同步更新互动展厅目录与元数据） |
++| `DELETE` | `/api/stages/:id` | Owner/Admin | 四维彻底级联删除课程（DB+课堂JSON+媒体目录+展厅） |
++| `GET` | `/api/interactive-library` | 公开 | 获取全站互动展厅统计、课程列表与所有互动游戏索引 |
++| `POST` | `/api/interactive-library` | 公开 | 触发全量极速重新扫描与归集（支持孤儿目录清理） |
++| `GET` | `/api/interactive-library/:stageId/:filename` | 公开 | 提供单文件离线 HTML 在线访问或直接附件下载 |
 +
 +---
 +
@@ -131,6 +146,115 @@ index 00000000..1fd236b7
 +pnpm build
 +pm2 restart openmaic --update-env
 +```
+diff --git a/README-zh.md b/README-zh.md
+index 4855d152..d2206e7b 100644
+--- a/README-zh.md
++++ b/README-zh.md
+@@ -37,11 +37,48 @@
+ </p>
+ 
+ <p align="center">
+-  <a href="./README.md">English</a> | <a href="./README-zh.md">简体中文</a>
++  <a href="./README.md">English</a> | <a href="./README-zh.md">简体中文</a> | <a href="./README-MULTIUSER.md">多用户模块说明</a> | <a href="./pro-workbench-guide/README.md">Pro 方案B开启指南</a>
+   <br/>
+   <a href="https://open.maic.chat/">在线体验</a> · <a href="#-快速开始">快速开始</a> · <a href="#lemonade-local-ai">Lemonade</a> · <a href="#funasr-local-asr">FunASR</a> · <a href="#-功能特性">功能特性</a> · <a href="#-使用场景">使用场景</a> · <a href="#-agent-工作台集成">OpenClaw</a>
+ </p>
+ 
++---
++
++## 👥 OpenMAIC 多用户管理与认证模块 (Multi-Users Module)
++
++本仓库已集成**多用户账号系统、多端数据漫游、分权管理后台 (RBAC) 与系统设置权限管控**。
++
++### 🔍 检查与同步结果
++1. **上游官方更新检查**：
++   - 官方最新主线提交为 `dfebbcf3` (`tag: @openmaic/renderer@0.1.4`)（`perf(classroom): speed up classroom loading`）。
++   - 本地与 GitHub 仓库已与清华官方最新主线完全对齐，并在此基础上打入了完整的多用户补丁提交链。
++2. **生成了独立的补丁文件**：
++   - 已在仓库中生成独立补丁包：[`patches/openmaic-multi-user.patch`](./patches/openmaic-multi-user.patch)（116 KB，包含多用户全套数据库、后端 API、鉴权加密与前端组件）。
++3. **已推送到 GitHub**：
++   - 仓库：[https://github.com/githubhelin/OpenMAICMultiUsersModule](https://github.com/githubhelin/OpenMAICMultiUsersModule)
++
++---
++
++### 💡 后续官方有新版本时的快速同步方式
++
++未来清华官方仓库发布新功能或 Bug 修复时，您可以直接在项目目录下执行以下任一方式：
++
++#### 方式一：Git 一键变基同步 (推荐)
++```bash
++git fetch upstream main
++git rebase upstream/main
++pnpm build
++pm2 restart openmaic --update-env
++```
++
++#### 方式二：在新克隆的官方项目直接打补丁
++```bash
++git apply patches/openmaic-multi-user.patch
++pnpm build
++pm2 restart openmaic --update-env
++```
++
++---
+ 
+ ## 🗞️ 动态
+ 
+diff --git a/README.md b/README.md
+index fe616cdc..75a1b92d 100644
+--- a/README.md
++++ b/README.md
+@@ -37,11 +37,49 @@
+ </p>
+ 
+ <p align="center">
+-  <a href="./README.md">English</a> | <a href="./README-zh.md">Simplified Chinese</a>
++  <a href="./README.md">English</a> | <a href="./README-zh.md">Simplified Chinese</a> | <a href="./README-MULTIUSER.md">Multi-User Module</a> | <a href="./pro-workbench-guide/README.md">Pro Workbench Guide</a>
+   <br/>
+   <a href="https://open.maic.chat/">Live Demo</a> · <a href="#-quick-start">Quick Start</a> · <a href="#lemonade-local-ai">Lemonade</a> · <a href="#funasr-local-asr">FunASR</a> · <a href="#-features">Features</a> · <a href="#-use-cases">Use Cases</a> · <a href="#-agent-workbench-integration">OpenClaw</a>
+ </p>
+ 
++---
++
++## 👥 OpenMAIC 多用户管理与认证模块 (Multi-Users Module)
++
++本仓库已集成**多用户账号系统、多端数据漫游、分权管理后台 (RBAC) 与系统设置权限管控**。
++
++### 🔍 检查与同步结果
++1. **上游官方更新检查**：
++   - 官方最新主线提交为 `dfebbcf3` (`tag: @openmaic/renderer@0.1.4`)（`perf(classroom): speed up classroom loading`）。
++   - 本地与 GitHub 仓库已与清华官方最新主线完全对齐，并在此基础上打入了完整的多用户补丁提交链。
++2. **生成了独立的补丁文件**：
++   - 已在仓库中生成独立补丁包：[`patches/openmaic-multi-user.patch`](./patches/openmaic-multi-user.patch)（116 KB，包含多用户全套数据库、后端 API、鉴权加密与前端组件）。
++3. **已推送到 GitHub**：
++   - 仓库：[https://github.com/githubhelin/OpenMAICMultiUsersModule](https://github.com/githubhelin/OpenMAICMultiUsersModule)
++
++---
++
++### 💡 后续官方有新版本时的快速同步方式
++
++未来清华官方仓库发布新功能或 Bug 修复时，您可以直接在项目目录下执行以下任一方式：
++
++#### 方式一：Git 一键变基同步 (推荐)
++```bash
++git fetch upstream main
++git rebase upstream/main
++pnpm build
++pm2 restart openmaic --update-env
++```
++
++#### 方式二：在新克隆的官方项目直接打补丁
++```bash
++git apply patches/openmaic-multi-user.patch
++pnpm build
++pm2 restart openmaic --update-env
++```
++
++---
++
+ ## 🎉 OpenMAIC v1.0.0 — Build courses with an agent
+ 
+ **One prompt in, a whole course out — and now you can steer.** Released August 27, 2026, OpenMAIC v1.0.0 adds a **Pro workbench** alongside the classic one-click generator: chat with an agent that plans your curriculum, builds and revises every page, and works straight from your materials.
 diff --git a/app/api/admin/users/[id]/route.ts b/app/api/admin/users/[id]/route.ts
 new file mode 100644
 index 00000000..21ff4344
@@ -557,11 +681,329 @@ index 00000000..45201511
 +    return NextResponse.json({ success: false, error: message }, { status: 400 });
 +  }
 +}
+diff --git a/app/api/batch-generate/[id]/route.ts b/app/api/batch-generate/[id]/route.ts
+new file mode 100644
+index 00000000..ae23767d
+--- /dev/null
++++ b/app/api/batch-generate/[id]/route.ts
+@@ -0,0 +1,141 @@
++import { type NextRequest, NextResponse } from 'next/server';
++import { getSessionPayload } from '@/lib/server/auth/session';
++import { getBatchJob, deleteBatchJob } from '@/lib/server/batch-generation/store';
++import { cancelBatchJob, cancelBatchSubTask } from '@/lib/server/batch-generation/runner';
++
++export const runtime = 'nodejs';
++
++/** 查询单个批量任务详情与实时进度 */
++export async function GET(
++  req: NextRequest,
++  { params }: { params: Promise<{ id: string }> },
++) {
++  try {
++    const { id } = await params;
++    const session = getSessionPayload(req);
++    const ownerId = session && session.userId ? `user:${session.userId}` : undefined;
++
++    const job = await getBatchJob(id, ownerId);
++
++    if (!job) {
++      return NextResponse.json(
++        { success: false, error: '未找到该批处理任务' },
++        { status: 404 },
++      );
++    }
++
++    return NextResponse.json({
++      success: true,
++      job,
++    });
++  } catch (error) {
++    return NextResponse.json(
++      {
++        success: false,
++        error: error instanceof Error ? error.message : '获取任务详情失败',
++      },
++      { status: 500 },
++    );
++  }
++}
++
++/** 取消任务操作：支持取消整个 Job 或取消队列中某个未生成的 SubTask */
++export async function POST(
++  req: NextRequest,
++  { params }: { params: Promise<{ id: string }> },
++) {
++  try {
++    const { id } = await params;
++    const session = getSessionPayload(req);
++    const ownerId = session && session.userId ? `user:${session.userId}` : undefined;
++
++    const body = await req.json().catch(() => ({}));
++    const action = body.action || 'cancel';
++
++    if (action === 'cancel') {
++      // 中断整个任务，停止所有未完成子任务的执行与 Token 消耗
++      const success = await cancelBatchJob(id, ownerId);
++      if (!success) {
++        return NextResponse.json(
++          { success: false, error: '未找到该批处理任务或无权操作' },
++          { status: 404 },
++        );
++      }
++      return NextResponse.json({
++        success: true,
++        message: '批量制课任务已成功取消并中断',
++      });
++    }
++
++    if (action === 'cancel_task') {
++      const taskId = body.taskId;
++      if (!taskId) {
++        return NextResponse.json(
++          { success: false, error: '缺少子任务 ID (taskId)' },
++          { status: 400 },
++        );
++      }
++
++      const success = await cancelBatchSubTask(id, taskId, ownerId);
++      if (!success) {
++        return NextResponse.json(
++          { success: false, error: '未能取消该子任务（可能已完成或不存在）' },
++          { status: 400 },
++        );
++      }
++      return NextResponse.json({
++        success: true,
++        message: '子任务已成功从队列中移除并取消',
++      });
++    }
++
++    return NextResponse.json(
++      { success: false, error: `不支持的操作类型: ${action}` },
++      { status: 400 },
++    );
++  } catch (error) {
++    return NextResponse.json(
++      {
++        success: false,
++        error: error instanceof Error ? error.message : '取消操作执行失败',
++      },
++      { status: 500 },
++    );
++  }
++}
++
++/** 删除历史任务记录（若任务正在进行则先中断再删除） */
++export async function DELETE(
++  req: NextRequest,
++  { params }: { params: Promise<{ id: string }> },
++) {
++  try {
++    const { id } = await params;
++    const session = getSessionPayload(req);
++    const ownerId = session && session.userId ? `user:${session.userId}` : undefined;
++
++    // 先中断正在执行的后台任务
++    await cancelBatchJob(id, ownerId).catch(() => false);
++
++    const deleted = await deleteBatchJob(id, ownerId);
++    if (!deleted) {
++      return NextResponse.json(
++        { success: false, error: '未能删除任务（不存在或无权限）' },
++        { status: 404 },
++      );
++    }
++
++    return NextResponse.json({
++      success: true,
++      message: '任务记录及临时文件已彻底清理删除',
++    });
++  } catch (error) {
++    return NextResponse.json(
++      {
++        success: false,
++        error: error instanceof Error ? error.message : '删除任务失败',
++      },
++      { status: 500 },
++    );
++  }
++}
+diff --git a/app/api/batch-generate/route.ts b/app/api/batch-generate/route.ts
+new file mode 100644
+index 00000000..bab59967
+--- /dev/null
++++ b/app/api/batch-generate/route.ts
+@@ -0,0 +1,165 @@
++import { after, type NextRequest, NextResponse } from 'next/server';
++import { promises as fs } from 'fs';
++import path from 'path';
++import { nanoid } from 'nanoid';
++import { getSessionPayload } from '@/lib/server/auth/session';
++import { buildRequestOrigin } from '@/lib/server/classroom-storage';
++import { createLogger } from '@/lib/logger';
++import {
++  BATCH_TEMP_DIR,
++  ensureBatchDirs,
++  listBatchJobs,
++  saveBatchJob,
++} from '@/lib/server/batch-generation/store';
++import { runBatchJob } from '@/lib/server/batch-generation/runner';
++import type { BatchJob, BatchJobMode, BatchSubTask } from '@/lib/server/batch-generation/types';
++import type { CourseScale } from '@/lib/types/course-scale';
++
++export const runtime = 'nodejs';
++export const maxDuration = 300;
++
++const log = createLogger('BatchGenerateAPI');
++
++export async function POST(req: NextRequest) {
++  try {
++    const session = getSessionPayload(req);
++    const ownerId = session && session.userId ? `user:${session.userId}` : 'anon:default';
++
++    await ensureBatchDirs();
++
++    const formData = await req.formData();
++    const files = formData.getAll('files') as File[];
++
++    if (!files || files.length === 0) {
++      return NextResponse.json(
++        { success: false, error: '请至少上传一个课件文件 (.pptx, .pdf, .docx, .txt)' },
++        { status: 400 },
++      );
++    }
++
++    const rawMode = formData.get('mode') as string;
++    const mode: BatchJobMode = rawMode === 'single_merged' ? 'single_merged' : 'batch_independent';
++    const requirement = (formData.get('prompt') as string) || '';
++    const enableTTS = formData.get('enableTTS') !== 'false';
++    const enableImageGeneration = formData.get('enableImageGeneration') !== 'false';
++    const enableInteractiveMode =
++      formData.get('enableInteractiveMode') === 'true' ||
++      formData.get('interactiveMode') === 'true';
++    const rawCourseScale = formData.get('courseScale') as string;
++    const courseScale: CourseScale =
++      rawCourseScale === 'micro' || rawCourseScale === 'thematic' ? rawCourseScale : 'standard';
++
++    const jobId = `batch_${nanoid(10)}`;
++    const now = new Date().toISOString();
++    const baseUrl = buildRequestOrigin(req);
++
++    const tasks: BatchSubTask[] = [];
++
++    // 保存上传的各个文件到临时目录
++    for (let i = 0; i < files.length; i++) {
++      const file = files[i];
++      const taskId = `task_${nanoid(8)}`;
++      const safeName = file.name || `file_${i + 1}.pptx`;
++      const tempFileName = `${jobId}_${taskId}_${safeName}`;
++      const tempFilePath = path.join(BATCH_TEMP_DIR, tempFileName);
++
++      const buffer = Buffer.from(await file.arrayBuffer());
++      await fs.writeFile(tempFilePath, buffer);
++
++      tasks.push({
++        id: taskId,
++        fileName: safeName,
++        fileSize: file.size,
++        mimeType: file.type || 'application/octet-stream',
++        tempFilePath,
++        status: 'queued',
++        progress: 0,
++        stepMessage: '排队等待处理中...',
++      });
++    }
++
++    const defaultTitle =
++      mode === 'single_merged'
++        ? `多资料合成课件 (${files.length} 个资料)`
++        : `批量课程生成 (${files.length} 门课)`;
++
++    const batchJob: BatchJob = {
++      id: jobId,
++      ownerId,
++      mode,
++      status: 'queued',
++      title: defaultTitle,
++      requirement,
++      enableTTS,
++      enableImageGeneration,
++      enableInteractiveMode,
++      courseScale,
++      totalTasks: tasks.length,
++      completedTasks: 0,
++      failedTasks: 0,
++      cancelledTasks: 0,
++      progress: 0,
++      createdAt: now,
++      updatedAt: now,
++      tasks,
++    };
++
++    await saveBatchJob(batchJob);
++    log.info(`Created batch job ${jobId} with ${tasks.length} tasks [mode=${mode}] for owner ${ownerId}`);
++
++    // 在后台异步启动执行流水线
++    after(() => runBatchJob(jobId, baseUrl));
++
++    return NextResponse.json(
++      {
++        success: true,
++        batchId: jobId,
++        status: 'queued',
++        totalTasks: tasks.length,
++        mode,
++      },
++      { status: 202 },
++    );
++  } catch (error) {
++    log.error('Batch generation initiation failed:', error);
++    return NextResponse.json(
++      {
++        success: false,
++        error: error instanceof Error ? error.message : '服务器内部处理失败',
++      },
++      { status: 500 },
++    );
++  }
++}
++
++export async function GET(req: NextRequest) {
++  try {
++    const session = getSessionPayload(req);
++    const ownerId = session && session.userId ? `user:${session.userId}` : 'anon:default';
++
++    const jobs = await listBatchJobs(ownerId);
++    return NextResponse.json({
++      success: true,
++      jobs: jobs.map((job) => ({
++        id: job.id,
++        title: job.title,
++        mode: job.mode,
++        status: job.status,
++        totalTasks: job.totalTasks,
++        completedTasks: job.completedTasks,
++        failedTasks: job.failedTasks,
++        cancelledTasks: job.cancelledTasks || 0,
++        progress: job.progress,
++        createdAt: job.createdAt,
++        updatedAt: job.updatedAt,
++        resultClassroomUrl: job.resultClassroomUrl,
++      })),
++    });
++  } catch (error) {
++    log.error('Failed to list batch jobs:', error);
++    return NextResponse.json(
++      { success: false, error: '获取批量任务列表失败' },
++      { status: 500 },
++    );
++  }
++}
 diff --git a/app/api/classroom/route.ts b/app/api/classroom/route.ts
-index 3cbf7790..29940834 100644
+index 3cbf7790..c14f7f68 100644
 --- a/app/api/classroom/route.ts
 +++ b/app/api/classroom/route.ts
-@@ -9,9 +9,17 @@ import {
+@@ -9,9 +9,18 @@ import {
    isValidClassroomId,
    persistClassroom,
    readClassroom,
@@ -575,11 +1017,12 @@ index 3cbf7790..29940834 100644
 +import { getSessionPayload } from '@/lib/server/auth/session';
 +import { resolveRequestOwnerId } from '@/lib/server/agent-runtime/owner';
 +import { getOwnerScopedDocumentStore } from '@/lib/server/agent-runtime/owner-scoped-documents';
++import { syncInteractiveLibraryForStage } from '@/lib/server/interactive-library';
 +import type { Stage, Scene } from '@/lib/types/stage';
  
  const log = createLogger('Classroom API');
  
-@@ -113,6 +121,24 @@ export async function POST(request: NextRequest) {
+@@ -113,6 +122,32 @@ export async function POST(request: NextRequest) {
        return apiError(API_ERROR_CODES.INVALID_REQUEST, 409, 'Classroom id collision');
      }
  
@@ -601,10 +1044,18 @@ index 3cbf7790..29940834 100644
 +      }
 +    }
 +
++    // Automatically package and export interactive scenes to interactive library
++    void syncInteractiveLibraryForStage(
++      { ...safeStage, id: persisted.id },
++      safeScenes.map((scene) => ({ ...scene, stageId: persisted.id })),
++    ).catch((err) => {
++      log.warn(`Classroom ${persisted?.id} failed to sync to interactive library:`, err);
++    });
++
      return apiSuccess({ id: persisted.id, url: persisted.url }, 201);
    } catch (error) {
      log.error(
-@@ -144,7 +170,28 @@ export async function GET(request: NextRequest) {
+@@ -144,7 +179,28 @@ export async function GET(request: NextRequest) {
        return apiError(API_ERROR_CODES.INVALID_REQUEST, 400, 'Invalid classroom id');
      }
  
@@ -634,49 +1085,287 @@ index 3cbf7790..29940834 100644
      if (!classroom) {
        return apiError(API_ERROR_CODES.INVALID_REQUEST, 404, 'Classroom not found');
      }
+diff --git a/app/api/generate/scene-outlines-stream/route.ts b/app/api/generate/scene-outlines-stream/route.ts
+index df488ecf..f2aab28c 100644
+--- a/app/api/generate/scene-outlines-stream/route.ts
++++ b/app/api/generate/scene-outlines-stream/route.ts
+@@ -40,6 +40,7 @@ import { resolveModelFromRequest } from '@/lib/server/resolve-model';
+ import { sortDocumentImagesForVision } from '@/lib/document/bundle';
+ import { resolveVisionImagesForPrompt } from '@/lib/persistence/resolve-vision-images';
+ import { resolveVocationalActive } from '@/lib/config/feature-flags';
++import { buildCourseScaleInstruction } from '@/lib/types/course-scale';
+ const log = createLogger('Outlines Stream');
+ 
+ export const maxDuration = 300;
+@@ -413,12 +414,22 @@ export async function POST(req: NextRequest) {
+     // Check if Interactive Mode or server-enabled Task Engine mode is enabled.
+     const interactiveMode = requirements.interactiveMode ?? false;
+     const taskEngineMode = resolveVocationalActive(requirements);
++
++    // Apply course scale instruction (if specified)
++    const scaleInstruction = buildCourseScaleInstruction(requirements.courseScale);
++    const enrichedRequirements: UserRequirements = {
++      ...requirements,
++      requirement: scaleInstruction
++        ? `${requirements.requirement}${scaleInstruction}`
++        : requirements.requirement,
++    };
++
+     // Standard outline generation is byte-identical to the package path. The
+     // two app-only modes retain their own templates but share the same inputs.
+     // The standard branch receives the N3 RESOLVED slice (unresolvable vision
+     // images removed, mapping naming only resolved ids) so its placeholder
+     // text never promises an image this route will not attach.
+-    let prompts: { system: string; user: string } | null = buildOutlinePrompt(requirements, {
++    let prompts: { system: string; user: string } | null = buildOutlinePrompt(enrichedRequirements, {
+       pdfText,
+       pdfImages: resolvedPdfImages ?? pdfImages,
+       visionEnabled: hasVision,
+@@ -434,7 +445,7 @@ export async function POST(req: NextRequest) {
+         ? PROMPT_IDS.TASK_ENGINE_OUTLINES
+         : PROMPT_IDS.INTERACTIVE_OUTLINES;
+       prompts = buildPrompt(promptId, {
+-        requirement: requirements.requirement,
++        requirement: enrichedRequirements.requirement,
+         pdfContent: pdfText ? pdfText.substring(0, MAX_PDF_CONTENT_CHARS) : 'None',
+         availableImages: availableImagesText,
+         researchContext: researchContext || 'None',
+diff --git a/app/api/interactive-library/[stageId]/[filename]/route.ts b/app/api/interactive-library/[stageId]/[filename]/route.ts
+new file mode 100644
+index 00000000..d4215ce5
+--- /dev/null
++++ b/app/api/interactive-library/[stageId]/[filename]/route.ts
+@@ -0,0 +1,34 @@
++import { NextRequest, NextResponse } from 'next/server';
++import { getInteractiveHtmlFile } from '@/lib/server/interactive-library';
++
++export async function GET(
++  req: NextRequest,
++  context: { params: Promise<{ stageId: string; filename: string }> },
++) {
++  const { stageId, filename } = await context.params;
++  const decodedFilename = decodeURIComponent(filename);
++
++  const result = await getInteractiveHtmlFile(stageId, decodedFilename);
++  if (!result) {
++    return new NextResponse('Interactive game file not found', { status: 404 });
++  }
++
++  const { searchParams } = new URL(req.url);
++  const isDownload = searchParams.get('download') === '1';
++
++  const headers = new Headers();
++  headers.set('Content-Type', 'text/html; charset=utf-8');
++
++  if (isDownload) {
++    const downloadName = encodeURIComponent(`${result.title}.html`);
++    headers.set('Content-Disposition', `attachment; filename*=UTF-8''${downloadName}`);
++  } else {
++    headers.set('Content-Disposition', 'inline');
++    headers.set('X-Frame-Options', 'SAMEORIGIN');
++  }
++
++  return new NextResponse(result.html, {
++    status: 200,
++    headers,
++  });
++}
+diff --git a/app/api/interactive-library/route.ts b/app/api/interactive-library/route.ts
+new file mode 100644
+index 00000000..734573b2
+--- /dev/null
++++ b/app/api/interactive-library/route.ts
+@@ -0,0 +1,65 @@
++import { NextRequest } from 'next/server';
++import { apiSuccess, apiError } from '@/lib/server/api-response';
++import {
++  listInteractiveLibrary,
++  backfillInteractiveLibrary,
++} from '@/lib/server/interactive-library';
++import { createLogger } from '@/lib/logger';
++
++const log = createLogger('InteractiveLibraryAPI');
++
++export async function GET(req: NextRequest) {
++  try {
++    const { searchParams } = new URL(req.url);
++    const force = searchParams.get('force') === '1';
++    if (searchParams.get('backfill') === '1' || searchParams.get('refresh') === '1' || force) {
++      const count = await backfillInteractiveLibrary({ force });
++      log.info(`Manual sync/backfill executed, processed ${count} items`);
++    }
++
++    const overview = await listInteractiveLibrary();
++    return apiSuccess({
++      courses: overview.courses,
++      totalItems: overview.totalItems,
++      typeCounts: overview.typeCounts,
++      data: {
++        courses: overview.courses,
++        totalItems: overview.totalItems,
++        typeCounts: overview.typeCounts,
++      },
++    });
++  } catch (error) {
++    log.error('Failed to get interactive library:', error);
++    return apiError('INTERNAL_ERROR', 500, 'Failed to fetch interactive library');
++  }
++}
++
++export async function POST(req: NextRequest) {
++  try {
++    let force = false;
++    try {
++      const body = await req.json();
++      force = Boolean(body?.force);
++    } catch {
++      // Body may be empty
++    }
++
++    log.info(`Interactive library sync requested (force=${force})`);
++    const count = await backfillInteractiveLibrary({ force });
++    const overview = await listInteractiveLibrary();
++    return apiSuccess({
++      processed: count,
++      courses: overview.courses,
++      totalItems: overview.totalItems,
++      typeCounts: overview.typeCounts,
++      data: {
++        courses: overview.courses,
++        totalItems: overview.totalItems,
++        typeCounts: overview.typeCounts,
++      },
++    });
++  } catch (error) {
++    log.error('Failed to sync interactive library:', error);
++    return apiError('INTERNAL_ERROR', 500, 'Failed to sync interactive library');
++  }
++}
 diff --git a/app/api/stages/[id]/route.ts b/app/api/stages/[id]/route.ts
-index 6bc07e84..23682901 100644
+index 6bc07e84..f01373a8 100644
 --- a/app/api/stages/[id]/route.ts
 +++ b/app/api/stages/[id]/route.ts
-@@ -27,6 +27,8 @@ import { getOwnerScopedDocumentStore } from '@/lib/server/agent-runtime/owner-sc
+@@ -27,6 +27,12 @@ import { getOwnerScopedDocumentStore } from '@/lib/server/agent-runtime/owner-sc
  import { ownerApiError, ownerJson, ownerNotFound } from '@/lib/server/agent-runtime/route-response';
  import { withRequestOwnerId } from '@/lib/server/agent-runtime/with-owner';
  import { STAGE_NAME_MAX_LENGTH } from '@/lib/server/agent-runtime/stage-limits';
 +import { getSessionPayload } from '@/lib/server/auth/session';
 +import { getServerPersistenceProvider } from '@/lib/persistence/server-provider';
++import {
++  renameInteractiveLibraryStage,
++  deleteInteractiveLibraryStage,
++} from '@/lib/server/interactive-library';
  
  export const runtime = 'nodejs';
  
-@@ -180,10 +182,26 @@ export async function PUT(req: NextRequest, { params }: Params) {
+@@ -107,6 +113,7 @@ export async function PATCH(req: NextRequest, { params }: Params) {
+         ...document,
+         stage: { ...document.stage, name, updatedAt: Date.now() },
+       });
++      void renameInteractiveLibraryStage(id, name).catch(() => {});
+     } catch (error) {
+       return mapSaveError(error, responseHeaders);
+     }
+@@ -176,14 +183,92 @@ export async function PUT(req: NextRequest, { params }: Params) {
+   });
+ }
+ 
+-// DELETE /api/stages/[id] — remove the course and its scenes/outline.
++// DELETE /api/stages/[id] — remove the course completely from DB, disk files, and interactive library.
  export async function DELETE(req: NextRequest, { params }: Params) {
    if (!isAgentRuntimeConfigured()) return new Response('Not found', { status: 404 });
  
 +  const session = getSessionPayload(req);
 +  const isAdmin = session?.role === 'admin';
++  const { id } = await params;
 +
    return withRequestOwnerId(req, async (ownerId, responseHeaders) => {
-     const { id } = await params;
-     const store = await getOwnerScopedDocumentStore(ownerId);
+-    const { id } = await params;
+-    const store = await getOwnerScopedDocumentStore(ownerId);
 -    await store.deleteDocument(id);
+-    return ownerJson({ ok: true }, 200, responseHeaders);
++    let deletedViaStore = false;
 +    try {
++      const store = await getOwnerScopedDocumentStore(ownerId);
 +      await store.deleteDocument(id);
-+    } catch (err) {
-+      if (isAdmin) {
-+        try {
-+          const provider = await getServerPersistenceProvider(process.env.DATABASE_URL ?? '');
-+          await provider.documentStore.deleteDocument(id);
-+        } catch (innerErr) {
-+          throw innerErr;
-+        }
-+      } else {
-+        throw err;
-+      }
++      deletedViaStore = true;
++    } catch {
++      // Owner-scoped delete failed (e.g. foreign owner); handled via admin cascade below
 +    }
-     return ownerJson({ ok: true }, 200, responseHeaders);
++
++    // 1. Direct database cascade purge if admin or store didn't handle it
++    if (!deletedViaStore && (isAdmin || !process.env.DATABASE_URL)) {
++      if (process.env.DATABASE_URL) {
++        try {
++          const { Pool } = await import('pg');
++          const pool = new Pool({ connectionString: process.env.DATABASE_URL });
++          await pool.query('DELETE FROM document_scenes WHERE stage_id = $1', [id]);
++          await pool.query('DELETE FROM stage_meta WHERE stage_id = $1', [id]);
++          await pool.query('DELETE FROM document_stages WHERE id = $1', [id]);
++          try {
++            await pool.query('DELETE FROM document_asset_refs WHERE stage_id = $1', [id]);
++          } catch {}
++          try {
++            await pool.query('DELETE FROM document_asset_withdrawals WHERE stage_id = $1', [id]);
++          } catch {}
++          await pool.end();
++        } catch (dbErr) {
++          console.warn(`[DELETE /api/stages/${id}] Direct DB deletion encountered error:`, dbErr);
++        }
++      }
++    } else if (!deletedViaStore && !isAdmin) {
++      return ownerApiError('INVALID_REQUEST', 403, 'Permission denied', responseHeaders);
++    }
++
++    // 2. Direct database cleanup even if store delete succeeded (ensure stage_meta and scenes are clean)
++    if (isAdmin && process.env.DATABASE_URL) {
++      try {
++        const { Pool } = await import('pg');
++        const pool = new Pool({ connectionString: process.env.DATABASE_URL });
++        await pool.query('DELETE FROM document_scenes WHERE stage_id = $1', [id]);
++        await pool.query('DELETE FROM stage_meta WHERE stage_id = $1', [id]);
++        await pool.query('DELETE FROM document_stages WHERE id = $1', [id]);
++        await pool.end();
++      } catch {}
++    }
++
++    // 3. Purge physical files in data/classrooms/
++    try {
++      const { promises: fsPromises } = await import('fs');
++      const pathModule = await import('path');
++      const classroomsDir = pathModule.join(process.cwd(), 'data', 'classrooms');
++      const jsonPath = pathModule.join(classroomsDir, `${id}.json`);
++      const mediaDirPath = pathModule.join(classroomsDir, id);
++
++      await fsPromises.rm(jsonPath, { force: true }).catch(() => {});
++      await fsPromises.rm(mediaDirPath, { recursive: true, force: true }).catch(() => {});
++
++      // Clean up any classroom-jobs for this stage
++      const jobsDir = pathModule.join(process.cwd(), 'data', 'classroom-jobs');
++      try {
++        const jobFiles = await fsPromises.readdir(jobsDir);
++        for (const jf of jobFiles) {
++          if (jf.includes(id)) {
++            await fsPromises.rm(pathModule.join(jobsDir, jf), { force: true }).catch(() => {});
++          }
++        }
++      } catch {}
++    } catch (fsErr) {
++      console.warn(`[DELETE /api/stages/${id}] Filesystem purge error:`, fsErr);
++    }
++
++    // 4. Purge interactive games folder in data/interactive-library/
++    try {
++      await deleteInteractiveLibraryStage(id);
++    } catch (libErr) {
++      console.warn(`[DELETE /api/stages/${id}] Interactive library delete error:`, libErr);
++    }
++
++    return ownerJson({ ok: true, success: true }, 200, responseHeaders);
    });
  }
 diff --git a/app/api/stages/route.ts b/app/api/stages/route.ts
-index a85831b5..19b5e76d 100644
+index a85831b5..ffa0a5ee 100644
 --- a/app/api/stages/route.ts
 +++ b/app/api/stages/route.ts
 @@ -24,6 +24,9 @@ import { ownerJson } from '@/lib/server/agent-runtime/route-response';
@@ -689,7 +1378,7 @@ index a85831b5..19b5e76d 100644
  export const runtime = 'nodejs';
  
  /** Mint a fresh, collision-free course id in the same `stage-` family as the agent tools. */
-@@ -35,9 +38,24 @@ function createStageId(): string {
+@@ -35,9 +38,37 @@ function createStageId(): string {
  export async function GET(req: NextRequest) {
    if (!isAgentRuntimeConfigured()) return new Response('Not found', { status: 404 });
  
@@ -700,14 +1389,27 @@ index a85831b5..19b5e76d 100644
      const store = await getOwnerScopedDocumentStore(ownerId);
 -    const stages = await store.listDocuments();
 +    let stages = await store.listDocuments();
-+    if (isAdmin) {
++    if (isAdmin && process.env.DATABASE_URL) {
 +      try {
-+        const provider = await getServerPersistenceProvider(process.env.DATABASE_URL ?? '');
-+        const allDocs = await provider.documentStore.listDocuments();
++        const { Pool } = await import('pg');
++        const pool = new Pool({ connectionString: process.env.DATABASE_URL });
++        const res = await pool.query(
++          'SELECT id, name, interactive_mode, task_engine_mode, created_at, updated_at FROM document_stages ORDER BY updated_at DESC',
++        );
 +        const map = new Map<string, any>();
-+        for (const doc of allDocs) map.set(doc.id, doc);
++        for (const doc of res.rows) {
++          map.set(doc.id, {
++            id: doc.id,
++            name: doc.name,
++            interactiveMode: doc.interactive_mode,
++            taskEngineMode: doc.task_engine_mode,
++            createdAt: doc.created_at,
++            updatedAt: doc.updated_at,
++          });
++        }
 +        for (const s of stages) map.set(s.id, s);
 +        stages = Array.from(map.values()).sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
++        await pool.end();
 +      } catch {
 +        // Keep store stages on error
 +      }
@@ -715,12 +1417,1807 @@ index a85831b5..19b5e76d 100644
      return ownerJson({ stages }, 200, responseHeaders);
    });
  }
+diff --git a/app/batch-studio/page.tsx b/app/batch-studio/page.tsx
+new file mode 100644
+index 00000000..d2c504c8
+--- /dev/null
++++ b/app/batch-studio/page.tsx
+@@ -0,0 +1,967 @@
++'use client';
++
++import React, { useState, useEffect, useRef } from 'react';
++import { useRouter } from 'next/navigation';
++import {
++  UploadCloud,
++  FileText,
++  Layers,
++  Play,
++  CheckCircle2,
++  AlertCircle,
++  Clock,
++  ArrowLeft,
++  RefreshCw,
++  Sparkles,
++  ExternalLink,
++  Edit3,
++  Trash2,
++  Volume2,
++  Image as ImageIcon,
++  Check,
++  Ban,
++  XCircle,
++  Zap,
++  Target,
++  BookOpen,
++  Gamepad2,
++} from 'lucide-react';
++import { Button } from '@/components/ui/button';
++import { Card } from '@/components/ui/card';
++import { Badge } from '@/components/ui/badge';
++import { Progress } from '@/components/ui/progress';
++import { Switch } from '@/components/ui/switch';
++import { toast } from 'sonner';
++import type { BatchJob, BatchJobMode, BatchSubTask } from '@/lib/server/batch-generation/types';
++import { type CourseScale, COURSE_SCALES } from '@/lib/types/course-scale';
++
++export default function BatchStudioPage() {
++  const router = useRouter();
++
++  // 状态
++  const [activeTab, setActiveTab] = useState<'create' | 'board'>('create');
++  const [files, setFiles] = useState<File[]>([]);
++  const [mode, setMode] = useState<BatchJobMode>('batch_independent');
++  const [prompt, setPrompt] = useState<string>(
++    '提炼核心教学重难点，为每一页生成生动精彩的教师讲解台词与互动问答，制作富有沉浸感的互动微课堂。',
++  );
++  const [enableTTS, setEnableTTS] = useState<boolean>(true);
++  const [enableImageGeneration, setEnableImageGeneration] = useState<boolean>(true);
++  const [enableInteractiveMode, setEnableInteractiveMode] = useState<boolean>(false);
++  const [courseScale, setCourseScale] = useState<CourseScale>('standard');
++
++  const [submitting, setSubmitting] = useState<boolean>(false);
++  const [cancellingJob, setCancellingJob] = useState<boolean>(false);
++  const [activeJobId, setActiveJobId] = useState<string | null>(null);
++  const [currentJob, setCurrentJob] = useState<BatchJob | null>(null);
++  const [recentJobs, setRecentJobs] = useState<
++    Array<{
++      id: string;
++      title: string;
++      status: string;
++      progress: number;
++      createdAt: string;
++      totalTasks: number;
++      completedTasks: number;
++      cancelledTasks?: number;
++    }>
++  >([]);
++
++  const fileInputRef = useRef<HTMLInputElement>(null);
++
++  // 文件选择与拖拽
++  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
++    if (e.target.files) {
++      const selected = Array.from(e.target.files);
++      setFiles((prev) => [...prev, ...selected]);
++    }
++  };
++
++  const handleDrop = (e: React.DragEvent) => {
++    e.preventDefault();
++    if (e.dataTransfer.files) {
++      const dropped = Array.from(e.dataTransfer.files);
++      setFiles((prev) => [...prev, ...dropped]);
++    }
++  };
++
++  const removeFile = (index: number) => {
++    setFiles((prev) => prev.filter((_, i) => i !== index));
++  };
++
++  // 提交任务
++  const handleSubmit = async () => {
++    if (files.length === 0) {
++      toast.error('请至少上传一个课件文件！');
++      return;
++    }
++
++    setSubmitting(true);
++    const formData = new FormData();
++    files.forEach((file) => formData.append('files', file));
++    formData.append('mode', mode);
++    formData.append('prompt', prompt);
++    formData.append('enableTTS', enableTTS ? 'true' : 'false');
++    formData.append('enableImageGeneration', enableImageGeneration ? 'true' : 'false');
++    formData.append('enableInteractiveMode', enableInteractiveMode ? 'true' : 'false');
++    formData.append('courseScale', courseScale);
++
++    try {
++      const res = await fetch('/api/batch-generate', {
++        method: 'POST',
++        body: formData,
++      });
++      const data = await res.json();
++
++      if (!res.ok || !data.success) {
++        throw new Error(data.error || '创建批量制课任务失败');
++      }
++
++      toast.success('批量制课任务已成功提交，后台正在全力流水线生产中！');
++      setActiveJobId(data.batchId);
++      setActiveTab('board');
++      setFiles([]);
++      loadJobDetails(data.batchId);
++      loadRecentJobs();
++    } catch (err) {
++      toast.error(err instanceof Error ? err.message : '提交任务失败');
++    } finally {
++      setSubmitting(false);
++    }
++  };
++
++  // 查询当前作业详情
++  const loadJobDetails = async (jobId: string) => {
++    try {
++      const res = await fetch(`/api/batch-generate/${jobId}`);
++      if (res.ok) {
++        const data = await res.json();
++        if (data.success && data.job) {
++          setCurrentJob(data.job);
++        }
++      }
++    } catch {
++      // 忽略轻微轮询错误
++    }
++  };
++
++  // 查询历史作业列表
++  const loadRecentJobs = async () => {
++    try {
++      const res = await fetch('/api/batch-generate');
++      if (res.ok) {
++        const data = await res.json();
++        if (data.success && data.jobs) {
++          setRecentJobs(data.jobs);
++          if (!activeJobId && data.jobs.length > 0) {
++            setActiveJobId(data.jobs[0].id);
++          }
++        }
++      }
++    } catch {
++      // 忽略轻微错误
++    }
++  };
++
++  useEffect(() => {
++    loadRecentJobs();
++  }, []);
++
++  // 自动轮询进度
++  useEffect(() => {
++    if (!activeJobId) return;
++
++    loadJobDetails(activeJobId);
++
++    const isRunning =
++      !currentJob || currentJob.status === 'queued' || currentJob.status === 'processing';
++
++    if (isRunning) {
++      const timer = setInterval(() => {
++        loadJobDetails(activeJobId);
++      }, 3000);
++      return () => clearInterval(timer);
++    }
++  }, [activeJobId, currentJob?.status]);
++
++  // 中断整个任务
++  const handleCancelJob = async () => {
++    if (!currentJob) return;
++
++    const confirmed = window.confirm(
++      '确定要中断当前批量制课任务吗？\n\n中断后将立即停止正在运行的生成，并取消所有队列中尚未制作的课件，避免额外浪费 Token 资源。',
++    );
++    if (!confirmed) return;
++
++    setCancellingJob(true);
++    try {
++      const res = await fetch(`/api/batch-generate/${currentJob.id}`, {
++        method: 'POST',
++        headers: { 'Content-Type': 'application/json' },
++        body: JSON.stringify({ action: 'cancel' }),
++      });
++      const data = await res.json();
++      if (!res.ok || !data.success) {
++        throw new Error(data.error || '中断任务失败');
++      }
++      toast.success('任务已成功中断，已停止后续文件生成与 Token 消耗');
++      await loadJobDetails(currentJob.id);
++      await loadRecentJobs();
++    } catch (err) {
++      toast.error(err instanceof Error ? err.message : '中断操作失败');
++    } finally {
++      setCancellingJob(false);
++    }
++  };
++
++  // 从队列中移除/取消某个待生成的子任务
++  const handleCancelSubTask = async (taskId: string, fileName: string) => {
++    if (!currentJob) return;
++
++    const confirmed = window.confirm(
++      `确定要将课件「${fileName}」从生成队列中移除吗？\n\n移除后该课件将不会被制作，为您节省大模型 Token。`,
++    );
++    if (!confirmed) return;
++
++    try {
++      const res = await fetch(`/api/batch-generate/${currentJob.id}`, {
++        method: 'POST',
++        headers: { 'Content-Type': 'application/json' },
++        body: JSON.stringify({ action: 'cancel_task', taskId }),
++      });
++      const data = await res.json();
++      if (!res.ok || !data.success) {
++        throw new Error(data.error || '移除子任务失败');
++      }
++      toast.success(`已将「${fileName}」从队列中移除`);
++      await loadJobDetails(currentJob.id);
++      await loadRecentJobs();
++    } catch (err) {
++      toast.error(err instanceof Error ? err.message : '移除失败');
++    }
++  };
++
++  // 删除任务记录
++  const handleDeleteJob = async (jobId: string) => {
++    const confirmed = window.confirm(
++      '确定要彻底删除该批处理任务记录吗？相关临时缓存文件也将被清理。',
++    );
++    if (!confirmed) return;
++
++    try {
++      const res = await fetch(`/api/batch-generate/${jobId}`, {
++        method: 'DELETE',
++      });
++      const data = await res.json();
++      if (!res.ok || !data.success) {
++        throw new Error(data.error || '删除记录失败');
++      }
++      toast.success('任务记录已彻底删除');
++      if (activeJobId === jobId) {
++        setActiveJobId(null);
++        setCurrentJob(null);
++      }
++      await loadRecentJobs();
++    } catch (err) {
++      toast.error(err instanceof Error ? err.message : '删除失败');
++    }
++  };
++
++  const getStepBadge = (task: BatchSubTask) => {
++    switch (task.status) {
++      case 'extracting':
++        return (
++          <Badge className="bg-amber-500/15 text-amber-600 dark:text-amber-400 border-amber-500/30">
++            MinerU 解析提取中
++          </Badge>
++        );
++      case 'planning_outline':
++        return (
++          <Badge className="bg-blue-500/15 text-blue-600 dark:text-blue-400 border-blue-500/30">
++            大纲规划中
++          </Badge>
++        );
++      case 'building_scenes':
++        return (
++          <Badge className="bg-purple-500/15 text-purple-600 dark:text-purple-400 border-purple-500/30">
++            场景与互动构建
++          </Badge>
++        );
++      case 'generating_tts':
++        return (
++          <Badge className="bg-indigo-500/15 text-indigo-600 dark:text-indigo-400 border-indigo-500/30">
++            TTS 语音合成中
++          </Badge>
++        );
++      case 'completed':
++        return (
++          <Badge className="bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 border-emerald-500/30">
++            已完成
++          </Badge>
++        );
++      case 'cancelled':
++        return (
++          <Badge variant="outline" className="border-slate-300 text-slate-400 dark:border-slate-700">
++            已取消/已移除
++          </Badge>
++        );
++      case 'failed':
++        return <Badge variant="destructive">生成失败</Badge>;
++      default:
++        return <Badge variant="outline">队列排队中</Badge>;
++    }
++  };
++
++  return (
++    <div className="min-h-screen bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-slate-100 flex flex-col">
++      {/* 顶部导航 */}
++      <header className="border-b border-slate-200 dark:border-slate-800 bg-white/80 dark:bg-slate-900/80 backdrop-blur sticky top-0 z-40">
++        <div className="max-w-6xl mx-auto px-4 h-16 flex items-center justify-between">
++          <div className="flex items-center gap-3">
++            <Button
++              variant="ghost"
++              size="sm"
++              onClick={() => router.push('/')}
++              className="gap-1.5 text-slate-600 dark:text-slate-300"
++            >
++              <ArrowLeft className="w-4 h-4" />
++              返回首页
++            </Button>
++            <div className="h-4 w-px bg-slate-200 dark:border-slate-700" />
++            <div className="flex items-center gap-2">
++              <div className="w-8 h-8 rounded-lg bg-gradient-to-tr from-amber-500 to-orange-400 flex items-center justify-center text-white shadow-sm shadow-orange-500/20">
++                <Sparkles className="w-4 h-4" />
++              </div>
++              <div>
++                <h1 className="font-semibold text-base leading-tight">批量快速制课工坊</h1>
++                <p className="text-xs text-slate-500 dark:text-slate-400">
++                  免交互对话 · 批量课件导入 · 全自动生产
++                </p>
++              </div>
++            </div>
++          </div>
++
++          <div className="flex items-center gap-2">
++            <Button
++              variant="outline"
++              size="sm"
++              onClick={() => router.push('/interactive-hub')}
++              className="gap-1.5 border-purple-200 dark:border-purple-800 text-purple-600 dark:text-purple-400 hover:bg-purple-50 dark:hover:bg-purple-950/40"
++            >
++              <Gamepad2 className="w-4 h-4" />
++              互动展厅
++            </Button>
++            <Button
++              variant="outline"
++              size="sm"
++              onClick={() => router.push('/my-courses')}
++              className="gap-1.5 border-indigo-200 dark:border-indigo-800 text-indigo-600 dark:text-indigo-400 hover:bg-indigo-50 dark:hover:bg-indigo-950/40"
++            >
++              <BookOpen className="w-4 h-4" />
++              我的课程
++            </Button>
++            <Button
++              variant={activeTab === 'create' ? 'default' : 'ghost'}
++              size="sm"
++              onClick={() => setActiveTab('create')}
++              className="gap-1.5"
++            >
++              <UploadCloud className="w-4 h-4" />
++              新建任务
++            </Button>
++            <Button
++              variant={activeTab === 'board' ? 'default' : 'ghost'}
++              size="sm"
++              onClick={() => {
++                setActiveTab('board');
++                if (!activeJobId && recentJobs.length > 0) {
++                  setActiveJobId(recentJobs[0].id);
++                }
++              }}
++              className="gap-1.5 relative"
++            >
++              <Layers className="w-4 h-4" />
++              任务看板
++              {currentJob && currentJob.status === 'processing' && (
++                <span className="w-2 h-2 rounded-full bg-amber-500 animate-pulse absolute -top-0.5 -right-0.5" />
++              )}
++            </Button>
++          </div>
++        </div>
++      </header>
++
++      {/* 主工作区 */}
++      <main className="flex-1 max-w-6xl w-full mx-auto px-4 py-8">
++        {activeTab === 'create' ? (
++          /* 新建批量制课任务 */
++          <div className="max-w-3xl mx-auto space-y-6">
++            <div>
++              <h2 className="text-xl font-bold tracking-tight mb-1">新建批量制课任务</h2>
++              <p className="text-sm text-slate-500 dark:text-slate-400">
++                上传一个或多个课件资料，选择制课策略，系统将在后台自动解析并完成课程组装。
++              </p>
++            </div>
++
++            {/* 文件上传区 */}
++            <div
++              onDragOver={(e) => e.preventDefault()}
++              onDrop={handleDrop}
++              onClick={() => fileInputRef.current?.click()}
++              className="border-2 border-dashed border-slate-300 dark:border-slate-700 hover:border-amber-500/70 dark:hover:border-amber-500/70 rounded-2xl p-8 text-center cursor-pointer transition-all bg-white dark:bg-slate-900/50 hover:bg-amber-50/20 group"
++            >
++              <input
++                ref={fileInputRef}
++                type="file"
++                multiple
++                accept=".pptx,.pdf,.docx,.txt,.md"
++                onChange={handleFileChange}
++                className="hidden"
++              />
++              <div className="w-12 h-12 rounded-xl bg-amber-100 dark:bg-amber-950/40 text-amber-600 dark:text-amber-400 flex items-center justify-center mx-auto mb-3 group-hover:scale-105 transition-transform">
++                <UploadCloud className="w-6 h-6" />
++              </div>
++              <p className="font-medium text-sm mb-1">
++                点击或拖拽课件文件到此处（支持批量多选）
++              </p>
++              <p className="text-xs text-slate-400 dark:text-slate-500">
++                支持 PPTX、PDF（高精 MinerU 解析）、DOCX、Markdown、TXT 格式
++              </p>
++            </div>
++
++            {/* 已选文件列表 */}
++            {files.length > 0 && (
++              <div className="space-y-2">
++                <div className="flex items-center justify-between text-xs text-slate-500">
++                  <span>已选择 {files.length} 个课件文件：</span>
++                  <button
++                    onClick={() => setFiles([])}
++                    className="text-red-500 hover:underline hover:text-red-600"
++                  >
++                    清空列表
++                  </button>
++                </div>
++                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 max-h-48 overflow-y-auto pr-1">
++                  {files.map((file, idx) => (
++                    <div
++                      key={idx}
++                      className="flex items-center justify-between p-2.5 rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 text-xs shadow-xs"
++                    >
++                      <div className="flex items-center gap-2 truncate pr-2">
++                        <FileText className="w-4 h-4 text-amber-500 shrink-0" />
++                        <span className="truncate font-medium">{file.name}</span>
++                      </div>
++                      <button
++                        onClick={(e) => {
++                          e.stopPropagation();
++                          removeFile(idx);
++                        }}
++                        className="text-slate-400 hover:text-red-500 p-1 shrink-0"
++                      >
++                        ✕
++                      </button>
++                    </div>
++                  ))}
++                </div>
++              </div>
++            )}
++
++            {/* 模式选择 */}
++            <div className="space-y-3">
++              <label className="text-sm font-medium text-slate-700 dark:text-slate-300">
++                生成模式选择
++              </label>
++              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
++                <div
++                  onClick={() => setMode('batch_independent')}
++                  className={`p-4 rounded-xl border-2 cursor-pointer transition-all ${
++                    mode === 'batch_independent'
++                      ? 'border-amber-500 bg-amber-50/40 dark:bg-amber-950/20 shadow-sm'
++                      : 'border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/40 hover:border-slate-300'
++                  }`}
++                >
++                  <div className="flex items-center justify-between mb-2">
++                    <span className="font-semibold text-sm flex items-center gap-2">
++                      <Layers className="w-4 h-4 text-amber-500" />
++                      批量独立生成 (一对一)
++                    </span>
++                    {mode === 'batch_independent' && (
++                      <div className="w-4 h-4 rounded-full bg-amber-500 text-white flex items-center justify-center">
++                        <Check className="w-2.5 h-2.5" />
++                      </div>
++                    )}
++                  </div>
++                  <p className="text-xs text-slate-500 dark:text-slate-400 leading-relaxed">
++                    每个文件生成一门独立的微课堂。后台自动化队列排队依次生产（上传 10 个课件即生成 10 门课）。
++                  </p>
++                </div>
++
++                <div
++                  onClick={() => setMode('single_merged')}
++                  className={`p-4 rounded-xl border-2 cursor-pointer transition-all ${
++                    mode === 'single_merged'
++                      ? 'border-amber-500 bg-amber-50/40 dark:bg-amber-950/20 shadow-sm'
++                      : 'border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/40 hover:border-slate-300'
++                  }`}
++                >
++                  <div className="flex items-center justify-between mb-2">
++                    <span className="font-semibold text-sm flex items-center gap-2">
++                      <Sparkles className="w-4 h-4 text-amber-500" />
++                      多资料融合为一课 (多合一)
++                    </span>
++                    {mode === 'single_merged' && (
++                      <div className="w-4 h-4 rounded-full bg-amber-500 text-white flex items-center justify-center">
++                        <Check className="w-2.5 h-2.5" />
++                      </div>
++                    )}
++                  </div>
++                  <p className="text-xs text-slate-500 dark:text-slate-400 leading-relaxed">
++                    将上传的所有资料内容深度融合、萃取关键考点，制作一门章节知识全面的综合互动微课。
++                  </p>
++                </div>
++              </div>
++            </div>
++
++            {/* 指导要求配置 */}
++            <div className="space-y-2">
++              <label className="text-sm font-medium text-slate-700 dark:text-slate-300">
++                教学总要求 / 提示词指导 (Prompt)
++              </label>
++              <textarea
++                value={prompt}
++                onChange={(e) => setPrompt(e.target.value)}
++                rows={3}
++                className="w-full text-xs p-3 rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 focus:outline-none focus:ring-2 focus:ring-amber-500/20 focus:border-amber-500"
++                placeholder="输入指导生成的总要求，例如：语气亲切幽默，增加针对性测验..."
++              />
++            </div>
++
++            {/* 课程篇幅与形态规格选择 */}
++            <div className="space-y-2">
++              <label className="text-sm font-medium text-slate-700 dark:text-slate-300 flex items-center justify-between">
++                <span className="flex items-center gap-1.5">
++                  <Layers className="w-4 h-4 text-amber-500" />
++                  课程篇幅与教学形态
++                </span>
++                <span className="text-xs font-normal text-slate-500 dark:text-slate-400">
++                  针对不同教学场景控制课件总页数与互动结构
++                </span>
++              </label>
++              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
++                {(Object.keys(COURSE_SCALES) as CourseScale[]).map((scaleKey) => {
++                  const item = COURSE_SCALES[scaleKey];
++                  const isSelected = courseScale === scaleKey;
++                  return (
++                    <div
++                      key={scaleKey}
++                      onClick={() => setCourseScale(scaleKey)}
++                      className={`cursor-pointer p-3 rounded-xl border text-left transition-all ${
++                        isSelected
++                          ? 'border-amber-500 bg-amber-500/10 shadow-xs ring-1 ring-amber-500/40'
++                          : 'border-slate-200 dark:border-slate-800 bg-white/70 dark:bg-slate-900/60 hover:border-slate-300 dark:hover:border-slate-700'
++                      }`}
++                    >
++                      <div className="flex items-center justify-between gap-1 mb-1">
++                        <span className="font-semibold text-xs flex items-center gap-1.5 text-slate-800 dark:text-slate-200">
++                          {scaleKey === 'micro' && <Zap className="w-3.5 h-3.5 text-amber-500" />}
++                          {scaleKey === 'standard' && <Target className="w-3.5 h-3.5 text-cyan-500" />}
++                          {scaleKey === 'thematic' && <BookOpen className="w-3.5 h-3.5 text-violet-500" />}
++                          {item.label}
++                        </span>
++                        <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 border border-slate-200/60 dark:border-slate-700/60">
++                          {item.badge}
++                        </span>
++                      </div>
++                      <p className="text-[11px] text-slate-500 dark:text-slate-400 leading-snug">
++                        {item.description}
++                      </p>
++                      <p className="text-[10px] text-slate-400 dark:text-slate-500 mt-1 line-clamp-1">
++                        {item.structure}
++                      </p>
++                    </div>
++                  );
++                })}
++              </div>
++            </div>
++
++            {/* 附加功能开关（包含深度交互、TTS、配图） */}
++            <div className="p-4 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-100/70 dark:bg-slate-900/80 space-y-3">
++              <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 text-xs">
++                {/* 深度交互模式 */}
++                <label className="flex items-start gap-2.5 cursor-pointer p-2 rounded-lg bg-white dark:bg-slate-800/60 border border-slate-200/60 dark:border-slate-700/60 hover:border-amber-500/40 transition-colors">
++                  <Switch
++                    checked={enableInteractiveMode}
++                    onCheckedChange={setEnableInteractiveMode}
++                    className="mt-0.5"
++                  />
++                  <div>
++                    <span className="flex items-center gap-1 font-semibold text-slate-800 dark:text-slate-200">
++                      <Zap className="w-3.5 h-3.5 text-amber-500" />
++                      深度交互模式
++                    </span>
++                    <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5 leading-snug">
++                      强化互动与练习，优先生成互动探究与问答场景
++                    </p>
++                  </div>
++                </label>
++
++                {/* 语音旁白 */}
++                <label className="flex items-start gap-2.5 cursor-pointer p-2 rounded-lg bg-white dark:bg-slate-800/60 border border-slate-200/60 dark:border-slate-700/60 hover:border-amber-500/40 transition-colors">
++                  <Switch
++                    checked={enableTTS}
++                    onCheckedChange={setEnableTTS}
++                    className="mt-0.5"
++                  />
++                  <div>
++                    <span className="flex items-center gap-1 font-semibold text-slate-800 dark:text-slate-200">
++                      <Volume2 className="w-3.5 h-3.5 text-slate-500" />
++                      教师语音旁白 (TTS)
++                    </span>
++                    <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5 leading-snug">
++                      使用系统配置的语音合成引擎生成拟真讲课台词
++                    </p>
++                  </div>
++                </label>
++
++                {/* AI 生图 */}
++                <label className="flex items-start gap-2.5 cursor-pointer p-2 rounded-lg bg-white dark:bg-slate-800/60 border border-slate-200/60 dark:border-slate-700/60 hover:border-amber-500/40 transition-colors">
++                  <Switch
++                    checked={enableImageGeneration}
++                    onCheckedChange={setEnableImageGeneration}
++                    className="mt-0.5"
++                  />
++                  <div>
++                    <span className="flex items-center gap-1 font-semibold text-slate-800 dark:text-slate-200">
++                      <ImageIcon className="w-3.5 h-3.5 text-slate-500" />
++                      AI 视觉配图
++                    </span>
++                    <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5 leading-snug">
++                      根据教学知识点智能生成生动的黑板多媒体插图
++                    </p>
++                  </div>
++                </label>
++              </div>
++
++              <div className="text-[11px] text-slate-400 text-right pt-1">
++                💡 自动继承系统默认配置的大模型、MinerU 解析与音色参数
++              </div>
++            </div>
++
++            {/* 提交按钮 */}
++            <Button
++              onClick={handleSubmit}
++              disabled={submitting || files.length === 0}
++              className="w-full h-11 bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-600 hover:to-orange-600 text-white font-medium text-sm gap-2 shadow-md shadow-orange-500/20"
++            >
++              {submitting ? (
++                <>
++                  <RefreshCw className="w-4 h-4 animate-spin" />
++                  正在分发上传与解析...
++                </>
++              ) : (
++                <>
++                  <Play className="w-4 h-4 fill-current" />
++                  提交批量制课任务 {files.length > 0 && `(共 ${files.length} 个课件)`}
++                </>
++              )}
++            </Button>
++          </div>
++        ) : (
++          /* 任务看板 */
++          <div className="space-y-6">
++            {/* 顶部作业总览 */}
++            {currentJob ? (
++              <Card className="p-6 bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-800 shadow-sm space-y-4">
++                <div className="flex flex-wrap items-center justify-between gap-4">
++                  <div>
++                    <div className="flex items-center gap-2 mb-1 flex-wrap">
++                      <h2 className="text-lg font-semibold">{currentJob.title}</h2>
++                      <Badge
++                        variant={
++                          currentJob.status === 'completed'
++                            ? 'default'
++                            : currentJob.status === 'cancelled'
++                            ? 'outline'
++                            : currentJob.status === 'failed'
++                            ? 'destructive'
++                            : 'secondary'
++                        }
++                        className={
++                          currentJob.status === 'cancelled'
++                            ? 'border-red-400/40 text-red-500 bg-red-50/50 dark:bg-red-950/20'
++                            : ''
++                        }
++                      >
++                        {currentJob.status === 'completed'
++                          ? '全部生产完成'
++                          : currentJob.status === 'processing'
++                          ? '正在流水线生产'
++                          : currentJob.status === 'queued'
++                          ? '排队等待执行'
++                          : currentJob.status === 'cancelled'
++                          ? '任务已中断取消'
++                          : '处理异常'}
++                      </Badge>
++                      <Badge variant="outline">
++                        {currentJob.mode === 'single_merged' ? '多资料合一' : '一对多批量'}
++                      </Badge>
++                      {currentJob.enableInteractiveMode && (
++                        <Badge
++                          variant="outline"
++                          className="border-amber-500/40 text-amber-600 dark:text-amber-400 bg-amber-500/10"
++                        >
++                          深度交互模式
++                        </Badge>
++                      )}
++                      {currentJob.courseScale && (
++                        <Badge
++                          variant="outline"
++                          className="border-cyan-500/40 text-cyan-600 dark:text-cyan-400 bg-cyan-500/10"
++                        >
++                          {COURSE_SCALES[currentJob.courseScale]?.label || currentJob.courseScale} (
++                          {COURSE_SCALES[currentJob.courseScale]?.badge || ''})
++                        </Badge>
++                      )}
++                    </div>
++                    <p className="text-xs text-slate-400 flex items-center gap-2">
++                      <Clock className="w-3.5 h-3.5" />
++                      创建时间: {new Date(currentJob.createdAt).toLocaleString()}
++                    </p>
++                  </div>
++
++                  <div className="flex items-center gap-2 flex-wrap">
++                    {/* 中断运行中的任务 */}
++                    {(currentJob.status === 'queued' || currentJob.status === 'processing') && (
++                      <Button
++                        size="sm"
++                        variant="destructive"
++                        onClick={handleCancelJob}
++                        disabled={cancellingJob}
++                        className="gap-1.5 h-8 text-xs bg-red-600 hover:bg-red-700 text-white"
++                        title="立即中断当前任务，取消后续排队文件以避免浪费 Token"
++                      >
++                        <Ban className="w-3.5 h-3.5" />
++                        {cancellingJob ? '正在中断...' : '中断任务 (停止消耗 Token)'}
++                      </Button>
++                    )}
++
++                    {/* 删除任务记录 */}
++                    {(currentJob.status === 'completed' ||
++                      currentJob.status === 'failed' ||
++                      currentJob.status === 'cancelled' ||
++                      currentJob.status === 'partially_failed') && (
++                      <Button
++                        size="sm"
++                        variant="ghost"
++                        onClick={() => handleDeleteJob(currentJob.id)}
++                        className="gap-1.5 h-8 text-xs text-slate-400 hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-950/20"
++                        title="删除该批次任务记录"
++                      >
++                        <Trash2 className="w-3.5 h-3.5" />
++                        删除记录
++                      </Button>
++                    )}
++
++                    {currentJob.resultClassroomUrl && (
++                      <>
++                        <Button
++                          size="sm"
++                          className="bg-emerald-600 hover:bg-emerald-700 text-white gap-1.5 h-8 text-xs"
++                          onClick={() => window.open(currentJob.resultClassroomUrl, '_blank')}
++                        >
++                          <ExternalLink className="w-3.5 h-3.5" />
++                          立即体验完整课堂
++                        </Button>
++                        {currentJob.resultStageId && (
++                          <Button
++                            size="sm"
++                            variant="outline"
++                            onClick={() =>
++                              router.push(`/workspace?course=${currentJob.resultStageId}`)
++                            }
++                            className="gap-1.5 h-8 text-xs"
++                          >
++                            <Edit3 className="w-3.5 h-3.5" />
++                            进入工作台编辑
++                          </Button>
++                        )}
++                      </>
++                    )}
++                  </div>
++                </div>
++
++                {/* 总进度条 */}
++                <div className="space-y-2">
++                  <div className="flex items-center justify-between text-xs font-medium">
++                    <span>
++                      生产总进度: {currentJob.completedTasks} / {currentJob.totalTasks} 门课完成
++                      {currentJob.failedTasks > 0 && ` (${currentJob.failedTasks} 门失败)`}
++                      {(currentJob.cancelledTasks || 0) > 0 &&
++                        ` (${currentJob.cancelledTasks} 门已取消)`}
++                    </span>
++                    <span className="text-amber-500 font-semibold">{currentJob.progress}%</span>
++                  </div>
++                  <Progress value={currentJob.progress} className="h-2.5" />
++                </div>
++              </Card>
++            ) : (
++              <div className="p-8 text-center text-slate-400 bg-slate-100/50 dark:bg-slate-900/50 rounded-xl">
++                暂未选中任何批处理任务，请点击“新建任务”发起课件生产。
++              </div>
++            )}
++
++            {/* 子任务明细列表 */}
++            {currentJob && (
++              <div className="space-y-3">
++                <div className="flex items-center justify-between">
++                  <h3 className="text-sm font-semibold text-slate-700 dark:text-slate-300">
++                    课件流水线生产详情列表
++                  </h3>
++                  <span className="text-xs text-slate-400">
++                    排队中的课件可点击「移除」跳过生成以节省资源
++                  </span>
++                </div>
++
++                <div className="grid grid-cols-1 gap-3">
++                  {currentJob.tasks.map((task, idx) => (
++                    <Card
++                      key={task.id}
++                      className={`p-4 border-slate-200 dark:border-slate-800 flex flex-col md:flex-row md:items-center justify-between gap-4 transition-colors ${
++                        task.status === 'cancelled'
++                          ? 'bg-slate-100/50 dark:bg-slate-900/30 opacity-70'
++                          : 'bg-white dark:bg-slate-900'
++                      }`}
++                    >
++                      <div className="space-y-1.5 min-w-0 flex-1">
++                        <div className="flex items-center gap-2 flex-wrap">
++                          <span className="text-xs font-mono text-slate-400">#{idx + 1}</span>
++                          <span className="font-medium text-sm truncate">{task.fileName}</span>
++                          {getStepBadge(task)}
++                        </div>
++                        <p className="text-xs text-slate-500 dark:text-slate-400">
++                          {task.stepMessage || '等待调度中...'}
++                        </p>
++                        {task.status !== 'completed' &&
++                          task.status !== 'failed' &&
++                          task.status !== 'cancelled' && (
++                            <div className="w-full max-w-md pt-1">
++                              <Progress value={task.progress} className="h-1.5" />
++                            </div>
++                          )}
++                      </div>
++
++                      <div className="flex items-center gap-2 shrink-0">
++                        {/* 如果该任务处于 queued 队列排队状态，且整个作业未结束，允许单独移除 */}
++                        {(currentJob.status === 'queued' ||
++                          currentJob.status === 'processing') &&
++                          task.status === 'queued' && (
++                            <Button
++                              size="sm"
++                              variant="ghost"
++                              className="h-8 text-xs text-rose-500 hover:text-rose-700 hover:bg-rose-50 dark:hover:bg-rose-950/20 gap-1"
++                              onClick={() => handleCancelSubTask(task.id, task.fileName)}
++                              title="从制作队列中移除此文件，跳过制作以节省 Token"
++                            >
++                              <XCircle className="w-3.5 h-3.5" />
++                              从队列移除
++                            </Button>
++                          )}
++
++                        {task.classroomUrl && (
++                          <>
++                            <Button
++                              size="sm"
++                              variant="default"
++                              className="h-8 text-xs gap-1 bg-emerald-600 hover:bg-emerald-700"
++                              onClick={() => window.open(task.classroomUrl, '_blank')}
++                            >
++                              <ExternalLink className="w-3 h-3" />
++                              体验课堂
++                            </Button>
++                            {task.stageId && (
++                              <Button
++                                size="sm"
++                                variant="outline"
++                                className="h-8 text-xs gap-1"
++                                onClick={() => router.push(`/workspace?course=${task.stageId}`)}
++                              >
++                                <Edit3 className="w-3 h-3" />
++                                工作区精修
++                              </Button>
++                            )}
++                          </>
++                        )}
++
++                        {task.status === 'failed' && (
++                          <span className="text-xs text-red-500 font-medium flex items-center gap-1">
++                            <AlertCircle className="w-3.5 h-3.5" />
++                            {task.error || '生成失败'}
++                          </span>
++                        )}
++
++                        {task.status === 'cancelled' && (
++                          <span className="text-xs text-slate-400 font-medium flex items-center gap-1">
++                            <Ban className="w-3 h-3" />
++                            已取消
++                          </span>
++                        )}
++                      </div>
++                    </Card>
++                  ))}
++                </div>
++              </div>
++            )}
++
++            {/* 历史批次切换 */}
++            {recentJobs.length > 1 && (
++              <div className="pt-6 border-t border-slate-200 dark:border-slate-800">
++                <div className="flex items-center justify-between mb-3">
++                  <h4 className="text-xs font-semibold text-slate-500 uppercase tracking-wider">
++                    历史生产批次
++                  </h4>
++                  <Button
++                    size="sm"
++                    variant="ghost"
++                    onClick={loadRecentJobs}
++                    className="h-7 text-xs gap-1 text-slate-400 hover:text-slate-600"
++                  >
++                    <RefreshCw className="w-3 h-3" />
++                    刷新
++                  </Button>
++                </div>
++                <div className="flex flex-wrap gap-2">
++                  {recentJobs.map((j) => (
++                    <div key={j.id} className="flex items-center gap-1">
++                      <Button
++                        size="sm"
++                        variant={activeJobId === j.id ? 'secondary' : 'outline'}
++                        onClick={() => {
++                          setActiveJobId(j.id);
++                          loadJobDetails(j.id);
++                        }}
++                        className={`text-xs gap-2 ${
++                          j.status === 'cancelled'
++                            ? 'border-red-200 dark:border-red-900/40 text-red-600/80 dark:text-red-400/80'
++                            : ''
++                        }`}
++                      >
++                        <span>{j.title}</span>
++                        <span className="text-slate-400 font-mono">({j.progress}%)</span>
++                      </Button>
++                      <button
++                        onClick={() => handleDeleteJob(j.id)}
++                        className="p-1 text-slate-300 hover:text-red-500 transition-colors"
++                        title="删除此批次"
++                      >
++                        ✕
++                      </button>
++                    </div>
++                  ))}
++                </div>
++              </div>
++            )}
++          </div>
++        )}
++      </main>
++    </div>
++  );
++}
+diff --git a/app/interactive-hub/page.tsx b/app/interactive-hub/page.tsx
+new file mode 100644
+index 00000000..f9d845b9
+--- /dev/null
++++ b/app/interactive-hub/page.tsx
+@@ -0,0 +1,816 @@
++'use client';
++
++import React, { useState, useEffect, useMemo } from 'react';
++import { useRouter } from 'next/navigation';
++import {
++  Gamepad2,
++  Atom,
++  GitBranch,
++  Code2,
++  Search,
++  ExternalLink,
++  Download,
++  BookOpen,
++  Sparkles,
++  Maximize2,
++  Minimize2,
++  X,
++  Play,
++  Layers,
++  LayoutGrid,
++  ChevronRight,
++  ArrowLeft,
++  Loader2,
++  FolderOpen,
++  RefreshCw,
++  CheckCircle2,
++} from 'lucide-react';
++import { Button } from '@/components/ui/button';
++import { Input } from '@/components/ui/input';
++import { Badge } from '@/components/ui/badge';
++import { Dialog, DialogContent } from '@/components/ui/dialog';
++
++interface InteractiveItem {
++  sceneId: string;
++  order: number;
++  title: string;
++  widgetType: string;
++  fileName: string;
++  concept?: string;
++  description?: string;
++  size: number;
++  createdAt: number;
++  stageId: string;
++  courseName: string;
++}
++
++interface CourseGroup {
++  stageId: string;
++  courseName: string;
++  folderName: string;
++  updatedAt: number;
++  items: InteractiveItem[];
++}
++
++interface OverviewData {
++  courses: Array<{
++    stageId: string;
++    courseName: string;
++    folderName: string;
++    updatedAt: number;
++    items: Array<Omit<InteractiveItem, 'stageId' | 'courseName'>>;
++  }>;
++  totalItems: number;
++  typeCounts: {
++    game: number;
++    simulation: number;
++    diagram: number;
++    code: number;
++    other: number;
++  };
++}
++
++export default function InteractiveHubPage() {
++  const router = useRouter();
++  const [loading, setLoading] = useState(true);
++  const [syncing, setSyncing] = useState(false);
++  const [syncMessage, setSyncMessage] = useState<string | null>(null);
++  const [data, setData] = useState<OverviewData | null>(null);
++  const [searchQuery, setSearchQuery] = useState('');
++  const [selectedType, setSelectedType] = useState<string>('all');
++  const [viewMode, setViewMode] = useState<'flat' | 'course'>('flat');
++
++  // Active playing item in modal
++  const [activeItem, setActiveItem] = useState<InteractiveItem | null>(null);
++  const [isFullscreen, setIsFullscreen] = useState(false);
++
++  // Load interactive library data
++  const loadData = async (forceSync = false) => {
++    try {
++      if (forceSync) {
++        setSyncing(true);
++      } else {
++        setLoading(true);
++      }
++      const url = forceSync ? '/api/interactive-library?refresh=1' : '/api/interactive-library';
++      const res = await fetch(url);
++      if (res.ok) {
++        const json = await res.json();
++        const payload = json.data || (json.courses ? json : null);
++        if (payload) {
++          setData(payload);
++          if (forceSync) {
++            setSyncMessage(`已成功完成归集！当前收录 ${payload.totalItems} 个互动场景，涵盖 ${payload.courses.length} 门课程`);
++            setTimeout(() => setSyncMessage(null), 4000);
++          }
++        }
++      }
++    } catch (err) {
++      console.error('Failed to load interactive library:', err);
++    } finally {
++      setLoading(false);
++      setSyncing(false);
++    }
++  };
++
++  // Trigger server-side full rescan & packaging
++  const triggerForceRescan = async (deepForce = false) => {
++    try {
++      setSyncing(true);
++      const res = await fetch('/api/interactive-library', {
++        method: 'POST',
++        headers: { 'Content-Type': 'application/json' },
++        body: JSON.stringify({ force: deepForce }),
++      });
++      if (res.ok) {
++        const json = await res.json();
++        const payload = json.data || (json.courses ? json : null);
++        if (payload) {
++          setData(payload);
++          setSyncMessage(
++            `全量扫描与同步归集成功！共检索到 ${payload.totalItems} 个互动场景（涵盖 ${payload.courses.length} 门课程）`
++          );
++          setTimeout(() => setSyncMessage(null), 4500);
++        }
++      }
++    } catch (err) {
++      console.error('Failed to sync interactive library:', err);
++    } finally {
++      setSyncing(false);
++    }
++  };
++
++  useEffect(() => {
++    loadData();
++  }, []);
++
++  // Flatten all items with course details attached
++  const allItems: InteractiveItem[] = useMemo(() => {
++    if (!data?.courses) return [];
++    const list: InteractiveItem[] = [];
++    for (const c of data.courses) {
++      for (const item of c.items) {
++        list.push({
++          ...item,
++          stageId: c.stageId,
++          courseName: c.courseName,
++        });
++      }
++    }
++    return list;
++  }, [data]);
++
++  // Filter items by type and search query
++  const filteredItems = useMemo(() => {
++    return allItems.filter((item) => {
++      const matchesType =
++        selectedType === 'all' || item.widgetType.toLowerCase() === selectedType.toLowerCase();
++
++      const q = searchQuery.trim().toLowerCase();
++      const matchesSearch =
++        !q ||
++        item.title.toLowerCase().includes(q) ||
++        item.courseName.toLowerCase().includes(q) ||
++        (item.concept && item.concept.toLowerCase().includes(q)) ||
++        (item.description && item.description.toLowerCase().includes(q));
++
++      return matchesType && matchesSearch;
++    });
++  }, [allItems, selectedType, searchQuery]);
++
++  // Group filtered items by course
++  const courseGroups = useMemo(() => {
++    const map = new Map<string, CourseGroup>();
++    for (const item of filteredItems) {
++      if (!map.has(item.stageId)) {
++        map.set(item.stageId, {
++          stageId: item.stageId,
++          courseName: item.courseName,
++          folderName: `${item.courseName}_${item.stageId}`,
++          updatedAt: item.createdAt,
++          items: [],
++        });
++      }
++      map.get(item.stageId)!.items.push(item);
++    }
++    return Array.from(map.values());
++  }, [filteredItems]);
++
++  const getTypeMeta = (type: string) => {
++    const t = type.toLowerCase();
++    switch (t) {
++      case 'game':
++        return {
++          label: '互动游戏',
++          color: 'bg-purple-500/10 text-purple-600 dark:text-purple-400 border-purple-500/20',
++          badgeColor: 'bg-purple-100 text-purple-700 dark:bg-purple-950/60 dark:text-purple-300',
++          icon: Gamepad2,
++        };
++      case 'simulation':
++        return {
++          label: '科学仿真',
++          color: 'bg-blue-500/10 text-blue-600 dark:text-blue-400 border-blue-500/20',
++          badgeColor: 'bg-blue-100 text-blue-700 dark:bg-blue-950/60 dark:text-blue-300',
++          icon: Atom,
++        };
++      case 'diagram':
++        return {
++          label: '算法图解',
++          color: 'bg-amber-500/10 text-amber-600 dark:text-amber-400 border-amber-500/20',
++          badgeColor: 'bg-amber-100 text-amber-700 dark:bg-amber-950/60 dark:text-amber-300',
++          icon: GitBranch,
++        };
++      case 'code':
++        return {
++          label: '代码工坊',
++          color: 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border-emerald-500/20',
++          badgeColor: 'bg-emerald-100 text-emerald-700 dark:bg-emerald-950/60 dark:text-emerald-300',
++          icon: Code2,
++        };
++      default:
++        return {
++          label: '互动实验',
++          color: 'bg-indigo-500/10 text-indigo-600 dark:text-indigo-400 border-indigo-500/20',
++          badgeColor: 'bg-indigo-100 text-indigo-700 dark:bg-indigo-950/60 dark:text-indigo-300',
++          icon: Sparkles,
++        };
++    }
++  };
++
++  const formatFileSize = (bytes: number) => {
++    if (!bytes) return '';
++    if (bytes < 1024) return `${bytes} B`;
++    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
++    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
++  };
++
++  return (
++    <div className="min-h-screen bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-slate-100">
++      {/* 顶部主导航条 */}
++      <header className="sticky top-0 z-40 bg-white/80 dark:bg-slate-900/80 backdrop-blur-md border-b border-slate-200/80 dark:border-slate-800">
++        <div className="max-w-7xl mx-auto px-4 sm:px-6 h-16 flex items-center justify-between gap-4">
++          <div className="flex items-center gap-3">
++            <Button
++              variant="ghost"
++              size="sm"
++              onClick={() => router.push('/')}
++              className="gap-1.5 text-slate-500 hover:text-slate-900 dark:text-slate-400 dark:hover:text-white"
++            >
++              <ArrowLeft className="w-4 h-4" />
++              <span>首页</span>
++            </Button>
++            <div className="h-4 w-px bg-slate-200 dark:bg-slate-800" />
++            <div className="flex items-center gap-2.5">
++              <div className="w-9 h-9 rounded-xl bg-gradient-to-tr from-purple-600 to-indigo-500 flex items-center justify-center text-white shadow-xs">
++                <Gamepad2 className="w-5 h-5" />
++              </div>
++              <div>
++                <h1 className="text-base font-bold tracking-tight text-slate-900 dark:text-white flex items-center gap-2">
++                  互动展厅
++                  <Badge variant="secondary" className="text-[10px] px-1.5 py-0 font-normal">
++                    独立离线应用
++                  </Badge>
++                </h1>
++                <p className="text-[11px] text-slate-500 dark:text-slate-400">
++                  全站仿真模拟、闯关游戏与图解实验集成中心
++                </p>
++              </div>
++            </div>
++          </div>
++
++          <div className="flex items-center gap-2">
++            <Button
++              variant="outline"
++              size="sm"
++              onClick={() => triggerForceRescan(false)}
++              disabled={syncing || loading}
++              className="gap-1.5 text-xs text-purple-600 dark:text-purple-400 border-purple-200 dark:border-purple-800 hover:bg-purple-50 dark:hover:bg-purple-950/40"
++              title="重新扫描全站课程并归集所有互动内容"
++            >
++              <RefreshCw className={`w-3.5 h-3.5 ${syncing ? 'animate-spin' : ''}`} />
++              <span>{syncing ? '正在归集...' : '强制同步归集'}</span>
++            </Button>
++            <Button
++              variant="outline"
++              size="sm"
++              onClick={() => router.push('/my-courses')}
++              className="gap-1.5 text-xs text-indigo-600 dark:text-indigo-400 border-indigo-200 dark:border-indigo-800"
++            >
++              <BookOpen className="w-3.5 h-3.5" />
++              我的课程
++            </Button>
++            <Button
++              variant="outline"
++              size="sm"
++              onClick={() => router.push('/batch-studio')}
++              className="gap-1.5 text-xs text-amber-600 dark:text-amber-400 border-amber-200 dark:border-amber-800"
++            >
++              <Sparkles className="w-3.5 h-3.5" />
++              批量制课
++            </Button>
++          </div>
++        </div>
++      </header>
++
++      {/* 主体内容 */}
++      <main className="max-w-7xl mx-auto px-4 sm:px-6 py-6 space-y-6">
++        {/* 同步提示通知条 */}
++        {syncMessage && (
++          <div className="bg-emerald-500/10 border border-emerald-500/30 text-emerald-700 dark:text-emerald-300 px-4 py-3 rounded-2xl text-xs flex items-center justify-between shadow-xs">
++            <div className="flex items-center gap-2.5">
++              <CheckCircle2 className="w-4 h-4 text-emerald-500 shrink-0" />
++              <span className="font-medium">{syncMessage}</span>
++            </div>
++            <button
++              onClick={() => setSyncMessage(null)}
++              className="text-emerald-500 hover:text-emerald-700 text-xs px-2 py-0.5 rounded-md hover:bg-emerald-500/10"
++            >
++              关闭
++            </button>
++          </div>
++        )}
++        {/* 顶部统计面板 */}
++        <div className="grid grid-cols-2 sm:grid-cols-5 gap-3.5">
++          <div
++            onClick={() => setSelectedType('all')}
++            className={`p-3.5 rounded-2xl border transition-all cursor-pointer ${
++              selectedType === 'all'
++                ? 'bg-white dark:bg-slate-900 border-indigo-500 ring-2 ring-indigo-500/20 shadow-xs'
++                : 'bg-white/60 dark:bg-slate-900/60 border-slate-200 dark:border-slate-800 hover:border-slate-300'
++            }`}
++          >
++            <div className="flex items-center justify-between mb-1.5">
++              <span className="text-xs text-slate-500">全部互动内容</span>
++              <Layers className="w-4 h-4 text-indigo-500" />
++            </div>
++            <div className="text-2xl font-bold tracking-tight">{data?.totalItems ?? 0}</div>
++            <div className="text-[10px] text-slate-400">涵盖 {data?.courses.length ?? 0} 门课程</div>
++          </div>
++
++          <div
++            onClick={() => setSelectedType('game')}
++            className={`p-3.5 rounded-2xl border transition-all cursor-pointer ${
++              selectedType === 'game'
++                ? 'bg-white dark:bg-slate-900 border-purple-500 ring-2 ring-purple-500/20 shadow-xs'
++                : 'bg-white/60 dark:bg-slate-900/60 border-slate-200 dark:border-slate-800 hover:border-slate-300'
++            }`}
++          >
++            <div className="flex items-center justify-between mb-1.5">
++              <span className="text-xs text-purple-600 dark:text-purple-400 font-medium">🎮 互动小游戏</span>
++              <Gamepad2 className="w-4 h-4 text-purple-500" />
++            </div>
++            <div className="text-2xl font-bold tracking-tight text-purple-600 dark:text-purple-400">
++              {data?.typeCounts.game ?? 0}
++            </div>
++            <div className="text-[10px] text-slate-400">通关与趣味策略</div>
++          </div>
++
++          <div
++            onClick={() => setSelectedType('simulation')}
++            className={`p-3.5 rounded-2xl border transition-all cursor-pointer ${
++              selectedType === 'simulation'
++                ? 'bg-white dark:bg-slate-900 border-blue-500 ring-2 ring-blue-500/20 shadow-xs'
++                : 'bg-white/60 dark:bg-slate-900/60 border-slate-200 dark:border-slate-800 hover:border-slate-300'
++            }`}
++          >
++            <div className="flex items-center justify-between mb-1.5">
++              <span className="text-xs text-blue-600 dark:text-blue-400 font-medium">🔬 科学与算法仿真</span>
++              <Atom className="w-4 h-4 text-blue-500" />
++            </div>
++            <div className="text-2xl font-bold tracking-tight text-blue-600 dark:text-blue-400">
++              {data?.typeCounts.simulation ?? 0}
++            </div>
++            <div className="text-[10px] text-slate-400">动态参数与机理推演</div>
++          </div>
++
++          <div
++            onClick={() => setSelectedType('diagram')}
++            className={`p-3.5 rounded-2xl border transition-all cursor-pointer ${
++              selectedType === 'diagram'
++                ? 'bg-white dark:bg-slate-900 border-amber-500 ring-2 ring-amber-500/20 shadow-xs'
++                : 'bg-white/60 dark:bg-slate-900/60 border-slate-200 dark:border-slate-800 hover:border-slate-300'
++            }`}
++          >
++            <div className="flex items-center justify-between mb-1.5">
++              <span className="text-xs text-amber-600 dark:text-amber-400 font-medium">📊 动态流程图解</span>
++              <GitBranch className="w-4 h-4 text-amber-500" />
++            </div>
++            <div className="text-2xl font-bold tracking-tight text-amber-600 dark:text-amber-400">
++              {data?.typeCounts.diagram ?? 0}
++            </div>
++            <div className="text-[10px] text-slate-400">结构透视与算法导图</div>
++          </div>
++
++          <div
++            onClick={() => setSelectedType('code')}
++            className={`p-3.5 rounded-2xl border transition-all cursor-pointer ${
++              selectedType === 'code'
++                ? 'bg-white dark:bg-slate-900 border-emerald-500 ring-2 ring-emerald-500/20 shadow-xs'
++                : 'bg-white/60 dark:bg-slate-900/60 border-slate-200 dark:border-slate-800 hover:border-slate-300'
++            }`}
++          >
++            <div className="flex items-center justify-between mb-1.5">
++              <span className="text-xs text-emerald-600 dark:text-emerald-400 font-medium">💻 代码交互工坊</span>
++              <Code2 className="w-4 h-4 text-emerald-500" />
++            </div>
++            <div className="text-2xl font-bold tracking-tight text-emerald-600 dark:text-emerald-400">
++              {data?.typeCounts.code ?? 0}
++            </div>
++            <div className="text-[10px] text-slate-400">代码拼装与状态执行</div>
++          </div>
++        </div>
++
++        {/* 筛选与搜索工具条 */}
++        <div className="bg-white dark:bg-slate-900 rounded-2xl p-4 border border-slate-200/80 dark:border-slate-800 shadow-xs flex flex-col md:flex-row items-center justify-between gap-4">
++          <div className="relative w-full md:w-80">
++            <Search className="w-4 h-4 absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400" />
++            <Input
++              type="text"
++              placeholder="搜索互动游戏、仿真实验或课程名称..."
++              value={searchQuery}
++              onChange={(e) => setSearchQuery(e.target.value)}
++              className="pl-9 bg-slate-50 dark:bg-slate-950 border-slate-200 dark:border-slate-800 rounded-xl text-xs h-9"
++            />
++          </div>
++
++          <div className="flex items-center gap-2 w-full md:w-auto justify-between md:justify-end">
++            {/* 快速刷新按钮 */}
++            <Button
++              variant="outline"
++              size="sm"
++              onClick={() => triggerForceRescan(false)}
++              disabled={syncing || loading}
++              className="gap-1 px-2.5 h-8 text-xs text-slate-600 dark:text-slate-400 hover:text-slate-900 border-slate-200 dark:border-slate-700"
++              title="刷新全量归集数据"
++            >
++              <RefreshCw className={`w-3.5 h-3.5 ${syncing ? 'animate-spin' : ''}`} />
++              <span className="hidden sm:inline">{syncing ? '同步中...' : '刷新'}</span>
++            </Button>
++
++            {/* 视图切换按钮 */}
++            <div className="flex items-center bg-slate-100 dark:bg-slate-800 p-0.5 rounded-xl border border-slate-200/80 dark:border-slate-700/80">
++              <button
++                onClick={() => setViewMode('flat')}
++                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-all ${
++                  viewMode === 'flat'
++                    ? 'bg-white dark:bg-slate-900 text-slate-900 dark:text-white shadow-xs'
++                    : 'text-slate-600 dark:text-slate-400 hover:text-slate-900'
++                }`}
++              >
++                <LayoutGrid className="w-3.5 h-3.5" />
++                全部卡片 ({filteredItems.length})
++              </button>
++              <button
++                onClick={() => setViewMode('course')}
++                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-all ${
++                  viewMode === 'course'
++                    ? 'bg-white dark:bg-slate-900 text-slate-900 dark:text-white shadow-xs'
++                    : 'text-slate-600 dark:text-slate-400 hover:text-slate-900'
++                }`}
++              >
++                <FolderOpen className="w-3.5 h-3.5" />
++                按课程归类 ({courseGroups.length})
++              </button>
++            </div>
++          </div>
++        </div>
++
++        {/* 内容展示区 */}
++        {loading ? (
++          <div className="py-24 text-center">
++            <Loader2 className="w-8 h-8 animate-spin mx-auto text-indigo-500 mb-3" />
++            <div className="text-sm font-medium text-slate-600 dark:text-slate-300">
++              正在加载互动展厅...
++            </div>
++          </div>
++        ) : filteredItems.length === 0 ? (
++          <div className="bg-white dark:bg-slate-900 rounded-2xl p-12 text-center border border-slate-200 dark:border-slate-800">
++            <Gamepad2 className="w-12 h-12 mx-auto text-slate-300 dark:text-slate-700 mb-3" />
++            <h3 className="text-base font-semibold text-slate-800 dark:text-slate-200 mb-1">
++              未找到匹配的互动内容
++            </h3>
++            <p className="text-xs text-slate-500 max-w-sm mx-auto mb-4">
++              尝试清除筛选条件，或点击下方按钮执行全量重新扫描与归集。
++            </p>
++            <div className="flex items-center justify-center gap-3">
++              <Button
++                variant="outline"
++                size="sm"
++                onClick={() => {
++                  setSelectedType('all');
++                  setSearchQuery('');
++                }}
++              >
++                重置筛选条件
++              </Button>
++              <Button
++                size="sm"
++                onClick={() => triggerForceRescan(false)}
++                disabled={syncing}
++                className="gap-1.5 bg-indigo-600 hover:bg-indigo-700 text-white"
++              >
++                <RefreshCw className={`w-3.5 h-3.5 ${syncing ? 'animate-spin' : ''}`} />
++                {syncing ? '正在扫描全量课程...' : '全量重新扫描与归集'}
++              </Button>
++            </div>
++          </div>
++        ) : viewMode === 'flat' ? (
++          /* 全部卡片网格流 */
++          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
++            {filteredItems.map((item) => {
++              const meta = getTypeMeta(item.widgetType);
++              const Icon = meta.icon;
++              return (
++                <div
++                  key={`${item.stageId}-${item.sceneId}`}
++                  className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200/80 dark:border-slate-800 p-4 flex flex-col justify-between hover:shadow-md hover:border-indigo-500/30 transition-all group"
++                >
++                  <div>
++                    <div className="flex items-center justify-between gap-2 mb-2.5">
++                      <span
++                        className={`text-[10px] font-semibold px-2 py-0.5 rounded-full border flex items-center gap-1 ${meta.color}`}
++                      >
++                        <Icon className="w-3 h-3" />
++                        {meta.label}
++                      </span>
++                      <span className="text-[10px] text-slate-400">
++                        {formatFileSize(item.size)} · 离线HTML
++                      </span>
++                    </div>
++
++                    <h3 className="text-sm font-bold text-slate-900 dark:text-white mb-1.5 group-hover:text-indigo-600 dark:group-hover:text-indigo-400 transition-colors line-clamp-1">
++                      {item.title}
++                    </h3>
++
++                    <div className="text-[11px] text-slate-500 dark:text-slate-400 bg-slate-50 dark:bg-slate-950/60 p-2 rounded-xl mb-3 line-clamp-2">
++                      {item.description || item.concept || '独立自包含交互式单页面应用，支持脱机运行'}
++                    </div>
++
++                    <div className="flex items-center gap-1.5 text-[11px] text-slate-500 dark:text-slate-400 mb-4">
++                      <BookOpen className="w-3.5 h-3.5 text-slate-400 shrink-0" />
++                      <span className="truncate" title={item.courseName}>
++                        {item.courseName}
++                      </span>
++                      <span className="text-slate-300 dark:text-slate-700">·</span>
++                      <span className="shrink-0 text-slate-400">P{item.order}</span>
++                    </div>
++                  </div>
++
++                  <div className="pt-3 border-t border-slate-100 dark:border-slate-800/80 flex items-center justify-between gap-2">
++                    <Button
++                      size="sm"
++                      onClick={() => setActiveItem(item)}
++                      className="gap-1.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs h-8 px-3 font-medium flex-1 cursor-pointer"
++                    >
++                      <Play className="w-3.5 h-3.5 fill-current" />
++                      在线体验
++                    </Button>
++
++                    <Button
++                      variant="outline"
++                      size="icon"
++                      onClick={() =>
++                        window.open(
++                          `/api/interactive-library/${item.stageId}/${encodeURIComponent(item.fileName)}`,
++                          '_blank',
++                        )
++                      }
++                      title="在新标签页独立打开"
++                      className="w-8 h-8 rounded-xl border-slate-200 dark:border-slate-800 cursor-pointer"
++                    >
++                      <ExternalLink className="w-3.5 h-3.5 text-slate-500" />
++                    </Button>
++
++                    <Button
++                      variant="outline"
++                      size="icon"
++                      onClick={() =>
++                        window.open(
++                          `/api/interactive-library/${item.stageId}/${encodeURIComponent(item.fileName)}?download=1`,
++                          '_blank',
++                        )
++                      }
++                      title="下载单文件自包含 HTML"
++                      className="w-8 h-8 rounded-xl border-slate-200 dark:border-slate-800 cursor-pointer"
++                    >
++                      <Download className="w-3.5 h-3.5 text-slate-500" />
++                    </Button>
++                  </div>
++                </div>
++              );
++            })}
++          </div>
++        ) : (
++          /* 按课程归类折叠视图 */
++          <div className="space-y-6">
++            {courseGroups.map((group) => (
++              <div
++                key={group.stageId}
++                className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200/80 dark:border-slate-800 p-5 shadow-xs"
++              >
++                <div className="flex items-center justify-between gap-4 mb-4 pb-3 border-b border-slate-100 dark:border-slate-800">
++                  <div className="flex items-center gap-3">
++                    <div className="w-9 h-9 rounded-xl bg-indigo-50 dark:bg-indigo-950/60 text-indigo-600 dark:text-indigo-400 flex items-center justify-center shrink-0">
++                      <BookOpen className="w-4 h-4" />
++                    </div>
++                    <div>
++                      <h2 className="text-sm font-bold text-slate-900 dark:text-white">
++                        {group.courseName}
++                      </h2>
++                      <div className="text-[11px] text-slate-400">
++                        课程 ID: {group.stageId} · 包含 {group.items.length} 个独立互动页面
++                      </div>
++                    </div>
++                  </div>
++
++                  <Button
++                    variant="ghost"
++                    size="sm"
++                    onClick={() => router.push(`/classroom/${group.stageId}`)}
++                    className="text-xs text-indigo-600 dark:text-indigo-400 gap-1"
++                  >
++                    <span>进入授课</span>
++                    <ChevronRight className="w-3.5 h-3.5" />
++                  </Button>
++                </div>
++
++                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3.5">
++                  {group.items.map((item) => {
++                    const meta = getTypeMeta(item.widgetType);
++                    const Icon = meta.icon;
++                    return (
++                      <div
++                        key={item.sceneId}
++                        className="bg-slate-50 dark:bg-slate-950 rounded-xl p-3.5 border border-slate-200/60 dark:border-slate-800/80 flex flex-col justify-between hover:bg-slate-100/80 dark:hover:bg-slate-900 transition-colors"
++                      >
++                        <div>
++                          <div className="flex items-center justify-between gap-2 mb-2">
++                            <span
++                              className={`text-[9px] font-semibold px-1.5 py-0.5 rounded border flex items-center gap-1 ${meta.color}`}
++                            >
++                              <Icon className="w-2.5 h-2.5" />
++                              {meta.label}
++                            </span>
++                            <span className="text-[10px] text-slate-400">第 {item.order} 页</span>
++                          </div>
++                          <h4 className="text-xs font-bold text-slate-800 dark:text-slate-200 mb-1 line-clamp-1">
++                            {item.title}
++                          </h4>
++                          <p className="text-[10px] text-slate-500 line-clamp-2 mb-3">
++                            {item.description || item.concept || '单文件自包含 HTML 应用'}
++                          </p>
++                        </div>
++
++                        <div className="flex items-center gap-1.5 pt-2 border-t border-slate-200/50 dark:border-slate-800">
++                          <Button
++                            size="sm"
++                            onClick={() => setActiveItem(item)}
++                            className="h-7 text-[11px] px-2.5 bg-indigo-600 hover:bg-indigo-700 text-white flex-1 rounded-lg gap-1 cursor-pointer"
++                          >
++                            <Play className="w-3 h-3 fill-current" />
++                            体验
++                          </Button>
++                          <Button
++                            variant="outline"
++                            size="icon"
++                            onClick={() =>
++                              window.open(
++                                `/api/interactive-library/${item.stageId}/${encodeURIComponent(item.fileName)}`,
++                                '_blank',
++                              )
++                            }
++                            className="h-7 w-7 rounded-lg"
++                            title="新窗口打开"
++                          >
++                            <ExternalLink className="w-3 h-3" />
++                          </Button>
++                          <Button
++                            variant="outline"
++                            size="icon"
++                            onClick={() =>
++                              window.open(
++                                `/api/interactive-library/${item.stageId}/${encodeURIComponent(item.fileName)}?download=1`,
++                                '_blank',
++                              )
++                            }
++                            className="h-7 w-7 rounded-lg"
++                            title="下载 HTML"
++                          >
++                            <Download className="w-3 h-3" />
++                          </Button>
++                        </div>
++                      </div>
++                    );
++                  })}
++                </div>
++              </div>
++            ))}
++          </div>
++        )}
++      </main>
++
++      {/* 在线体验弹窗播放器 (Modal Player) */}
++      <Dialog open={Boolean(activeItem)} onOpenChange={(open) => !open && setActiveItem(null)}>
++        <DialogContent
++          className={`p-0 gap-0 overflow-hidden bg-slate-950 border-slate-800 transition-all ${
++            isFullscreen
++              ? 'fixed inset-0 w-screen h-screen max-w-none rounded-none'
++              : 'max-w-5xl h-[85vh] rounded-2xl'
++          }`}
++          showCloseButton={false}
++        >
++          {activeItem && (
++            <div className="flex flex-col h-full w-full">
++              {/* 弹窗顶部栏 */}
++              <div className="h-12 bg-slate-900 border-b border-slate-800 px-4 flex items-center justify-between gap-3 text-white shrink-0">
++                <div className="flex items-center gap-2.5 min-w-0">
++                  <span className="text-[10px] bg-indigo-500/20 text-indigo-400 border border-indigo-500/30 px-2 py-0.5 rounded font-medium shrink-0">
++                    {getTypeMeta(activeItem.widgetType).label}
++                  </span>
++                  <span className="text-xs font-bold truncate text-slate-100">
++                    {activeItem.title}
++                  </span>
++                  <span className="text-slate-600 hidden sm:inline">|</span>
++                  <span className="text-[11px] text-slate-400 truncate hidden sm:inline">
++                    {activeItem.courseName} (第 {activeItem.order} 页)
++                  </span>
++                </div>
++
++                <div className="flex items-center gap-1.5 shrink-0">
++                  <Button
++                    variant="ghost"
++                    size="sm"
++                    onClick={() =>
++                      window.open(
++                        `/api/interactive-library/${activeItem.stageId}/${encodeURIComponent(activeItem.fileName)}`,
++                        '_blank',
++                      )
++                    }
++                    className="h-8 px-2 text-xs text-slate-400 hover:text-white hover:bg-slate-800"
++                    title="新窗口打开"
++                  >
++                    <ExternalLink className="w-3.5 h-3.5 mr-1" />
++                    <span>新窗口</span>
++                  </Button>
++
++                  <Button
++                    variant="ghost"
++                    size="sm"
++                    onClick={() =>
++                      window.open(
++                        `/api/interactive-library/${activeItem.stageId}/${encodeURIComponent(activeItem.fileName)}?download=1`,
++                        '_blank',
++                      )
++                    }
++                    className="h-8 px-2 text-xs text-slate-400 hover:text-white hover:bg-slate-800"
++                    title="下载单文件 HTML"
++                  >
++                    <Download className="w-3.5 h-3.5 mr-1" />
++                    <span>下载</span>
++                  </Button>
++
++                  <Button
++                    variant="ghost"
++                    size="icon"
++                    onClick={() => setIsFullscreen(!isFullscreen)}
++                    className="h-8 w-8 text-slate-400 hover:text-white hover:bg-slate-800"
++                    title={isFullscreen ? '退出全屏' : '全屏'}
++                  >
++                    {isFullscreen ? (
++                      <Minimize2 className="w-3.5 h-3.5" />
++                    ) : (
++                      <Maximize2 className="w-3.5 h-3.5" />
++                    )}
++                  </Button>
++
++                  <Button
++                    variant="ghost"
++                    size="icon"
++                    onClick={() => {
++                      setActiveItem(null);
++                      setIsFullscreen(false);
++                    }}
++                    className="h-8 w-8 text-slate-400 hover:text-white hover:bg-red-950/60 hover:text-red-400"
++                    title="关闭"
++                  >
++                    <X className="w-4 h-4" />
++                  </Button>
++                </div>
++              </div>
++
++              {/* iframe 沙箱播放容器 */}
++              <div className="flex-1 w-full h-full bg-white relative">
++                <iframe
++                  src={`/api/interactive-library/${activeItem.stageId}/${encodeURIComponent(activeItem.fileName)}`}
++                  className="w-full h-full border-0 absolute inset-0"
++                  title={activeItem.title}
++                  sandbox="allow-scripts allow-forms allow-same-origin allow-popups"
++                />
++              </div>
++            </div>
++          )}
++        </DialogContent>
++      </Dialog>
++    </div>
++  );
++}
 diff --git a/app/my-courses/page.tsx b/app/my-courses/page.tsx
 new file mode 100644
-index 00000000..1032a9d2
+index 00000000..8d1495df
 --- /dev/null
 +++ b/app/my-courses/page.tsx
-@@ -0,0 +1,880 @@
+@@ -0,0 +1,897 @@
 +'use client';
 +
 +import React, { useEffect, useState, useMemo, useTransition } from 'react';
@@ -749,6 +3246,7 @@ index 00000000..1032a9d2
 +  CloudUpload,
 +  HardDrive,
 +  Database,
++  Gamepad2,
 +} from 'lucide-react';
 +import { useAuthStore } from '@/lib/store/auth-store';
 +import { UserNav } from '@/components/auth/user-nav';
@@ -1054,14 +3552,20 @@ index 00000000..1032a9d2
 +        console.warn('Failed to delete from local storage:', e);
 +      }
 +
-+      // 2. 服务端 PostgreSQL 彻底删除
++      // 2. 服务端彻底删除 (PostgreSQL + 磁盘文件 + 互动展厅)
 +      try {
-+        await fetch(`/api/stages/${encodeURIComponent(deletingCourse.id)}`, {
++        const res = await fetch(`/api/stages/${encodeURIComponent(deletingCourse.id)}`, {
 +          method: 'DELETE',
 +          credentials: 'include',
 +        });
-+      } catch (e) {
++        if (!res.ok) {
++          const errData = await res.json().catch(() => null);
++          throw new Error(errData?.error || `HTTP ${res.status}`);
++        }
++      } catch (e: any) {
 +        console.warn('Failed to delete from server:', e);
++        toast.error(`服务端删除失败: ${e.message || '网络异常'}`);
++        return;
 +      }
 +
 +      setCourses((prev) => prev.filter((c) => c.id !== deletingCourse.id));
@@ -1148,6 +3652,16 @@ index 00000000..1032a9d2
 +            >
 +              <Sparkles className="w-3.5 h-3.5" />
 +              批量快速制课
++            </Button>
++
++            <Button
++              variant="outline"
++              size="sm"
++              onClick={() => router.push('/interactive-hub')}
++              className="gap-1.5 text-purple-600 dark:text-purple-400 border-purple-500/30 hover:bg-purple-50 dark:hover:bg-purple-950/40 text-xs cursor-pointer"
++            >
++              <Gamepad2 className="w-3.5 h-3.5" />
++              互动展厅
 +            </Button>
 +
 +            <Button
@@ -1602,18 +4116,19 @@ index 00000000..1032a9d2
 +  );
 +}
 diff --git a/app/page.tsx b/app/page.tsx
-index 31059149..910cbd69 100644
+index 31059149..dc9a8e7d 100644
 --- a/app/page.tsx
 +++ b/app/page.tsx
-@@ -27,6 +27,7 @@ import {
+@@ -27,6 +27,8 @@ import {
    X,
    Presentation,
    Loader2,
 +  BookOpen,
++  Gamepad2,
  } from 'lucide-react';
  import { useI18n } from '@/lib/hooks/use-i18n';
  import { LanguageSwitcher } from '@/components/language-switcher';
-@@ -36,6 +37,8 @@ import { InputGroup, InputGroupInput, InputGroupButton } from '@/components/ui/i
+@@ -36,6 +38,8 @@ import { InputGroup, InputGroupInput, InputGroupButton } from '@/components/ui/i
  import { Textarea as UITextarea } from '@/components/ui/textarea';
  import { cn } from '@/lib/utils';
  import { SettingsDialog } from '@/components/settings';
@@ -1622,7 +4137,7 @@ index 31059149..910cbd69 100644
  import { GenerationToolbar } from '@/components/generation/generation-toolbar';
  import { AgentBar } from '@/components/agent/agent-bar';
  import { useTheme } from '@/lib/hooks/use-theme';
-@@ -89,6 +92,8 @@ import {
+@@ -89,6 +93,8 @@ import {
  } from '@/lib/config/feature-flags';
  import { useImportPptx } from '@/lib/import/use-import-pptx';
  import { InteractiveModeButton } from '@/components/generation/interactive-mode-button';
@@ -1631,7 +4146,7 @@ index 31059149..910cbd69 100644
  import { ProBadge } from '@/components/workbench/ProBadge';
  import { arrivedByProSwap, startProSwap } from '@/lib/workbench/pro-swap';
  import {
-@@ -100,6 +105,7 @@ const log = createLogger('Home');
+@@ -100,6 +106,7 @@ const log = createLogger('Home');
  
  const RECENT_OPEN_STORAGE_KEY = 'recentClassroomsOpen';
  const INTERACTIVE_MODE_STORAGE_KEY = 'interactiveModeEnabled';
@@ -1639,7 +4154,7 @@ index 31059149..910cbd69 100644
  
  // PPTX import is still scaffolding: `useImportPptx` has no `onImported` consumer
  // yet, so the flow only logs the parsed slides. Hide the entry point behind a
-@@ -112,6 +118,7 @@ let workbenchRuntimeCache: boolean | null = null;
+@@ -112,6 +119,7 @@ let workbenchRuntimeCache: boolean | null = null;
  interface FormState {
    courseMaterials: SelectedCourseMaterial[];
    requirement: string;
@@ -1647,7 +4162,7 @@ index 31059149..910cbd69 100644
    interactiveMode: boolean;
    vocationalTestMode: boolean;
  }
-@@ -119,6 +126,7 @@ interface FormState {
+@@ -119,6 +127,7 @@ interface FormState {
  const initialFormState: FormState = {
    courseMaterials: [],
    requirement: '',
@@ -1655,7 +4170,7 @@ index 31059149..910cbd69 100644
    interactiveMode: false,
    vocationalTestMode: false,
  };
-@@ -201,6 +209,19 @@ function HomePage() {
+@@ -201,6 +210,19 @@ function HomePage() {
      } catch {
        /* localStorage unavailable */
      }
@@ -1675,7 +4190,7 @@ index 31059149..910cbd69 100644
    }, []);
  
    // Restore requirement draft from localStorage on mount. The previous derived-state
-@@ -217,6 +238,7 @@ function HomePage() {
+@@ -217,6 +239,7 @@ function HomePage() {
  
    const [themeOpen, setThemeOpen] = useState(false);
    const [error, setError] = useState<string | null>(null);
@@ -1683,7 +4198,7 @@ index 31059149..910cbd69 100644
    // True while the Generate click drains upload-time ingests and builds the
    // generation session. Doubles as the guard flag that freezes the course
    // material set for the duration of prep and as the switch that disables the
-@@ -504,6 +526,8 @@ function HomePage() {
+@@ -504,6 +527,8 @@ function HomePage() {
      try {
        if (field === 'interactiveMode')
          localStorage.setItem(INTERACTIVE_MODE_STORAGE_KEY, String(value));
@@ -1692,7 +4207,7 @@ index 31059149..910cbd69 100644
        if (field === 'requirement') updateRequirementCache(value as string);
      } catch {
        /* ignore */
-@@ -599,6 +623,7 @@ function HomePage() {
+@@ -599,6 +624,7 @@ function HomePage() {
        const userProfile = useUserProfileStore.getState();
        const requirements: UserRequirements = {
          requirement: form.requirement,
@@ -1700,7 +4215,7 @@ index 31059149..910cbd69 100644
          userNickname: userProfile.nickname || undefined,
          userBio: userProfile.bio || undefined,
          // Course-level web search now lives in settings (课程模型配置 → 联网调研)
-@@ -783,26 +808,57 @@ function HomePage() {
+@@ -783,26 +809,67 @@ function HomePage() {
            )}
          </div>
  
@@ -1741,6 +4256,16 @@ index 31059149..910cbd69 100644
 +          <span>批量制课</span>
 +        </button>
 +
++        {/* Interactive Hub Button */}
++        <button
++          onClick={() => router.push('/interactive-hub')}
++          className="flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium text-purple-600 dark:text-purple-400 bg-purple-500/10 hover:bg-purple-500/20 border border-purple-500/30 transition-all shadow-xs cursor-pointer"
++          title="互动实验与游戏展厅"
++        >
++          <Gamepad2 className="w-3.5 h-3.5 text-purple-500" />
++          <span>互动展厅</span>
++        </button>
++
 +        {/* My Courses Button */}
 +        <button
 +          onClick={() => router.push('/my-courses')}
@@ -1775,7 +4300,7 @@ index 31059149..910cbd69 100644
  
        {/* ═══ Background Decor ═══ */}
        <div className="absolute inset-0 overflow-hidden pointer-events-none">
-@@ -904,6 +960,13 @@ function HomePage() {
+@@ -904,6 +971,13 @@ function HomePage() {
                  />
                </div>
  
@@ -2621,10 +5146,10 @@ index 00000000..5fe69b5d
 +}
 diff --git a/components/auth/user-nav.tsx b/components/auth/user-nav.tsx
 new file mode 100644
-index 00000000..5f9dcd7b
+index 00000000..420c403b
 --- /dev/null
 +++ b/components/auth/user-nav.tsx
-@@ -0,0 +1,145 @@
+@@ -0,0 +1,153 @@
 +'use client';
 +
 +import { useEffect, useState } from 'react';
@@ -2639,7 +5164,7 @@ index 00000000..5f9dcd7b
 +  DropdownMenuSeparator,
 +  DropdownMenuTrigger,
 +} from '@/components/ui/dropdown-menu';
-+import { LogIn, User as UserIcon, Shield, LogOut, Settings as SettingsIcon, BookOpen } from 'lucide-react';
++import { LogIn, User as UserIcon, Shield, LogOut, Settings as SettingsIcon, BookOpen, Gamepad2 } from 'lucide-react';
 +import { AuthDialog } from './auth-dialog';
 +import { UserProfileDialog } from './user-profile-dialog';
 +import { UserManagementDialog } from '../admin/user-management-dialog';
@@ -2717,6 +5242,14 @@ index 00000000..5f9dcd7b
 +            >
 +              <BookOpen className="w-3.5 h-3.5 mr-2" />
 +              我的课程中心
++            </DropdownMenuItem>
++
++            <DropdownMenuItem
++              onClick={() => router.push('/interactive-hub')}
++              className="rounded-xl py-2 cursor-pointer font-medium text-purple-600 dark:text-purple-400 focus:text-purple-600"
++            >
++              <Gamepad2 className="w-3.5 h-3.5 mr-2" />
++              互动实验与游戏展厅
 +            </DropdownMenuItem>
 +
 +            <DropdownMenuItem onClick={() => setProfileModalOpen(true)} className="rounded-xl py-2 cursor-pointer">
@@ -3002,6 +5535,121 @@ index 00000000..5239f696
 +        </form>
 +      </DialogContent>
 +    </Dialog>
++  );
++}
+diff --git a/components/generation/course-scale-picker.tsx b/components/generation/course-scale-picker.tsx
+new file mode 100644
+index 00000000..109853c8
+--- /dev/null
++++ b/components/generation/course-scale-picker.tsx
+@@ -0,0 +1,109 @@
++'use client';
++
++import * as React from 'react';
++import { Layers, Zap, Target, BookOpen, Check, ChevronDown } from 'lucide-react';
++import { cn } from '@/lib/utils';
++import {
++  DropdownMenu,
++  DropdownMenuContent,
++  DropdownMenuItem,
++  DropdownMenuTrigger,
++} from '@/components/ui/dropdown-menu';
++import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
++import {
++  type CourseScale,
++  COURSE_SCALES,
++} from '@/lib/types/course-scale';
++
++interface CourseScalePickerProps {
++  value?: CourseScale;
++  onChange: (value: CourseScale) => void;
++  disabled?: boolean;
++  className?: string;
++}
++
++const SCALE_ICONS: Record<CourseScale, React.ReactNode> = {
++  micro: <Zap className="size-3.5 text-amber-500 shrink-0" />,
++  standard: <Target className="size-3.5 text-cyan-600 dark:text-cyan-400 shrink-0" />,
++  thematic: <BookOpen className="size-3.5 text-violet-500 shrink-0" />,
++};
++
++export function CourseScalePicker({
++  value = 'standard',
++  onChange,
++  disabled = false,
++  className,
++}: CourseScalePickerProps) {
++  const currentConfig = COURSE_SCALES[value] || COURSE_SCALES.standard;
++
++  return (
++    <DropdownMenu>
++      <Tooltip>
++        <TooltipTrigger asChild>
++          <DropdownMenuTrigger asChild disabled={disabled}>
++            <button
++              type="button"
++              className={cn(
++                'relative inline-flex h-8 shrink-0 cursor-pointer select-none items-center gap-1.5 whitespace-nowrap rounded-full border px-3 py-1.5 text-xs font-medium transition-all active:scale-95 focus-visible:outline-2 focus-visible:outline-offset-2',
++                'border-border/60 bg-background/80 hover:bg-muted/70 text-foreground/90 shadow-xs hover:border-border',
++                disabled && 'opacity-50 cursor-not-allowed pointer-events-none',
++                className,
++              )}
++            >
++              {SCALE_ICONS[value] || <Layers className="size-3.5" />}
++              <span className="font-medium">{currentConfig.label}</span>
++              <span className="text-[10px] text-muted-foreground bg-muted px-1.5 py-0.5 rounded-full font-mono">
++                {currentConfig.badge}
++              </span>
++              <ChevronDown className="size-3 text-muted-foreground/70 -mr-0.5" />
++            </button>
++          </DropdownMenuTrigger>
++        </TooltipTrigger>
++        <TooltipContent side="top" className="text-xs">
++          选择课程篇幅与教学形态（当前：{currentConfig.label}，约{currentConfig.slides}）
++        </TooltipContent>
++      </Tooltip>
++
++      <DropdownMenuContent align="end" sideOffset={6} className="w-68 p-1.5 space-y-1">
++        <div className="px-2 py-1 text-[11px] font-semibold text-muted-foreground border-b border-border/40 mb-1">
++          课程篇幅与结构形态
++        </div>
++        {(Object.keys(COURSE_SCALES) as CourseScale[]).map((scaleKey) => {
++          const item = COURSE_SCALES[scaleKey];
++          const isSelected = value === scaleKey;
++          return (
++            <DropdownMenuItem
++              key={scaleKey}
++              onClick={() => onChange(scaleKey)}
++              className={cn(
++                'flex items-start gap-2.5 p-2 rounded-lg cursor-pointer transition-colors',
++                isSelected
++                  ? 'bg-accent text-accent-foreground font-medium'
++                  : 'hover:bg-muted/80 text-foreground',
++              )}
++            >
++              <div className="mt-0.5">{SCALE_ICONS[scaleKey]}</div>
++              <div className="flex-1 min-w-0">
++                <div className="flex items-center justify-between gap-1">
++                  <span className="font-semibold text-xs">{item.label}</span>
++                  <span className="text-[10px] font-mono px-1.5 py-0.2 rounded bg-muted/90 text-muted-foreground border border-border/40">
++                    {item.slides}
++                  </span>
++                </div>
++                <p className="text-[11px] text-muted-foreground leading-snug mt-0.5">
++                  {item.description}
++                </p>
++                <p className="text-[10px] text-muted-foreground/70 leading-tight mt-1 line-clamp-1">
++                  {item.structure}
++                </p>
++              </div>
++              {isSelected && (
++                <Check className="size-3.5 text-primary mt-0.5 shrink-0" />
++              )}
++            </DropdownMenuItem>
++          );
++        })}
++      </DropdownMenuContent>
++    </DropdownMenu>
 +  );
 +}
 diff --git a/components/settings/index.tsx b/components/settings/index.tsx
@@ -3712,6 +6360,1599 @@ index 00000000..e347982e
 +  avatar: string;
 +  exp: number;
 +}
+diff --git a/lib/server/batch-generation/extractor.ts b/lib/server/batch-generation/extractor.ts
+new file mode 100644
+index 00000000..502e0168
+--- /dev/null
++++ b/lib/server/batch-generation/extractor.ts
+@@ -0,0 +1,144 @@
++import { promises as fs } from 'fs';
++import { parsePptxIsolated } from '@/lib/server/agent-runtime/import-pptx';
++import { extractDocument, documentArtifactToParsedPdfContent } from '@/lib/document';
++import { normalizeDocumentMimeType } from '@/lib/document/mime';
++import { createLogger } from '@/lib/logger';
++import type { Slide } from '@openmaic/dsl';
++
++const log = createLogger('BatchExtractor');
++
++export interface ExtractedContent {
++  text: string;
++  images: string[];
++  title?: string;
++  slideCount?: number;
++}
++
++function stripHtml(html: string): string {
++  return html.replace(/<[^>]*>/g, '').replace(/&nbsp;/g, ' ').trim();
++}
++
++function extractFromPptxSlides(slides: Slide[]): ExtractedContent {
++  const textParts: string[] = [];
++  const images: string[] = [];
++  let firstTitle = '';
++
++  slides.forEach((slide, index) => {
++    const slideNumber = index + 1;
++    let slideTitle = `第 ${slideNumber} 页`;
++    const bodyTexts: string[] = [];
++
++    for (const elem of slide.elements ?? []) {
++      const rec = elem as {
++        type?: string;
++        content?: string;
++        text?: { content?: string };
++        src?: string;
++      };
++
++      if (rec.type === 'text' && rec.content) {
++        const clean = stripHtml(rec.content);
++        if (clean) {
++          if (!firstTitle) firstTitle = clean;
++          bodyTexts.push(clean);
++        }
++      } else if (rec.type === 'shape' && rec.text?.content) {
++        const clean = stripHtml(rec.text.content);
++        if (clean) bodyTexts.push(clean);
++      } else if (rec.type === 'image' && rec.src && typeof rec.src === 'string') {
++        if (rec.src.startsWith('data:image/') || rec.src.startsWith('http')) {
++          images.push(rec.src);
++        }
++      }
++    }
++
++    if (bodyTexts.length > 0) {
++      slideTitle = bodyTexts[0].slice(0, 50);
++    }
++
++    let slideBlock = `### 幻灯片 ${slideNumber}: ${slideTitle}\n${bodyTexts.join('\n')}`;
++    if (slide.script) {
++      slideBlock += `\n**讲师旁白与讲解脚本**：\n${slide.script.trim()}`;
++    }
++    textParts.push(slideBlock);
++  });
++
++  return {
++    text: textParts.join('\n\n---\n\n'),
++    images: images.slice(0, 15),
++    title: firstTitle || undefined,
++    slideCount: slides.length,
++  };
++}
++
++export async function extractFileContent(
++  filePath: string,
++  fileName: string,
++  declaredMime?: string,
++): Promise<ExtractedContent> {
++  const buffer = await fs.readFile(filePath);
++  const ext = fileName.toLowerCase().split('.').pop() || '';
++  const mimeType = normalizeDocumentMimeType({ fileName, mimeType: declaredMime });
++
++  log.info(`Extracting content for ${fileName} [ext=${ext}, mime=${mimeType}, size=${buffer.length} bytes]`);
++
++  // 1. PPTX 文件处理（原汁原味抽取每一页与批注讲解）
++  if (ext === 'pptx' || mimeType.includes('presentationml')) {
++    try {
++      const slides = await parsePptxIsolated(buffer.buffer);
++      if (slides && slides.length > 0) {
++        log.info(`Parsed ${slides.length} slides from PPTX: ${fileName}`);
++        return extractFromPptxSlides(slides);
++      }
++    } catch (err) {
++      log.warn(`Isolated PPTX parse failed for ${fileName}, attempting fallback document extractor:`, err);
++    }
++  }
++
++  // 2. 纯文本 / Markdown
++  if (ext === 'txt' || ext === 'md' || mimeType.startsWith('text/')) {
++    const text = buffer.toString('utf-8');
++    return {
++      text,
++      images: [],
++      title: fileName.replace(/\.[^/.]+$/, ''),
++    };
++  }
++
++  // 3. PDF / DOCX 等利用 OpenMAIC 的底层提取器（自动使用 MinerU / AliDocMind）
++  try {
++    const artifact = await extractDocument({
++      buffer,
++      fileName,
++      mimeType,
++      config: {
++        providerId: '',
++        allowEnvFallback: true,
++      },
++    });
++
++    const parsed = documentArtifactToParsedPdfContent(artifact);
++    const text = parsed.text || '';
++    const images = (parsed.images || []).slice(0, 15);
++
++    log.info(`Document extracted successfully: ${fileName} (${text.length} chars, ${images.length} images)`);
++
++    return {
++      text,
++      images,
++      title: fileName.replace(/\.[^/.]+$/, ''),
++    };
++  } catch (err) {
++    log.error(`Document extraction failed for ${fileName}:`, err);
++    // 即使高级解析失败，若含有可读文本，做兜底容灾
++    const rawText = buffer.toString('utf-8').replace(/[^\x20-\x7E\u4e00-\u9fa5\n\r\t]/g, '');
++    if (rawText.length > 100) {
++      return {
++        text: rawText.slice(0, 20000),
++        images: [],
++        title: fileName.replace(/\.[^/.]+$/, ''),
++      };
++    }
++    throw new Error(`无法解析课件文件 "${fileName}": ${err instanceof Error ? err.message : String(err)}`);
++  }
++}
+diff --git a/lib/server/batch-generation/runner.ts b/lib/server/batch-generation/runner.ts
+new file mode 100644
+index 00000000..606be77b
+--- /dev/null
++++ b/lib/server/batch-generation/runner.ts
+@@ -0,0 +1,521 @@
++import { promises as fs } from 'fs';
++import { createLogger } from '@/lib/logger';
++import { generateClassroom } from '@/lib/server/classroom-generation';
++import { getOwnerScopedDocumentStore } from '@/lib/server/agent-runtime/owner-scoped-documents';
++import { extractFileContent } from './extractor';
++import { getBatchJob, updateBatchJob } from './store';
++import type { BatchJob, SubTaskStep } from './types';
++import { buildCourseScaleInstruction } from '@/lib/types/course-scale';
++import { syncInteractiveLibraryForStage } from '@/lib/server/interactive-library';
++
++const log = createLogger('BatchJobRunner');
++const runningBatchJobs = new Map<string, Promise<void>>();
++const jobAbortControllers = new Map<string, AbortController>();
++
++async function safeUnlink(path?: string): Promise<void> {
++  if (!path) return;
++  try {
++    await fs.unlink(path);
++  } catch {
++    // Ignore cleanup errors
++  }
++}
++
++/** 取消/中断整个批量任务 */
++export async function cancelBatchJob(jobId: string, ownerId?: string): Promise<boolean> {
++  const job = await getBatchJob(jobId, ownerId);
++  if (!job) return false;
++
++  // 1. 触发正在运行中的 AbortController
++  const controller = jobAbortControllers.get(jobId);
++  if (controller) {
++    controller.abort();
++    jobAbortControllers.delete(jobId);
++  }
++
++  // 2. 将任务与所有未完成的子任务标记为 cancelled
++  await updateBatchJob(jobId, (j) => {
++    j.status = 'cancelled';
++    j.completedAt = new Date().toISOString();
++    for (const task of j.tasks) {
++      if (task.status !== 'completed' && task.status !== 'failed') {
++        task.status = 'cancelled';
++        task.stepMessage = '任务已取消 (用户中断)';
++        if (task.tempFilePath) {
++          safeUnlink(task.tempFilePath);
++        }
++      }
++    }
++    j.cancelledTasks = j.tasks.filter((t) => t.status === 'cancelled').length;
++  });
++
++  log.info(`Batch job ${jobId} successfully cancelled by owner ${ownerId || 'system'}`);
++  return true;
++}
++
++/** 取消/移除队列中的某个未完成子任务 */
++export async function cancelBatchSubTask(
++  jobId: string,
++  taskId: string,
++  ownerId?: string,
++): Promise<boolean> {
++  const job = await getBatchJob(jobId, ownerId);
++  if (!job) return false;
++
++  const targetTask = job.tasks.find((t) => t.id === taskId);
++  if (!targetTask) return false;
++
++  if (targetTask.status === 'completed') {
++    return false;
++  }
++
++  // 如果该任务正在积极运行中，尝试终止当前正在执行的 LLM 生成
++  if (targetTask.status !== 'queued') {
++    const controller = jobAbortControllers.get(jobId);
++    if (controller) {
++      controller.abort();
++    }
++  }
++
++  await updateBatchJob(jobId, (j) => {
++    const t = j.tasks.find((task) => task.id === taskId);
++    if (t) {
++      t.status = 'cancelled';
++      t.stepMessage = '已从队列中取消/移除';
++      if (t.tempFilePath) {
++        safeUnlink(t.tempFilePath);
++      }
++    }
++    j.cancelledTasks = j.tasks.filter((task) => task.status === 'cancelled').length;
++  });
++
++  log.info(`SubTask ${taskId} in batch job ${jobId} cancelled`);
++  return true;
++}
++
++export function runBatchJob(jobId: string, baseUrl: string): Promise<void> {
++  const existing = runningBatchJobs.get(jobId);
++  if (existing) return existing;
++
++  const controller = new AbortController();
++  jobAbortControllers.set(jobId, controller);
++
++  const jobPromise = (async () => {
++    try {
++      const initialJob = await getBatchJob(jobId);
++      if (!initialJob) {
++        log.error(`Batch job ${jobId} not found`);
++        return;
++      }
++
++      await updateBatchJob(jobId, (job) => {
++        job.status = 'processing';
++        job.startedAt = new Date().toISOString();
++        job.progress = 5;
++      });
++
++      if (initialJob.mode === 'single_merged') {
++        await executeSingleMergedJob(jobId, baseUrl, controller);
++      } else {
++        await executeBatchIndependentJob(jobId, baseUrl, controller);
++      }
++    } catch (error) {
++      if (controller.signal.aborted || (error as any)?.name === 'AbortError') {
++        log.info(`Batch job ${jobId} was aborted by user`);
++        await updateBatchJob(jobId, (job) => {
++          job.status = 'cancelled';
++          job.completedAt = new Date().toISOString();
++        });
++        return;
++      }
++      log.error(`Batch job ${jobId} encountered unexpected error:`, error);
++      const message = error instanceof Error ? error.message : String(error);
++      await updateBatchJob(jobId, (job) => {
++        job.status = 'failed';
++        job.error = message;
++        job.completedAt = new Date().toISOString();
++      });
++    } finally {
++      jobAbortControllers.delete(jobId);
++      runningBatchJobs.delete(jobId);
++    }
++  })();
++
++  runningBatchJobs.set(jobId, jobPromise);
++  return jobPromise;
++}
++
++/** 模式 A：多文件合为一门精品课程 */
++async function executeSingleMergedJob(
++  jobId: string,
++  baseUrl: string,
++  controller: AbortController,
++): Promise<void> {
++  const job = await getBatchJob(jobId);
++  if (!job) return;
++
++  log.info(`Executing single merged job ${jobId} with ${job.tasks.length} source files`);
++
++  const extractedTexts: string[] = [];
++  const extractedImages: string[] = [];
++
++  // 1. 依次解析全部上传文件
++  for (let i = 0; i < job.tasks.length; i++) {
++    if (controller.signal.aborted) {
++      const err = new Error('Batch job cancelled by user');
++      err.name = 'AbortError';
++      throw err;
++    }
++
++    const task = job.tasks[i];
++    const progress = Math.round(5 + (i / job.tasks.length) * 20);
++
++    await updateBatchJob(jobId, (j) => {
++      j.progress = progress;
++      const target = j.tasks.find((t) => t.id === task.id);
++      if (target) {
++        target.status = 'extracting';
++        target.progress = 50;
++        target.stepMessage = `正在使用 MinerU / 课件解析器提取内容...`;
++      }
++    });
++
++    try {
++      if (task.tempFilePath) {
++        const extracted = await extractFileContent(task.tempFilePath, task.fileName, task.mimeType);
++        extractedTexts.push(`### 教学参考资料 [${i + 1}]: ${task.fileName}\n${extracted.text}`);
++        extractedImages.push(...extracted.images);
++
++        await updateBatchJob(jobId, (j) => {
++          const target = j.tasks.find((t) => t.id === task.id);
++          if (target) {
++            target.status = 'completed';
++            target.progress = 100;
++            target.stepMessage = `提取完成 (${extracted.text.length} 字)`;
++          }
++        });
++      }
++    } catch (err) {
++      const errMsg = err instanceof Error ? err.message : String(err);
++      log.warn(`Extraction error on ${task.fileName}:`, err);
++      await updateBatchJob(jobId, (j) => {
++        const target = j.tasks.find((t) => t.id === task.id);
++        if (target) {
++          target.status = 'failed';
++          target.error = errMsg;
++          target.stepMessage = `提取失败: ${errMsg}`;
++        }
++      });
++    } finally {
++      await safeUnlink(task.tempFilePath);
++    }
++  }
++
++  if (controller.signal.aborted) {
++    const err = new Error('Batch job cancelled by user');
++    err.name = 'AbortError';
++    throw err;
++  }
++
++  // 2. 检查是否有有效提取内容
++  const combinedText = extractedTexts.join('\n\n---\n\n').trim();
++  if (!combinedText) {
++    throw new Error('未能从上传的任何文件中提取出有效文本或大纲内容');
++  }
++
++  // 3. 构建综合生成指令
++  const scaleInstruction = buildCourseScaleInstruction(job.courseScale);
++  const requirement = job.enableInteractiveMode
++    ? `【课程教学主题】：${job.title || '多课件融合互动微课堂'}\n${job.requirement ? '【教学总要求】：' + job.requirement + '\n' : ''}【核心模式】：必须采用深度交互模式，全课70%以上场景为交互场景（物理/科学过程仿真、动手探究实验、游戏化闯关、交互测验），极少篇幅为过渡与总结。${scaleInstruction}`
++    : `${job.requirement ? job.requirement + '\n\n' : ''}${scaleInstruction}`;
++
++  await updateBatchJob(jobId, (j) => {
++    j.progress = 30;
++  });
++
++  // 4. 执行全自动课程生成管线
++  const result = await generateClassroom(
++    {
++      requirement,
++      pdfContent: {
++        text: combinedText.slice(0, 30000),
++        images: extractedImages.slice(0, 20),
++      },
++      enableTTS: job.enableTTS,
++      enableImageGeneration: job.enableImageGeneration,
++      interactiveMode: job.enableInteractiveMode,
++      courseScale: job.courseScale,
++    },
++    {
++      baseUrl,
++      signal: controller.signal,
++      onProgress: async (p) => {
++        // Map 0-100% of generateClassroom to 30% - 95% of batch job
++        const mappedProgress = Math.round(30 + p.progress * 0.65);
++        await updateBatchJob(jobId, (j) => {
++          j.progress = mappedProgress;
++        });
++      },
++    },
++  );
++
++  // 5. 写入当前用户的专属 PostgreSQL 存储
++  try {
++    const store = await getOwnerScopedDocumentStore(job.ownerId);
++    await store.saveDocument({
++      stage: result.stage,
++      scenes: result.scenes,
++    });
++    log.info(`Merged course ${result.id} successfully saved to owner store (${job.ownerId})`);
++  } catch (dbError) {
++    log.warn(`Failed to sync merged course ${result.id} to owner store:`, dbError);
++  }
++
++  // 5.5 自动打包并导出互动内容至互动展厅
++  void syncInteractiveLibraryForStage(result.stage, result.scenes).catch((err) => {
++    log.warn(`Failed to sync interactive library for merged course ${result.id}:`, err);
++  });
++
++  // 6. 标记批次完成
++  await updateBatchJob(jobId, (j) => {
++    j.status = 'completed';
++    j.progress = 100;
++    j.completedTasks = j.tasks.length;
++    j.resultClassroomId = result.id;
++    j.resultClassroomUrl = result.url;
++    j.resultStageId = result.stage.id;
++    j.scenesCount = result.scenesCount;
++    j.completedAt = new Date().toISOString();
++  });
++
++  log.info(`Single merged batch job ${jobId} completed successfully: ${result.url}`);
++}
++
++/** 模式 B：多文件分别独立生成课程 (一对一批量流水线) */
++async function executeBatchIndependentJob(
++  jobId: string,
++  baseUrl: string,
++  controller: AbortController,
++): Promise<void> {
++  const initialJob = await getBatchJob(jobId);
++  if (!initialJob) return;
++
++  const totalTasks = initialJob.tasks.length;
++  log.info(`Executing batch independent job ${jobId} with ${totalTasks} sequential tasks`);
++
++  let completedCount = 0;
++  let failedCount = 0;
++
++  for (let i = 0; i < totalTasks; i++) {
++    // 检查整体任务是否已被取消或中断
++    const currentJob = await getBatchJob(jobId);
++    if (!currentJob || currentJob.status === 'cancelled' || controller.signal.aborted) {
++      log.info(`Batch job ${jobId} is cancelled, terminating independent queue immediately`);
++      break;
++    }
++
++    const task = currentJob.tasks[i];
++    const taskIndex = i;
++
++    // 检查此特定子任务是否已被用户从队列中移除/取消
++    if (task.status === 'cancelled') {
++      log.info(`Task ${task.fileName} (${task.id}) was cancelled, skipping`);
++      continue;
++    }
++
++    log.info(`[${i + 1}/${totalTasks}] Starting task: ${task.fileName}`);
++
++    await updateBatchJob(jobId, (j) => {
++      const target = j.tasks[taskIndex];
++      if (target) {
++        target.status = 'extracting';
++        target.startedAt = new Date().toISOString();
++        target.progress = 10;
++        target.stepMessage = '正在提取课件与知识点...';
++      }
++    });
++
++    try {
++      if (!task.tempFilePath) {
++        throw new Error('课件临时存储路径丢失');
++      }
++
++      // 1. 提取当前文件内容
++      const extracted = await extractFileContent(task.tempFilePath, task.fileName, task.mimeType);
++
++      if (controller.signal.aborted) {
++        const err = new Error('Batch job cancelled by user');
++        err.name = 'AbortError';
++        throw err;
++      }
++
++      await updateBatchJob(jobId, (j) => {
++        const target = j.tasks[taskIndex];
++        if (target) {
++          target.status = 'planning_outline';
++          target.progress = 25;
++          target.stepMessage = '正在规划课程大纲与交互流程...';
++        }
++      });
++
++      // 2. 组装当前课程的个性化提示词
++      const courseTitle = extracted.title || task.fileName.replace(/\.[^/.]+$/, '');
++      const scaleInstruction = buildCourseScaleInstruction(initialJob.courseScale);
++      const requirement = initialJob.enableInteractiveMode
++        ? `【课程主题】：《${courseTitle}》\n${initialJob.requirement ? '【教学总要求】：' + initialJob.requirement + '\n' : ''}【核心模式】：必须采用深度交互模式，全课70%以上场景为交互场景（交互模拟器、动手探索、趣味闯关游戏及互动测验），极少篇幅为过渡与总结。${scaleInstruction}`
++        : `【课程主题】：《${courseTitle}》\n${initialJob.requirement ? '【教学总要求】：' + initialJob.requirement + '\n' : ''}${scaleInstruction}`;
++
++      // 3. 执行生成
++      const result = await generateClassroom(
++        {
++          requirement,
++          pdfContent: {
++            text: extracted.text.slice(0, 25000),
++            images: extracted.images.slice(0, 15),
++          },
++          enableTTS: initialJob.enableTTS,
++          enableImageGeneration: initialJob.enableImageGeneration,
++          interactiveMode: initialJob.enableInteractiveMode,
++          courseScale: initialJob.courseScale,
++        },
++        {
++          baseUrl,
++          signal: controller.signal,
++          onProgress: async (p) => {
++            const stepMapping: Record<string, SubTaskStep> = {
++              queued: 'planning_outline',
++              generating_outlines: 'planning_outline',
++              generating_scenes: 'building_scenes',
++              generating_media: 'building_scenes',
++              generating_tts: 'generating_tts',
++              persisting: 'persisting',
++              completed: 'completed',
++              failed: 'failed',
++            };
++            const currentSubStep = stepMapping[p.step] || 'building_scenes';
++
++            await updateBatchJob(jobId, (j) => {
++              const target = j.tasks[taskIndex];
++              if (target && target.status !== 'cancelled') {
++                target.status = currentSubStep;
++                target.progress = p.progress;
++                target.stepMessage = p.message;
++              }
++              // Compute overall batch progress
++              const currentTaskContribution = p.progress / 100;
++              j.progress = Math.min(
++                99,
++                Math.round(((completedCount + currentTaskContribution) / totalTasks) * 100),
++              );
++            });
++          },
++        },
++      );
++
++      // 4. 同步至当前用户的 PostgreSQL 存储
++      try {
++        const store = await getOwnerScopedDocumentStore(initialJob.ownerId);
++        await store.saveDocument({
++          stage: result.stage,
++          scenes: result.scenes,
++        });
++        log.info(`Course ${result.id} successfully saved to owner store (${initialJob.ownerId})`);
++      } catch (dbError) {
++        log.warn(`Failed to sync course ${result.id} to owner store:`, dbError);
++      }
++
++      // 4.5 自动打包并导出互动内容至互动展厅
++      void syncInteractiveLibraryForStage(result.stage, result.scenes).catch((err) => {
++        log.warn(`Failed to sync interactive library for course ${result.id}:`, err);
++      });
++
++      // 5. 标记子任务成功
++      completedCount++;
++      await updateBatchJob(jobId, (j) => {
++        j.completedTasks = completedCount;
++        j.progress = Math.round((completedCount / totalTasks) * 100);
++        const target = j.tasks[taskIndex];
++        if (target) {
++          target.status = 'completed';
++          target.progress = 100;
++          target.classroomId = result.id;
++          target.classroomUrl = result.url;
++          target.stageId = result.stage.id;
++          target.scenesCount = result.scenesCount;
++          target.stepMessage = `课程生成完成 (共 ${result.scenesCount} 页)`;
++          target.completedAt = new Date().toISOString();
++        }
++      });
++
++      log.info(`[${i + 1}/${totalTasks}] Finished: ${task.fileName} -> ${result.url}`);
++    } catch (err) {
++      if (controller.signal.aborted || (err as any)?.name === 'AbortError') {
++        log.info(`[${i + 1}/${totalTasks}] Task ${task.fileName} aborted by user cancellation`);
++        await updateBatchJob(jobId, (j) => {
++          const target = j.tasks[taskIndex];
++          if (target && target.status !== 'completed') {
++            target.status = 'cancelled';
++            target.stepMessage = '任务已取消 (用户中断)';
++            target.completedAt = new Date().toISOString();
++          }
++          // Mark all remaining queued tasks as cancelled to stop token waste
++          for (let k = taskIndex + 1; k < j.tasks.length; k++) {
++            if (j.tasks[k].status === 'queued') {
++              j.tasks[k].status = 'cancelled';
++              j.tasks[k].stepMessage = '任务已取消 (用户中断)';
++              safeUnlink(j.tasks[k].tempFilePath);
++            }
++          }
++          j.cancelledTasks = j.tasks.filter((t) => t.status === 'cancelled').length;
++          j.status = 'cancelled';
++          j.completedAt = new Date().toISOString();
++        });
++        break;
++      }
++
++      failedCount++;
++      const errMsg = err instanceof Error ? err.message : String(err);
++      log.error(`[${i + 1}/${totalTasks}] Failed: ${task.fileName}`, err);
++
++      await updateBatchJob(jobId, (j) => {
++        j.failedTasks = failedCount;
++        const target = j.tasks[taskIndex];
++        if (target) {
++          target.status = 'failed';
++          target.error = errMsg;
++          target.stepMessage = `生成失败: ${errMsg}`;
++          target.completedAt = new Date().toISOString();
++        }
++      });
++    } finally {
++      await safeUnlink(task.tempFilePath);
++    }
++  }
++
++  // 6. 最终更新批次总体状态 (若非已取消)
++  const finalJob = await getBatchJob(jobId);
++  if (finalJob?.status === 'cancelled') {
++    log.info(`Batch independent job ${jobId} finished in cancelled state`);
++    return;
++  }
++
++  await updateBatchJob(jobId, (j) => {
++    j.progress = 100;
++    const cancelledCount = j.tasks.filter((t) => t.status === 'cancelled').length;
++    j.cancelledTasks = cancelledCount;
++    if (j.status !== 'cancelled') {
++      if (failedCount === 0 && cancelledCount === 0) {
++        j.status = 'completed';
++      } else if (completedCount > 0) {
++        j.status = 'partially_failed';
++      } else {
++        j.status = 'failed';
++      }
++    }
++    j.completedAt = new Date().toISOString();
++  });
++
++  log.info(
++    `Batch independent job ${jobId} finished: ${completedCount} succeeded, ${failedCount} failed`,
++  );
++}
+diff --git a/lib/server/batch-generation/store.ts b/lib/server/batch-generation/store.ts
+new file mode 100644
+index 00000000..e275cc08
+--- /dev/null
++++ b/lib/server/batch-generation/store.ts
+@@ -0,0 +1,123 @@
++import { promises as fs } from 'fs';
++import path from 'path';
++import type { BatchJob } from './types';
++import { createLogger } from '@/lib/logger';
++
++const log = createLogger('BatchJobStore');
++
++export const BATCH_JOBS_DIR = path.join(process.cwd(), 'data', 'batch-jobs');
++export const BATCH_TEMP_DIR = path.join(process.cwd(), 'data', 'batch-temp');
++
++export async function ensureBatchDirs(): Promise<void> {
++  await fs.mkdir(BATCH_JOBS_DIR, { recursive: true });
++  await fs.mkdir(BATCH_TEMP_DIR, { recursive: true });
++}
++
++function jobFilePath(jobId: string): string {
++  return path.join(BATCH_JOBS_DIR, `${jobId}.json`);
++}
++
++const jobMutex = new Map<string, Promise<void>>();
++
++export async function saveBatchJob(job: BatchJob): Promise<void> {
++  await ensureBatchDirs();
++  const filePath = jobFilePath(job.id);
++  const tempPath = `${filePath}.${process.pid}.${Date.now()}.tmp`;
++  job.updatedAt = new Date().toISOString();
++  await fs.writeFile(tempPath, JSON.stringify(job, null, 2), 'utf-8');
++  await fs.rename(tempPath, filePath);
++}
++
++export async function getBatchJob(jobId: string, ownerId?: string): Promise<BatchJob | null> {
++  try {
++    const filePath = jobFilePath(jobId);
++    const content = await fs.readFile(filePath, 'utf-8');
++    const job = JSON.parse(content) as BatchJob;
++    if (ownerId && job.ownerId !== ownerId) {
++      return null;
++    }
++    return job;
++  } catch (error) {
++    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
++      return null;
++    }
++    log.error(`Failed to read batch job ${jobId}:`, error);
++    return null;
++  }
++}
++
++export async function updateBatchJob(
++  jobId: string,
++  updater: (job: BatchJob) => void,
++): Promise<BatchJob | null> {
++  const previous = jobMutex.get(jobId) ?? Promise.resolve();
++  let result: BatchJob | null = null;
++
++  const current = previous
++    .catch(() => undefined)
++    .then(async () => {
++      const job = await getBatchJob(jobId);
++      if (!job) return;
++      updater(job);
++      await saveBatchJob(job);
++      result = job;
++    });
++
++  jobMutex.set(jobId, current);
++  await current;
++  return result;
++}
++
++export async function listBatchJobs(ownerId: string): Promise<BatchJob[]> {
++  await ensureBatchDirs();
++  try {
++    const files = await fs.readdir(BATCH_JOBS_DIR);
++    const jobs: BatchJob[] = [];
++
++    for (const file of files) {
++      if (!file.endsWith('.json')) continue;
++      try {
++        const filePath = path.join(BATCH_JOBS_DIR, file);
++        const content = await fs.readFile(filePath, 'utf-8');
++        const job = JSON.parse(content) as BatchJob;
++        if (!ownerId || job.ownerId === ownerId) {
++          jobs.push(job);
++        }
++      } catch {
++        // Skip corrupted or unreadable files
++      }
++    }
++
++    return jobs.sort(
++      (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime(),
++    );
++  } catch (error) {
++    log.error('Failed to list batch jobs:', error);
++    return [];
++  }
++}
++
++export async function deleteBatchJob(jobId: string, ownerId?: string): Promise<boolean> {
++  try {
++    const job = await getBatchJob(jobId, ownerId);
++    if (!job) return false;
++
++    for (const task of job.tasks) {
++      if (task.tempFilePath) {
++        try {
++          await fs.unlink(task.tempFilePath);
++        } catch {
++          // Ignore
++        }
++      }
++    }
++
++    const filePath = jobFilePath(jobId);
++    await fs.unlink(filePath);
++    return true;
++  } catch (error) {
++    log.error(`Failed to delete batch job ${jobId}:`, error);
++    return false;
++  }
++}
++
+diff --git a/lib/server/batch-generation/types.ts b/lib/server/batch-generation/types.ts
+new file mode 100644
+index 00000000..60eeda9b
+--- /dev/null
++++ b/lib/server/batch-generation/types.ts
+@@ -0,0 +1,69 @@
++import type { CourseScale } from '@/lib/types/course-scale';
++
++export type BatchJobMode = 'single_merged' | 'batch_independent';
++
++export type BatchJobStatus =
++  | 'queued'
++  | 'processing'
++  | 'completed'
++  | 'failed'
++  | 'partially_failed'
++  | 'cancelled';
++
++export type SubTaskStep =
++  | 'queued'
++  | 'extracting'
++  | 'planning_outline'
++  | 'building_scenes'
++  | 'generating_tts'
++  | 'persisting'
++  | 'completed'
++  | 'failed'
++  | 'cancelled';
++
++export interface BatchSubTask {
++  id: string;
++  fileName: string;
++  fileSize: number;
++  mimeType: string;
++  tempFilePath?: string;
++  status: SubTaskStep;
++  progress: number; // 0 - 100
++  stepMessage: string;
++  classroomId?: string;
++  classroomUrl?: string;
++  stageId?: string;
++  scenesCount?: number;
++  error?: string;
++  startedAt?: string;
++  completedAt?: string;
++}
++
++export interface BatchJob {
++  id: string;
++  ownerId: string;
++  mode: BatchJobMode;
++  status: BatchJobStatus;
++  title: string;
++  requirement: string;
++  enableTTS: boolean;
++  enableImageGeneration: boolean;
++  enableInteractiveMode?: boolean;
++  courseScale?: CourseScale;
++  totalTasks: number;
++  completedTasks: number;
++  failedTasks: number;
++  cancelledTasks?: number;
++  progress: number; // 0 - 100
++  createdAt: string;
++  updatedAt: string;
++  startedAt?: string;
++  completedAt?: string;
++  tasks: BatchSubTask[];
++  // If mode === 'single_merged':
++  resultClassroomId?: string;
++  resultClassroomUrl?: string;
++  resultStageId?: string;
++  scenesCount?: number;
++  error?: string;
++}
+diff --git a/lib/server/classroom-generation.ts b/lib/server/classroom-generation.ts
+index c2768590..29e05d18 100644
+--- a/lib/server/classroom-generation.ts
++++ b/lib/server/classroom-generation.ts
+@@ -1,6 +1,9 @@
+ import { callLLM } from '@/lib/ai/llm';
+ import { createStageAPI } from '@/lib/api/stage-api';
+ import type { StageStore } from '@/lib/api/stage-api-types';
++import { nanoid } from 'nanoid';
++import { buildPrompt, PROMPT_IDS } from '@/lib/prompts';
++import { MAX_PDF_CONTENT_CHARS } from '@/lib/constants/generation';
+ import {
+   applyOutlineFallbacks,
+   generateSceneOutlinesFromRequirements,
+@@ -9,8 +12,12 @@ import {
+   isAbortError,
+   PBLGenerationError,
+   withGenerationRetry,
++  DEFAULT_LANGUAGE_DIRECTIVE,
++  parseJsonResponse,
++  uniquifyMediaElementIds,
+   type AICallFn,
+   type AgentInfo,
++  type SceneOutline,
+ } from '@openmaic/generation';
+ import { createSceneWithActions } from '@/lib/server/scene-generation';
+ import { generatePBLV2Project } from '@/lib/pbl/v2/agents/planner';
+@@ -44,6 +51,7 @@ import {
+ } from '@/lib/server/classroom-media-generation';
+ import { buildVideoManifestFromOutlines } from '@/lib/media/video-manifest';
+ import type { UserRequirements } from '@/lib/types/generation';
++import { type CourseScale, buildCourseScaleInstruction } from '@/lib/types/course-scale';
+ import type { Scene, Stage } from '@/lib/types/stage';
+ import { AGENT_COLOR_PALETTE, AGENT_DEFAULT_AVATARS } from '@/lib/constants/agent-defaults';
+ 
+@@ -67,6 +75,8 @@ export interface GenerateClassroomInput {
+   enableVideoGeneration?: boolean;
+   enableTTS?: boolean;
+   agentMode?: 'default' | 'generate';
++  interactiveMode?: boolean;
++  courseScale?: CourseScale;
+ }
+ 
+ export type ClassroomGenerationStep =
+@@ -474,8 +484,15 @@ export async function generateClassroom(
+     return result.text;
+   };
+ 
++  const scaleInstruction = buildCourseScaleInstruction(input.courseScale);
++  const effectiveRequirement = scaleInstruction
++    ? `${requirement}${scaleInstruction}`
++    : requirement;
++
+   const requirements: UserRequirements = {
+-    requirement,
++    requirement: effectiveRequirement,
++    ...(input.courseScale ? { courseScale: input.courseScale } : {}),
++    ...(input.interactiveMode !== undefined ? { interactiveMode: input.interactiveMode } : {}),
+   };
+   const vocationalActive = resolveVocationalActive(requirements);
+   const pdfText = pdfContent?.text || undefined;
+@@ -547,18 +564,138 @@ export async function generateClassroom(
+     scenesGenerated: 0,
+   });
+ 
+-  const outlinesResult = await generateSceneOutlinesFromRequirements(
+-    requirements,
+-    pdfText,
+-    undefined,
+-    aiCall,
+-    {
+-      imageGenerationEnabled: input.enableImageGeneration,
+-      videoGenerationEnabled: input.enableVideoGeneration,
+-      researchContext,
+-      // NO teacherContext — agents haven't been generated yet
+-    },
+-  );
++  if (options.signal?.aborted) {
++    const err = new Error('Classroom generation was aborted');
++    err.name = 'AbortError';
++    throw err;
++  }
++
++  let outlinesResult: {
++    success: boolean;
++    data?: { languageDirective: string; courseTitle?: string; outlines: SceneOutline[] };
++    error?: string;
++  };
++
++  if (input.interactiveMode) {
++    log.info('🌟 Interactive mode is ENABLED: Generating outline with PROMPT_IDS.INTERACTIVE_OUTLINES (70% interactive widgets, simulation, game, etc.)');
++    const prompts = buildPrompt(PROMPT_IDS.INTERACTIVE_OUTLINES, {
++      requirement: requirements.requirement,
++      pdfContent: pdfText ? pdfText.substring(0, MAX_PDF_CONTENT_CHARS) : 'None',
++      availableImages: 'No images available',
++      researchContext: researchContext || 'None',
++      hasSourceImages: false,
++      imageEnabled: input.enableImageGeneration ?? false,
++      videoEnabled: input.enableVideoGeneration ?? false,
++      mediaEnabled: !!(input.enableImageGeneration || input.enableVideoGeneration),
++      teacherContext: '',
++      userProfile: '',
++    });
++
++    if (!prompts) {
++      log.warn('Prompt template for INTERACTIVE_OUTLINES not found, falling back to standard generator');
++      outlinesResult = await generateSceneOutlinesFromRequirements(
++        requirements,
++        pdfText,
++        undefined,
++        aiCall,
++        {
++          imageGenerationEnabled: input.enableImageGeneration,
++          videoGenerationEnabled: input.enableVideoGeneration,
++          researchContext,
++        },
++      );
++    } else {
++      try {
++        const response = await aiCall(prompts.system, prompts.user);
++        const parsed = parseJsonResponse<{
++          languageDirective?: string;
++          courseTitle?: string;
++          outlines?: SceneOutline[];
++        } | SceneOutline[]>(response);
++
++        let languageDirective = DEFAULT_LANGUAGE_DIRECTIVE;
++        let courseTitle: string | undefined;
++        let rawOutlines: SceneOutline[] = [];
++
++        if (Array.isArray(parsed)) {
++          rawOutlines = parsed;
++        } else if (parsed && parsed.outlines) {
++          languageDirective = parsed.languageDirective || DEFAULT_LANGUAGE_DIRECTIVE;
++          courseTitle =
++            typeof parsed.courseTitle === 'string' && parsed.courseTitle.trim()
++              ? parsed.courseTitle.trim().slice(0, 120)
++              : undefined;
++          rawOutlines = parsed.outlines;
++        }
++
++        if (!Array.isArray(rawOutlines) || rawOutlines.length === 0) {
++          log.warn('Empty outlines parsed from INTERACTIVE_OUTLINES, falling back to standard generator');
++          outlinesResult = await generateSceneOutlinesFromRequirements(
++            requirements,
++            pdfText,
++            undefined,
++            aiCall,
++            {
++              imageGenerationEnabled: input.enableImageGeneration,
++              videoGenerationEnabled: input.enableVideoGeneration,
++              researchContext,
++            },
++          );
++        } else {
++          const enriched = rawOutlines.map((outline, index) => {
++            const widgetType =
++              outline.widgetType || (outline.type === 'interactive' ? 'simulation' : undefined);
++            const widgetOutline =
++              outline.widgetOutline ||
++              (widgetType ? { concept: outline.title || 'Interactive Exploration' } : undefined);
++            return {
++              ...outline,
++              id: outline.id || nanoid(),
++              order: index + 1,
++              widgetType,
++              widgetOutline,
++              ...(Array.isArray(outline.mediaGenerations) ? null : { mediaGenerations: undefined }),
++            };
++          });
++
++          const finalOutlines = uniquifyMediaElementIds(enriched);
++          outlinesResult = {
++            success: true,
++            data: {
++              languageDirective,
++              courseTitle,
++              outlines: finalOutlines,
++            },
++          };
++        }
++      } catch (err) {
++        log.warn('Interactive outline generation encountered error, falling back to standard generator:', err);
++        outlinesResult = await generateSceneOutlinesFromRequirements(
++          requirements,
++          pdfText,
++          undefined,
++          aiCall,
++          {
++            imageGenerationEnabled: input.enableImageGeneration,
++            videoGenerationEnabled: input.enableVideoGeneration,
++            researchContext,
++          },
++        );
++      }
++    }
++  } else {
++    outlinesResult = await generateSceneOutlinesFromRequirements(
++      requirements,
++      pdfText,
++      undefined,
++      aiCall,
++      {
++        imageGenerationEnabled: input.enableImageGeneration,
++        videoGenerationEnabled: input.enableVideoGeneration,
++        researchContext,
++      },
++    );
++  }
+ 
+   if (!outlinesResult.success || !outlinesResult.data) {
+     log.error('Failed to generate outlines:', outlinesResult.error);
+@@ -566,8 +703,11 @@ export async function generateClassroom(
+   }
+ 
+   const { languageDirective, courseTitle, outlines } = outlinesResult.data;
++  const outlineBreakdown = outlines
++    .map((o) => `[${o.order}] ${o.type}${o.widgetType ? `(${o.widgetType})` : ''}: "${o.title}"`)
++    .join(' | ');
+   log.info(
+-    `Generated ${outlines.length} scene outlines (languageDirective: ${languageDirective}, courseTitle: ${courseTitle ?? 'n/a'})`,
++    `Generated ${outlines.length} scene outlines (interactiveMode=${!!input.interactiveMode}): ${outlineBreakdown}`,
+   );
+ 
+   await options.onProgress?.({
+@@ -602,6 +742,7 @@ export async function generateClassroom(
+     languageDirective,
+     videoManifest: buildVideoManifestFromOutlines(outlines),
+     style: 'interactive',
++    ...(input.interactiveMode ? { interactiveMode: true } : {}),
+     createdAt: Date.now(),
+     updatedAt: Date.now(),
+     // For LLM-generated agents, embed full configs so the client can
+@@ -637,6 +778,12 @@ export async function generateClassroom(
+     let generatedScenes = 0;
+ 
+     for (const [index, outline] of outlines.entries()) {
++      if (options.signal?.aborted) {
++        const err = new Error('Classroom generation was aborted');
++        err.name = 'AbortError';
++        throw err;
++      }
++
+       const safeOutline = applyOutlineFallbacks(outline, true, {
+         allowProceduralSkill: vocationalActive,
+       });
+@@ -746,6 +893,12 @@ export async function generateClassroom(
+ 
+     // Phase: Media generation (after all scenes generated)
+     if (input.enableImageGeneration || input.enableVideoGeneration) {
++      if (options.signal?.aborted) {
++        const err = new Error('Classroom generation was aborted');
++        err.name = 'AbortError';
++        throw err;
++      }
++
+       await options.onProgress?.({
+         step: 'generating_media',
+         progress: 90,
+diff --git a/lib/server/interactive-library/index.ts b/lib/server/interactive-library/index.ts
+new file mode 100644
+index 00000000..6e3154eb
+--- /dev/null
++++ b/lib/server/interactive-library/index.ts
+@@ -0,0 +1,447 @@
++import fs from 'fs/promises';
++import path from 'path';
++import { createLogger } from '@/lib/logger';
++import { inlineHtmlAssets } from '@/lib/export/inline-assets';
++import type { Scene } from '@/lib/types/stage';
++
++const log = createLogger('InteractiveLibrary');
++
++const INTERACTIVE_LIBRARY_DIR = path.join(process.cwd(), 'data', 'interactive-library');
++const CLASSROOMS_DIR = path.join(process.cwd(), 'data', 'classrooms');
++
++export interface InteractiveItemMeta {
++  sceneId: string;
++  order: number;
++  title: string;
++  widgetType: 'simulation' | 'game' | 'diagram' | 'code' | string;
++  fileName: string;
++  concept?: string;
++  description?: string;
++  size: number;
++  createdAt: number;
++}
++
++export interface InteractiveStageMeta {
++  stageId: string;
++  courseName: string;
++  folderName: string;
++  updatedAt: number;
++  items: InteractiveItemMeta[];
++}
++
++export interface InteractiveLibraryOverview {
++  courses: InteractiveStageMeta[];
++  totalItems: number;
++  typeCounts: {
++    game: number;
++    simulation: number;
++    diagram: number;
++    code: number;
++    other: number;
++  };
++}
++
++/** Sanitize file and directory name for safe filesystem storage */
++export function sanitizeFsName(name: string): string {
++  return (name || '未命名')
++    .replace(/[\\/:*?"<>|\r\n\t]/g, '_')
++    .replace(/\s+/g, ' ')
++    .trim()
++    .slice(0, 80);
++}
++
++/** Ensure base directory exists */
++async function ensureBaseDir(): Promise<void> {
++  await fs.mkdir(INTERACTIVE_LIBRARY_DIR, { recursive: true });
++}
++
++/**
++ * Find existing directory on disk for a given stageId (matches *_${stageId} or ${stageId})
++ */
++async function findStageDir(stageId: string): Promise<string | null> {
++  await ensureBaseDir();
++  try {
++    const entries = await fs.readdir(INTERACTIVE_LIBRARY_DIR, { withFileTypes: true });
++    for (const entry of entries) {
++      if (entry.isDirectory()) {
++        if (entry.name.endsWith(`_${stageId}`) || entry.name === stageId) {
++          return path.join(INTERACTIVE_LIBRARY_DIR, entry.name);
++        }
++      }
++    }
++  } catch (err) {
++    log.error('Failed to find stage dir:', err);
++  }
++  return null;
++}
++
++/**
++ * Sync and export all interactive scenes for a given stage into standalone HTML files.
++ */
++export async function syncInteractiveLibraryForStage(
++  stage: { id: string; name?: string; title?: string },
++  scenes: Scene[],
++  options?: { force?: boolean },
++): Promise<InteractiveStageMeta | null> {
++  const stageId = stage.id;
++  const courseName = stage.name || stage.title || stageId;
++  const safeCourseName = sanitizeFsName(courseName);
++
++  // Filter interactive scenes that have HTML content
++  const interactiveScenes: Scene[] = [];
++  scenes.forEach((s) => {
++    const rawContent = s.content as { type?: string; widgetType?: string; html?: string } | undefined;
++    const isInteractive =
++      s.type === 'interactive' ||
++      rawContent?.type === 'interactive' ||
++      Boolean(rawContent?.widgetType) ||
++      Boolean(rawContent?.html);
++
++    const html = rawContent?.html;
++    if (isInteractive && html && typeof html === 'string' && html.trim().length > 0) {
++      interactiveScenes.push(s);
++    }
++  });
++
++  const existingDir = await findStageDir(stageId);
++
++  // If there are no interactive scenes in this stage, clean up any existing folder
++  if (interactiveScenes.length === 0) {
++    if (existingDir) {
++      try {
++        await fs.rm(existingDir, { recursive: true, force: true });
++        log.info(`Removed empty interactive directory for stage ${stageId}`);
++      } catch (err) {
++        log.warn(`Failed to remove empty directory ${existingDir}:`, err);
++      }
++    }
++    return null;
++  }
++
++  await ensureBaseDir();
++
++  const targetFolderName = `${safeCourseName}_${stageId}`;
++  const targetDir = path.join(INTERACTIVE_LIBRARY_DIR, targetFolderName);
++
++  // If directory exists under an old name, rename it
++  if (existingDir && existingDir !== targetDir) {
++    try {
++      await fs.rename(existingDir, targetDir);
++      log.info(`Renamed stage directory from ${existingDir} to ${targetDir}`);
++    } catch {
++      await fs.mkdir(targetDir, { recursive: true });
++    }
++  } else {
++    await fs.mkdir(targetDir, { recursive: true });
++  }
++
++  const items: InteractiveItemMeta[] = [];
++  const now = Date.now();
++
++  for (let idx = 0; idx < interactiveScenes.length; idx++) {
++    const scene = interactiveScenes[idx];
++    const order = typeof scene.order === 'number' ? scene.order : idx + 1;
++    const sceneTitle = scene.title || `第${order}页互动`;
++    const safeTitle = sanitizeFsName(sceneTitle);
++    const fileName = `${String(order).padStart(2, '0')}_${safeTitle}.html`;
++    const filePath = path.join(targetDir, fileName);
++
++    const rawContent = scene.content as Record<string, unknown>;
++    const rawHtml = String(rawContent.html || '');
++    const widgetType =
++      String(rawContent.widgetType || '') ||
++      String((rawContent.widgetConfig as { type?: string })?.type || '') ||
++      'simulation';
++
++    const widgetConfig = (rawContent.widgetConfig as Record<string, unknown>) || {};
++    const concept = String(widgetConfig.concept || '');
++    const description = String(widgetConfig.description || '');
++
++    // Check if valid inlined file already exists to avoid redundant heavy packaging
++    let fileSize = 0;
++    let fileWritten = false;
++    if (!options?.force) {
++      try {
++        const stat = await fs.stat(filePath);
++        if (stat.size > 200) {
++          fileSize = stat.size;
++          fileWritten = true;
++        }
++      } catch {
++        fileWritten = false;
++      }
++    }
++
++    if (!fileWritten) {
++      // Perform deep asset inlining
++      let inlinedHtml = rawHtml;
++      try {
++        const { html } = await inlineHtmlAssets(rawHtml);
++        inlinedHtml = html;
++      } catch (err) {
++        log.warn(`Inlining assets for ${sceneTitle} failed; writing raw HTML`, err);
++        inlinedHtml = rawHtml;
++      }
++
++      await fs.writeFile(filePath, inlinedHtml, 'utf-8');
++      fileSize = Buffer.byteLength(inlinedHtml, 'utf-8');
++    }
++
++    items.push({
++      sceneId: scene.id,
++      order,
++      title: sceneTitle,
++      widgetType,
++      fileName,
++      concept: concept || undefined,
++      description: description || undefined,
++      size: fileSize,
++      createdAt: now,
++    });
++  }
++
++  const meta: InteractiveStageMeta = {
++    stageId,
++    courseName,
++    folderName: targetFolderName,
++    updatedAt: now,
++    items,
++  };
++
++  await fs.writeFile(
++    path.join(targetDir, 'meta.json'),
++    JSON.stringify(meta, null, 2),
++    'utf-8',
++  );
++
++  log.info(`Successfully synced ${items.length} interactive games to ${targetFolderName}`);
++  return meta;
++}
++
++/**
++ * Rename course folder and update meta.json when a course is renamed.
++ */
++export async function renameInteractiveLibraryStage(
++  stageId: string,
++  newCourseName: string,
++): Promise<boolean> {
++  const existingDir = await findStageDir(stageId);
++  if (!existingDir) return false;
++
++  const safeName = sanitizeFsName(newCourseName);
++  const targetDir = path.join(INTERACTIVE_LIBRARY_DIR, `${safeName}_${stageId}`);
++
++  try {
++    if (existingDir !== targetDir) {
++      await fs.rename(existingDir, targetDir);
++    }
++
++    const metaPath = path.join(targetDir, 'meta.json');
++    try {
++      const metaRaw = await fs.readFile(metaPath, 'utf-8');
++      const meta = JSON.parse(metaRaw) as InteractiveStageMeta;
++      meta.courseName = newCourseName;
++      meta.folderName = `${safeName}_${stageId}`;
++      meta.updatedAt = Date.now();
++      await fs.writeFile(metaPath, JSON.stringify(meta, null, 2), 'utf-8');
++    } catch {
++      // meta.json missing, will be recreated on next sync
++    }
++    log.info(`Renamed interactive library stage ${stageId} to ${newCourseName}`);
++    return true;
++  } catch (err) {
++    log.error(`Failed to rename interactive stage ${stageId}:`, err);
++    return false;
++  }
++}
++
++/**
++ * Delete course folder when a course is deleted.
++ */
++export async function deleteInteractiveLibraryStage(stageId: string): Promise<boolean> {
++  const existingDir = await findStageDir(stageId);
++  if (!existingDir) return false;
++
++  try {
++    await fs.rm(existingDir, { recursive: true, force: true });
++    log.info(`Deleted interactive library folder for stage ${stageId}: ${existingDir}`);
++    return true;
++  } catch (err) {
++    log.error(`Failed to delete interactive stage ${stageId}:`, err);
++    return false;
++  }
++}
++
++/**
++ * Read all interactive items from disk.
++ */
++export async function listInteractiveLibrary(): Promise<InteractiveLibraryOverview> {
++  await ensureBaseDir();
++
++  const courses: InteractiveStageMeta[] = [];
++  const typeCounts = {
++    game: 0,
++    simulation: 0,
++    diagram: 0,
++    code: 0,
++    other: 0,
++  };
++
++  try {
++    const entries = await fs.readdir(INTERACTIVE_LIBRARY_DIR, { withFileTypes: true });
++
++    for (const entry of entries) {
++      if (!entry.isDirectory()) continue;
++      const metaPath = path.join(INTERACTIVE_LIBRARY_DIR, entry.name, 'meta.json');
++      try {
++        const metaRaw = await fs.readFile(metaPath, 'utf-8');
++        const meta = JSON.parse(metaRaw) as InteractiveStageMeta;
++        courses.push(meta);
++
++        for (const item of meta.items) {
++          const t = item.widgetType.toLowerCase();
++          if (t === 'game') typeCounts.game++;
++          else if (t === 'simulation') typeCounts.simulation++;
++          else if (t === 'diagram') typeCounts.diagram++;
++          else if (t === 'code') typeCounts.code++;
++          else typeCounts.other++;
++        }
++      } catch {
++        // meta.json may not exist yet or was corrupted
++      }
++    }
++  } catch (err) {
++    log.error('Failed to list interactive library:', err);
++  }
++
++  // Sort courses by updatedAt descending
++  courses.sort((a, b) => b.updatedAt - a.updatedAt);
++
++  const totalItems =
++    typeCounts.game + typeCounts.simulation + typeCounts.diagram + typeCounts.code + typeCounts.other;
++
++  return {
++    courses,
++    totalItems,
++    typeCounts,
++  };
++}
++
++/**
++ * Safely get an HTML file's content for rendering or downloading.
++ */
++export async function getInteractiveHtmlFile(
++  stageId: string,
++  fileName: string,
++): Promise<{ html: string; title: string } | null> {
++  const stageDir = await findStageDir(stageId);
++  if (!stageDir) return null;
++
++  // Prevent path traversal
++  const safeFileName = path.basename(fileName);
++  const filePath = path.join(stageDir, safeFileName);
++
++  try {
++    const html = await fs.readFile(filePath, 'utf-8');
++    return { html, title: safeFileName.replace(/\.html$/i, '') };
++  } catch {
++    return null;
++  }
++}
++
++/**
++ * Backfill & Rescan: Scan all existing courses in data/classrooms/*.json and PostgreSQL database.
++ */
++export async function backfillInteractiveLibrary(options?: { force?: boolean }): Promise<number> {
++  let processed = 0;
++  const processedStageIds = new Set<string>();
++
++  // 1. Scan filesystem data/classrooms/*.json
++  try {
++    const files = await fs.readdir(CLASSROOMS_DIR);
++    for (const file of files) {
++      if (!file.endsWith('.json')) continue;
++      const fpath = path.join(CLASSROOMS_DIR, file);
++      try {
++        const raw = await fs.readFile(fpath, 'utf-8');
++        const data = JSON.parse(raw);
++        const stage = data.stage || { id: data.id || file.slice(0, -5), name: data.name };
++        const scenes = data.scenes || [];
++        if (Array.isArray(scenes) && scenes.length > 0) {
++          const res = await syncInteractiveLibraryForStage(stage, scenes, options);
++          if (res && res.items.length > 0) {
++            processed += res.items.length;
++            processedStageIds.add(stage.id);
++          }
++        }
++      } catch (err) {
++        log.warn(`Failed to backfill from ${file}:`, err);
++      }
++    }
++  } catch (err) {
++    log.error('Failed to read classrooms dir during backfill:', err);
++  }
++
++  // 2. Scan PostgreSQL database if configured
++  if (process.env.DATABASE_URL) {
++    try {
++      const { Pool } = await import('pg');
++      const pool = new Pool({ connectionString: process.env.DATABASE_URL });
++      const stagesRes = await pool.query('SELECT id, name FROM document_stages');
++      for (const row of stagesRes.rows) {
++        if (processedStageIds.has(row.id)) continue;
++        try {
++          const scenesRes = await pool.query(
++            'SELECT scene_order, data FROM document_scenes WHERE stage_id = $1 ORDER BY scene_order ASC',
++            [row.id],
++          );
++          if (scenesRes.rows.length > 0) {
++            const scenes = scenesRes.rows.map((r: { data: any }) => r.data).filter(Boolean);
++            const stage = { id: row.id, name: row.name };
++            const res = await syncInteractiveLibraryForStage(stage, scenes, options);
++            if (res && res.items.length > 0) {
++              processed += res.items.length;
++              processedStageIds.add(row.id);
++            }
++          }
++        } catch (err) {
++          log.warn(`Failed to backfill database stage ${row.id}:`, err);
++        }
++      }
++      await pool.end();
++    } catch (dbErr) {
++      log.warn('Failed to query database for interactive backfill:', dbErr);
++    }
++  }
++
++  // 3. Clean up orphaned interactive folders for courses that no longer exist
++  try {
++    const existingDirs = await fs.readdir(INTERACTIVE_LIBRARY_DIR, { withFileTypes: true });
++    for (const d of existingDirs) {
++      if (!d.isDirectory()) continue;
++      let stageId: string | null = null;
++      try {
++        const metaRaw = await fs.readFile(path.join(INTERACTIVE_LIBRARY_DIR, d.name, 'meta.json'), 'utf-8');
++        const meta = JSON.parse(metaRaw);
++        if (meta?.stageId) {
++          stageId = meta.stageId;
++        }
++      } catch {
++        // Fallback
++      }
++
++      const isLive = stageId
++        ? processedStageIds.has(stageId)
++        : Array.from(processedStageIds).some((id) => d.name.endsWith(`_${id}`) || d.name === id);
++
++      if (!isLive) {
++        log.info(`Purging orphaned interactive folder for deleted stage: ${d.name}`);
++        await fs.rm(path.join(INTERACTIVE_LIBRARY_DIR, d.name), { recursive: true, force: true });
++      }
++    }
++  } catch (err) {
++    log.warn('Failed to clean up orphaned interactive folders:', err);
++  }
++
++  return processed;
++}
 diff --git a/lib/server/provider-config.ts b/lib/server/provider-config.ts
 index 28986cae..0672e9a2 100644
 --- a/lib/server/provider-config.ts
@@ -4227,6 +8468,82 @@ index d26e71e4..87e4efc5 100644
          return merged as SettingsState;
        },
      },
+diff --git a/lib/types/course-scale.ts b/lib/types/course-scale.ts
+new file mode 100644
+index 00000000..fc195587
+--- /dev/null
++++ b/lib/types/course-scale.ts
+@@ -0,0 +1,48 @@
++export type CourseScale = 'micro' | 'standard' | 'thematic';
++
++export interface CourseScaleConfig {
++  id: CourseScale;
++  label: string;
++  badge: string;
++  slides: string;
++  description: string;
++  structure: string;
++}
++
++export const COURSE_SCALES: Record<CourseScale, CourseScaleConfig> = {
++  micro: {
++    id: 'micro',
++    label: '微课精讲',
++    badge: '4~5页',
++    slides: '4~5 页',
++    description: '单点突破，速战速决',
++    structure: '1页导入 + 1页精讲 + 1~2个交互/小测 + 1页速记总结',
++  },
++  standard: {
++    id: 'standard',
++    label: '标准课时',
++    badge: '7~9页',
++    slides: '7~9 页',
++    description: '经典闭环，均衡深入',
++    structure: '1页导入 + 2页讲解 + 2~3个交互探究 + 1~2次小测 + 1页拓展',
++  },
++  thematic: {
++    id: 'thematic',
++    label: '专题大课',
++    badge: '12~15页',
++    slides: '12~15 页',
++    description: '多阶递进，深度实战',
++    structure: '多阶段认知闭环 + 3~4个深度实验/挑战 + 分段小测 + 系统考核',
++  },
++};
++
++export function buildCourseScaleInstruction(scale?: CourseScale): string {
++  if (scale === 'micro') {
++    return '\n\n【课程篇幅与教学结构规范 - 微课精讲模式】\n- 目标页数：总场景数严格控制在 4~5 页（包含导入与总结）。\n- 教学节奏：聚焦单一核心知识点/公式/技能，直奔主题，避免冗长铺垫。\n- 结构配比：1页核心问题导入 -> 1页关键原理/参数精讲 -> 1~2个针对性互动实验/练习小测 -> 1页速记卡与要点小结。\n- 纪律要求：严禁冗长背景介绍，开门见山，高密度探究。';
++  }
++  if (scale === 'thematic') {
++    return '\n\n【课程篇幅与教学结构规范 - 专题大课模式】\n- 目标页数：总场景数展开为 12~15 页深度篇幅。\n- 教学节奏：适合专题复习或复杂工程/系统仿真项目，分层次阶梯式推进。\n- 结构配比：采用多阶段认知闭环（基础原理认知 -> 进阶规律探究 -> 综合实战/排障游戏），包含至少 3~4 个互动模拟/挑战部件，并在每个知识小节后插入 1 次阶段性小测，最后进行系统思维导图梳理与课后考核。\n- 纪律要求：避免连续堆砌纯理论文本，各阶段之间用过渡幻灯片平滑承接。';
++  }
++  // 'standard' or default
++  return '\n\n【课程篇幅与教学结构规范 - 标准课时模式】\n- 目标页数：总场景数保持在 7~9 页的标准微课堂体量。\n- 教学节奏：经典认知闭环，由浅入深。\n- 结构配比：1页情境导入 -> 2页核心概念讲解 -> 2~3个互动探究实验/练习 -> 1~2次随堂小测 -> 1页总结反思与迁移应用。';
++}
+diff --git a/lib/types/generation.ts b/lib/types/generation.ts
+index f3e99e6b..4c6e0e6a 100644
+--- a/lib/types/generation.ts
++++ b/lib/types/generation.ts
+@@ -7,6 +7,9 @@
+ 
+ import type { ActionType } from './action';
+ import type { MediaGenerationRequest } from '@/lib/media/types';
++import type { CourseScale } from './course-scale';
++
++export type { CourseScale };
+ 
+ // ==================== PDF Image Types ====================
+ 
+@@ -100,6 +103,7 @@ export interface UploadedDocument {
+  */
+ export interface UserRequirements {
+   requirement: string; // Single free-form text for all user input
++  courseScale?: CourseScale; // Scale / length profile of the course
+   userNickname?: string; // Student nickname for personalization
+   userBio?: string; // Student background for personalization
+   webSearch?: boolean; // Enable web search for richer context
 diff --git a/lib/utils/model-config.ts b/lib/utils/model-config.ts
 index 1818c25f..9132d395 100644
 --- a/lib/utils/model-config.ts
@@ -4572,6 +8889,329 @@ index e7b54322..6be4a2e9 100644
    // Atomically capture members, delete the folder row, and clear all membership
    // rows in ONE transaction BEFORE the course-deletion cascade. This makes the
    // folder invisible to `setStageFolder` (which checks folder existence in its
+diff --git a/packages/@openmaic/generation/src/outline-types.ts b/packages/@openmaic/generation/src/outline-types.ts
+index 673b9d76..50543c36 100644
+--- a/packages/@openmaic/generation/src/outline-types.ts
++++ b/packages/@openmaic/generation/src/outline-types.ts
+@@ -23,6 +23,7 @@ export type ImageMapping = Record<string, string>;
+ /** Free-form requirements accepted by outline generation. */
+ export interface UserRequirements {
+   requirement: string;
++  courseScale?: 'micro' | 'standard' | 'thematic';
+   userNickname?: string;
+   userBio?: string;
+   webSearch?: boolean;
+diff --git a/pro-workbench-guide/README.md b/pro-workbench-guide/README.md
+new file mode 100644
+index 00000000..9b94d133
+--- /dev/null
++++ b/pro-workbench-guide/README.md
+@@ -0,0 +1,184 @@
++# OpenMAIC 方案 B（Pro 智能体工作台 + 专业编辑模式）配置指南
++
++> **说明**：本指南专用于在其他设备或新环境中为 **OpenMAIC** 开启 **方案 B（Pro Workbench 智能体工作台 + MAIC Editor 课件专业编辑模式）**。
++> 本文档包含完整的标准化流程与排查规范，**可直接交由 AI Coding Agent（如 Antigravity、Cursor、Claude Code 等）按步骤自动执行**。
++
++---
++
++## 📋 方案 B 核心能力概述
++
++开启方案 B 后，OpenMAIC 将获得完整的高级创作与编辑能力：
++1. **智能体工作台（Pro Workbench）**：
++   - 在首页 Logo 旁显示 `[Pro]` 徽章，点击进入专属工作台（`/workspace`）。
++   - 左侧为多轮对话 Agent（支持多会话、自动规划课程大纲、自动生成与修改幻灯片、调用工具操作素材）。
++2. **课件专业编辑模式（MAIC Editor / Pro Mode）**：
++   - 方案 B 在底层**完全包含**方案 A 的手动课件编辑器能力。
++   - 在工作台右侧或课程回放页右上角顶栏提供 `PRO MODE` 开关，可手动点选幻灯片元素、调整版面布局、修改文案及重新生成配音。
++
++---
++
++## 🤖 给 AI Agent 的执行工作流规范 (Agent Workflow)
++
++当要求 AI Agent 按照本指南进行自动化配置时，Agent 必须依次执行以下 5 个步骤，并完成最终验证：
++
++```mermaid
++flowchart TD
++    A["步骤 1: 检查前置环境 (Node.js & PostgreSQL)"] --> B["步骤 2: 配置 .env.local 环境变量"]
++    B --> C["步骤 3: 重新执行 npm run build 打包"]
++    C --> D["步骤 4: 重启 PM2 / 服务进程"]
++    D --> E["步骤 5: 自动化接口验证与排查"]
++```
++
++---
++
++### 步骤 1：检查前置运行环境
++
++请检查当前机器是否满足以下要求：
++1. **Node.js 版本**：>= 22.19.0
++   ```bash
++   node -v
++   ```
++2. **PostgreSQL 数据库**（Agent Runtime 强依赖）：
++   - 检查 PostgreSQL 服务是否正在运行：
++     ```bash
++     pg_isready -h 127.0.0.1 -p 5432
++     ```
++   - 确保存在数据库用户和库（默认推荐 `openmaic` / `openmaic`）。
++
++---
++
++### 步骤 2：配置 `.env.local` 环境变量
++
++编辑项目根目录下的 `.env.local` 文件，确保包含以下 4 项核心配置：
++
++#### 1. 前端特性编译开关（Build-time Flags）
++> ⚠️ **关键**：`NEXT_PUBLIC_*` 变量会在 Next.js 构建时编译内联到前端 JS 包中，必须在打包前配置。
++```env
++NEXT_PUBLIC_PRO_WORKBENCH_ENABLED=true
++NEXT_PUBLIC_MAIC_EDITOR_ENABLED=true
++```
++
++#### 2. 服务端 Agent 运行时开关
++```env
++OPENMAIC_AGENT_RUNTIME_ENABLED=true
++```
++
++#### 3. PostgreSQL 数据库连接串
++```env
++DATABASE_URL=postgres://<用户名>:<密码>@127.0.0.1:5432/<数据库名>
++# 本机典型示例:
++# DATABASE_URL=postgres://openmaic:openmaic_password@127.0.0.1:5432/openmaic
++```
++
++#### 4. Agent 驱动大模型路由（`maic-agent-driver`）
++Pro Workbench 中的 Agent 是一个持久化运行的服务端会话，需要由指定的大模型驱动，请在 `MODEL_ROUTES` 中配置 `maic-agent-driver`，并在 `.env.local` 中填入对应的 API Key。
++
++> [!IMPORTANT]
++> **关键原理：为什么网页“系统设置”中配置了 LLM，Pro 模式仍然报错 `API key required`？**
++> - **普通生成模式**：属于客户端发起请求，浏览器会自动将你在前端页面“系统设置”里保存的 Key 带给服务端，因此可以在服务端 `.env.local` 留空的情况下运行。
++> - **Pro 模式智能体（Agent Runner）**：属于**服务端全自主运行的后台守护任务**（由 Node.js 后台扫描数据库队列异步执行）。后台进程**完全无法访问用户的浏览器本地缓存**，必须直接从服务端的 `.env.local` 读取对应 Provider 的 API Key！
++> - 因此，开启 Pro 模式**必须在服务端的 `.env.local` 中配置对应的 API Key 和 BASE_URL**，否则 Agent 启动时会抛出 `API key required for provider`！
++
++> **格式约束**：
++> - `model` 必须带有 Provider 前缀（例如 `openai:gpt-5.5`、`deepseek:deepseek-chat`、`qwen:qwen-plus`）。
++> - `api` 字段必须为 `"openai-completions"` 或 `"openai-responses"`。
++
++##### 示例一：使用 OpenAI（GPT-4o / GPT-5）
++```env
++OPENAI_API_KEY=sk-your-openai-api-key
++MODEL_ROUTES='{"maic-agent-driver":{"model":"openai:gpt-5.5","api":"openai-completions"}}'
++```
++
++##### 示例二：使用 DeepSeek
++```env
++DEEPSEEK_API_KEY=sk-your-deepseek-api-key
++DEEPSEEK_BASE_URL=https://api.deepseek.com/v1
++MODEL_ROUTES='{"maic-agent-driver":{"model":"deepseek:deepseek-chat","api":"openai-completions"}}'
++```
++
++##### 示例三：使用阿里百炼 Qwen
++```env
++QWEN_API_KEY=sk-your-qwen-api-key
++MODEL_ROUTES='{"maic-agent-driver":{"model":"qwen:qwen-plus","api":"openai-completions"}}'
++```
++
++##### 示例四：使用硅基流动（SiliconFlow）
++```env
++SILICONFLOW_API_KEY=sk-your-siliconflow-api-key
++MODEL_ROUTES='{"maic-agent-driver":{"model":"siliconflow:Qwen/Qwen2.5-72B-Instruct","api":"openai-completions"}}'
++```
++
++---
++
++### 步骤 3：重新编译前端项目（必做）
++
++因为 `NEXT_PUBLIC_PRO_WORKBENCH_ENABLED` 是前端编译期注入的环境变量，**仅修改 `.env.local` 不重新编译是不会生效的**。
++
++必须执行编译指令：
++```bash
++npm run build
++```
++*（等待构建完成，确认控制台输出中包含 `✓ Compiled successfully` 以及 `ƒ /workspace` 路由）*
++
++---
++
++### 步骤 4：重启服务进程
++
++#### 如果使用 PM2 守护进程（推荐）：
++必须携带 `--update-env` 参数，让 PM2 重新加载环境变量：
++```bash
++pm2 restart openmaic --update-env
++```
++
++#### 如果使用直接启动：
++```bash
++npm run start
++```
++
++---
++
++### 步骤 5：自动化校验与测试
++
++Agent 在完成上述操作后，应执行以下命令验证配置是否生效：
++
++#### 1. 验证 Agent Runtime 接口
++```bash
++curl -s http://127.0.0.1:3000/api/agent/runtime
++```
++**期望返回**：
++```json
++{"enabled":true,"runtimeEnabled":true}
++```
++*如果 `enabled` 为 `false`，说明 `OPENMAIC_AGENT_RUNTIME_ENABLED` 未开启或 `DATABASE_URL` 无法连接。*
++
++#### 2. 验证 `/workspace` 页面连通性
++```bash
++curl -s -o /dev/null -w "%{http_code}\n" http://127.0.0.1:3000/workspace
++```
++**期望返回**：`200`
++
++#### 3. 浏览器端最终检查点
++1. 打开首页 `http://<服务器IP>:3000/`，在 **OpenMAIC** 大标题右上方应出现灰/紫色胶囊徽章 **`[Pro]`**。
++2. 点击 `[Pro]` 徽章，无缝切换进入 `/workspace` 智能体工作台。
++3. 打开任意一门生成的课程，顶栏右上角设置旁应出现 **`PRO MODE`** 滑动开关。
++
++---
++
++## 🛠️ 故障排查（Troubleshooting）
++
++| 异常现象 | 可能原因 | 解决办法 |
++| :--- | :--- | :--- |
++| 访问首页没有出现 `[Pro]` 徽章 | 修改了 `.env.local` 后未重新运行 `npm run build` | 重新执行 `npm run build`，完成后用 `pm2 restart openmaic --update-env` 重启。浏览器需强制刷新（Ctrl+F5）。 |
++| `/api/agent/runtime` 返回 `enabled: false` | 1. 未设置 `OPENMAIC_AGENT_RUNTIME_ENABLED=true`<br>2. `DATABASE_URL` 连接失败 | 检查 PostgreSQL 是否启动，检查连接账号密码是否正确。 |
++| 进入工作台与 Agent 对话时报错或卡住 | `MODEL_ROUTES` 中的 Provider 未配置 API Key | 查看 PM2 错误日志 `pm2 logs openmaic --err`，补充对应大模型的 API Key。 |
++| 报错提示模型不支持 Function Call | 配置的模型能力不足或未提供工具调用接口 | 将 `MODEL_ROUTES` 中的驱动模型替换为具备原生 Tool Use 能力的成熟模型（如 GPT-4o, DeepSeek-V3, Qwen-Plus 等）。 |
++
++---
++
++## 🚀 附：一键自动化配置脚本
++
++本目录下提供了自动化脚本 [setup-pro-workbench.sh](./setup-pro-workbench.sh)。在目标机器的项目根目录下可直接运行：
++```bash
++bash pro-workbench-guide/setup-pro-workbench.sh
++```
++该脚本会自动校验环境、补充 `.env.local` 选项、触发构建并完成接口健康检查。
+diff --git a/pro-workbench-guide/setup-pro-workbench.sh b/pro-workbench-guide/setup-pro-workbench.sh
+new file mode 100755
+index 00000000..792fbd19
+--- /dev/null
++++ b/pro-workbench-guide/setup-pro-workbench.sh
+@@ -0,0 +1,115 @@
++#!/usr/bin/env bash
++# ==============================================================================
++# OpenMAIC Pro Workbench (方案 B) 一键自动化配置与验证脚本
++# 适用场景：本地直接运行 或 由 AI Agent 在新环境中调用执行
++# ==============================================================================
++
++set -e
++
++GREEN='\033[0;32m'
++YELLOW='\033[1;33m'
++RED='\033[0;31m'
++BLUE='\033[0;34m'
++NC='\033[0m'
++
++echo -e "${BLUE}======================================================${NC}"
++echo -e "${BLUE}   OpenMAIC Pro Workbench (方案 B) 自动化配置向导    ${NC}"
++echo -e "${BLUE}======================================================${NC}"
++
++# 1. 确保在 OpenMAIC 项目根目录运行
++if [ ! -f "package.json" ] || ! grep -q "openmaic" "package.json" 2>/dev/null; then
++    echo -e "${RED}[错误] 请在 OpenMAIC 项目根目录下执行此脚本！${NC}"
++    exit 1
++fi
++
++ENV_FILE=".env.local"
++if [ ! -f "$ENV_FILE" ]; then
++    if [ -f ".env.example" ]; then
++        echo -e "${YELLOW}[提示] 未检测到 .env.local，从 .env.example 创建新文件...${NC}"
++        cp .env.example "$ENV_FILE"
++    else
++        touch "$ENV_FILE"
++    fi
++fi
++
++# 2. 检查并设置环境变量
++echo -e "${YELLOW}[1/4] 检查并更新 .env.local 环境变量...${NC}"
++
++set_env_var() {
++    local key="$1"
++    local val="$2"
++    if grep -q "^[# ]*${key}=" "$ENV_FILE"; then
++        sed -i "s|^[# ]*${key}=.*|${key}=${val}|" "$ENV_FILE"
++    else
++        echo "${key}=${val}" >> "$ENV_FILE"
++    fi
++}
++
++set_env_var "NEXT_PUBLIC_PRO_WORKBENCH_ENABLED" "true"
++set_env_var "NEXT_PUBLIC_MAIC_EDITOR_ENABLED" "true"
++set_env_var "OPENMAIC_AGENT_RUNTIME_ENABLED" "true"
++
++# 检查 DATABASE_URL
++if ! grep -q "^DATABASE_URL=postgres" "$ENV_FILE"; then
++    echo -e "${YELLOW}[警告] 未在 .env.local 中检测到有效的 DATABASE_URL！${NC}"
++    echo -e "${YELLOW}Agent Runtime 依赖 PostgreSQL 数据库。${NC}"
++    DEFAULT_PG="postgres://openmaic:openmaic_password@127.0.0.1:5432/openmaic"
++    set_env_var "DATABASE_URL" "$DEFAULT_PG"
++    echo -e "${GREEN}[已写入默认连接串] DATABASE_URL=${DEFAULT_PG}${NC}"
++fi
++
++# 检查 MODEL_ROUTES
++if ! grep -q "^MODEL_ROUTES=" "$ENV_FILE"; then
++    DEFAULT_ROUTE='{"maic-agent-driver":{"model":"openai:gpt-5.5","api":"openai-completions"}}'
++    set_env_var "MODEL_ROUTES" "'$DEFAULT_ROUTE'"
++    echo -e "${GREEN}[已写入默认大模型路由] MODEL_ROUTES=${DEFAULT_ROUTE}${NC}"
++    echo -e "${YELLOW}[提醒] 请确保在 .env.local 中配置了对应 Provider 的 API Key（如 OPENAI_API_KEY）！${NC}"
++fi
++
++echo -e "${GREEN}✓ 环境变量更新完毕。${NC}"
++
++# 3. 重新构建前端
++echo -e "${YELLOW}[2/4] 正在编译前端项目 (npm run build)...${NC}"
++echo -e "${BLUE}提示：NEXT_PUBLIC_* 特性开关必须在 build 时内联到代码中。${NC}"
++npm run build
++echo -e "${GREEN}✓ 编译打包完成！${NC}"
++
++# 4. 重启应用服务
++echo -e "${YELLOW}[3/4] 重启应用进程...${NC}"
++if command -v pm2 >/dev/null 2>&1 && pm2 list | grep -q "openmaic"; then
++    echo -e "${BLUE}使用 PM2 重载服务并应用新环境变量...${NC}"
++    pm2 restart openmaic --update-env
++    echo -e "${GREEN}✓ PM2 重启成功！${NC}"
++else
++    echo -e "${YELLOW}未检测到名为 openmaic 的 PM2 进程，如果以 systemd 或 npm run start 方式运行，请手动重启进程。${NC}"
++fi
++
++# 5. 健康检查验证
++echo -e "${YELLOW}[4/4] 验证服务健康状态与接口响应...${NC}"
++sleep 2
++
++PORT=3000
++RUNTIME_URL="http://127.0.0.1:${PORT}/api/agent/runtime"
++WORKSPACE_URL="http://127.0.0.1:${PORT}/workspace"
++
++RUNTIME_RESP=$(curl -s "$RUNTIME_URL" 2>/dev/null || echo "")
++if echo "$RUNTIME_RESP" | grep -q '"enabled":true'; then
++    echo -e "${GREEN}✓ Agent Runtime 接口验证成功: ${RUNTIME_RESP}${NC}"
++else
++    echo -e "${RED}✗ Agent Runtime 接口返回异常: ${RUNTIME_RESP}${NC}"
++    echo -e "${YELLOW}请检查 PostgreSQL 是否正常运行，以及 .env.local 中的 DATABASE_URL 是否准确。${NC}"
++fi
++
++HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" "$WORKSPACE_URL" 2>/dev/null || echo "000")
++if [ "$HTTP_CODE" = "200" ]; then
++    echo -e "${GREEN}✓ /workspace 页面状态正常 (HTTP 200)${NC}"
++else
++    echo -e "${RED}✗ /workspace 页面返回状态码: ${HTTP_CODE}${NC}"
++fi
++
++echo -e "${BLUE}======================================================${NC}"
++echo -e "${GREEN}🎉 OpenMAIC 方案 B (Pro 工作台 + 编辑模式) 配置成功！${NC}"
++echo -e "访问方式："
++echo -e "  1. 打开首页 http://127.0.0.1:${PORT}/，点击 Logo 右上角的 [Pro] 徽章进入工作台"
++echo -e "  2. 进入任意课程页面，右上角顶栏已激活 [PRO MODE] 专业编辑开关"
++echo -e "${BLUE}======================================================${NC}"
 diff --git a/scripts/reset-admin-password.mjs b/scripts/reset-admin-password.mjs
 new file mode 100755
 index 00000000..104eb0c7

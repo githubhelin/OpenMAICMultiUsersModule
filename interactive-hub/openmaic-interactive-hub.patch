@@ -1,0 +1,1757 @@
+commit f0f029340df4fe89063c2269db462ebb9aa02cfb
+Author: helin <lionhe@gmail.com>
+Date:   Sat Sep 26 23:42:17 2026 +0800
+
+    feat(interactive-hub): add interactive exhibition hall and cascade clean physical deletion
+
+diff --git a/app/api/classroom/route.ts b/app/api/classroom/route.ts
+index 29940834..c14f7f68 100644
+--- a/app/api/classroom/route.ts
++++ b/app/api/classroom/route.ts
+@@ -19,6 +19,7 @@ import { getServerPersistenceProvider } from '@/lib/persistence/server-provider'
+ import { getSessionPayload } from '@/lib/server/auth/session';
+ import { resolveRequestOwnerId } from '@/lib/server/agent-runtime/owner';
+ import { getOwnerScopedDocumentStore } from '@/lib/server/agent-runtime/owner-scoped-documents';
++import { syncInteractiveLibraryForStage } from '@/lib/server/interactive-library';
+ import type { Stage, Scene } from '@/lib/types/stage';
+ 
+ const log = createLogger('Classroom API');
+@@ -139,6 +140,14 @@ export async function POST(request: NextRequest) {
+       }
+     }
+ 
++    // Automatically package and export interactive scenes to interactive library
++    void syncInteractiveLibraryForStage(
++      { ...safeStage, id: persisted.id },
++      safeScenes.map((scene) => ({ ...scene, stageId: persisted.id })),
++    ).catch((err) => {
++      log.warn(`Classroom ${persisted?.id} failed to sync to interactive library:`, err);
++    });
++
+     return apiSuccess({ id: persisted.id, url: persisted.url }, 201);
+   } catch (error) {
+     log.error(
+diff --git a/app/api/interactive-library/[stageId]/[filename]/route.ts b/app/api/interactive-library/[stageId]/[filename]/route.ts
+new file mode 100644
+index 00000000..d4215ce5
+--- /dev/null
++++ b/app/api/interactive-library/[stageId]/[filename]/route.ts
+@@ -0,0 +1,34 @@
++import { NextRequest, NextResponse } from 'next/server';
++import { getInteractiveHtmlFile } from '@/lib/server/interactive-library';
++
++export async function GET(
++  req: NextRequest,
++  context: { params: Promise<{ stageId: string; filename: string }> },
++) {
++  const { stageId, filename } = await context.params;
++  const decodedFilename = decodeURIComponent(filename);
++
++  const result = await getInteractiveHtmlFile(stageId, decodedFilename);
++  if (!result) {
++    return new NextResponse('Interactive game file not found', { status: 404 });
++  }
++
++  const { searchParams } = new URL(req.url);
++  const isDownload = searchParams.get('download') === '1';
++
++  const headers = new Headers();
++  headers.set('Content-Type', 'text/html; charset=utf-8');
++
++  if (isDownload) {
++    const downloadName = encodeURIComponent(`${result.title}.html`);
++    headers.set('Content-Disposition', `attachment; filename*=UTF-8''${downloadName}`);
++  } else {
++    headers.set('Content-Disposition', 'inline');
++    headers.set('X-Frame-Options', 'SAMEORIGIN');
++  }
++
++  return new NextResponse(result.html, {
++    status: 200,
++    headers,
++  });
++}
+diff --git a/app/api/interactive-library/route.ts b/app/api/interactive-library/route.ts
+new file mode 100644
+index 00000000..734573b2
+--- /dev/null
++++ b/app/api/interactive-library/route.ts
+@@ -0,0 +1,65 @@
++import { NextRequest } from 'next/server';
++import { apiSuccess, apiError } from '@/lib/server/api-response';
++import {
++  listInteractiveLibrary,
++  backfillInteractiveLibrary,
++} from '@/lib/server/interactive-library';
++import { createLogger } from '@/lib/logger';
++
++const log = createLogger('InteractiveLibraryAPI');
++
++export async function GET(req: NextRequest) {
++  try {
++    const { searchParams } = new URL(req.url);
++    const force = searchParams.get('force') === '1';
++    if (searchParams.get('backfill') === '1' || searchParams.get('refresh') === '1' || force) {
++      const count = await backfillInteractiveLibrary({ force });
++      log.info(`Manual sync/backfill executed, processed ${count} items`);
++    }
++
++    const overview = await listInteractiveLibrary();
++    return apiSuccess({
++      courses: overview.courses,
++      totalItems: overview.totalItems,
++      typeCounts: overview.typeCounts,
++      data: {
++        courses: overview.courses,
++        totalItems: overview.totalItems,
++        typeCounts: overview.typeCounts,
++      },
++    });
++  } catch (error) {
++    log.error('Failed to get interactive library:', error);
++    return apiError('INTERNAL_ERROR', 500, 'Failed to fetch interactive library');
++  }
++}
++
++export async function POST(req: NextRequest) {
++  try {
++    let force = false;
++    try {
++      const body = await req.json();
++      force = Boolean(body?.force);
++    } catch {
++      // Body may be empty
++    }
++
++    log.info(`Interactive library sync requested (force=${force})`);
++    const count = await backfillInteractiveLibrary({ force });
++    const overview = await listInteractiveLibrary();
++    return apiSuccess({
++      processed: count,
++      courses: overview.courses,
++      totalItems: overview.totalItems,
++      typeCounts: overview.typeCounts,
++      data: {
++        courses: overview.courses,
++        totalItems: overview.totalItems,
++        typeCounts: overview.typeCounts,
++      },
++    });
++  } catch (error) {
++    log.error('Failed to sync interactive library:', error);
++    return apiError('INTERNAL_ERROR', 500, 'Failed to sync interactive library');
++  }
++}
+diff --git a/app/api/stages/[id]/route.ts b/app/api/stages/[id]/route.ts
+index 23682901..f01373a8 100644
+--- a/app/api/stages/[id]/route.ts
++++ b/app/api/stages/[id]/route.ts
+@@ -29,6 +29,10 @@ import { withRequestOwnerId } from '@/lib/server/agent-runtime/with-owner';
+ import { STAGE_NAME_MAX_LENGTH } from '@/lib/server/agent-runtime/stage-limits';
+ import { getSessionPayload } from '@/lib/server/auth/session';
+ import { getServerPersistenceProvider } from '@/lib/persistence/server-provider';
++import {
++  renameInteractiveLibraryStage,
++  deleteInteractiveLibraryStage,
++} from '@/lib/server/interactive-library';
+ 
+ export const runtime = 'nodejs';
+ 
+@@ -109,6 +113,7 @@ export async function PATCH(req: NextRequest, { params }: Params) {
+         ...document,
+         stage: { ...document.stage, name, updatedAt: Date.now() },
+       });
++      void renameInteractiveLibraryStage(id, name).catch(() => {});
+     } catch (error) {
+       return mapSaveError(error, responseHeaders);
+     }
+@@ -178,30 +183,92 @@ export async function PUT(req: NextRequest, { params }: Params) {
+   });
+ }
+ 
+-// DELETE /api/stages/[id] — remove the course and its scenes/outline.
++// DELETE /api/stages/[id] — remove the course completely from DB, disk files, and interactive library.
+ export async function DELETE(req: NextRequest, { params }: Params) {
+   if (!isAgentRuntimeConfigured()) return new Response('Not found', { status: 404 });
+ 
+   const session = getSessionPayload(req);
+   const isAdmin = session?.role === 'admin';
++  const { id } = await params;
+ 
+   return withRequestOwnerId(req, async (ownerId, responseHeaders) => {
+-    const { id } = await params;
+-    const store = await getOwnerScopedDocumentStore(ownerId);
++    let deletedViaStore = false;
+     try {
++      const store = await getOwnerScopedDocumentStore(ownerId);
+       await store.deleteDocument(id);
+-    } catch (err) {
+-      if (isAdmin) {
++      deletedViaStore = true;
++    } catch {
++      // Owner-scoped delete failed (e.g. foreign owner); handled via admin cascade below
++    }
++
++    // 1. Direct database cascade purge if admin or store didn't handle it
++    if (!deletedViaStore && (isAdmin || !process.env.DATABASE_URL)) {
++      if (process.env.DATABASE_URL) {
+         try {
+-          const provider = await getServerPersistenceProvider(process.env.DATABASE_URL ?? '');
+-          await provider.documentStore.deleteDocument(id);
+-        } catch (innerErr) {
+-          throw innerErr;
++          const { Pool } = await import('pg');
++          const pool = new Pool({ connectionString: process.env.DATABASE_URL });
++          await pool.query('DELETE FROM document_scenes WHERE stage_id = $1', [id]);
++          await pool.query('DELETE FROM stage_meta WHERE stage_id = $1', [id]);
++          await pool.query('DELETE FROM document_stages WHERE id = $1', [id]);
++          try {
++            await pool.query('DELETE FROM document_asset_refs WHERE stage_id = $1', [id]);
++          } catch {}
++          try {
++            await pool.query('DELETE FROM document_asset_withdrawals WHERE stage_id = $1', [id]);
++          } catch {}
++          await pool.end();
++        } catch (dbErr) {
++          console.warn(`[DELETE /api/stages/${id}] Direct DB deletion encountered error:`, dbErr);
+         }
+-      } else {
+-        throw err;
+       }
++    } else if (!deletedViaStore && !isAdmin) {
++      return ownerApiError('INVALID_REQUEST', 403, 'Permission denied', responseHeaders);
++    }
++
++    // 2. Direct database cleanup even if store delete succeeded (ensure stage_meta and scenes are clean)
++    if (isAdmin && process.env.DATABASE_URL) {
++      try {
++        const { Pool } = await import('pg');
++        const pool = new Pool({ connectionString: process.env.DATABASE_URL });
++        await pool.query('DELETE FROM document_scenes WHERE stage_id = $1', [id]);
++        await pool.query('DELETE FROM stage_meta WHERE stage_id = $1', [id]);
++        await pool.query('DELETE FROM document_stages WHERE id = $1', [id]);
++        await pool.end();
++      } catch {}
++    }
++
++    // 3. Purge physical files in data/classrooms/
++    try {
++      const { promises: fsPromises } = await import('fs');
++      const pathModule = await import('path');
++      const classroomsDir = pathModule.join(process.cwd(), 'data', 'classrooms');
++      const jsonPath = pathModule.join(classroomsDir, `${id}.json`);
++      const mediaDirPath = pathModule.join(classroomsDir, id);
++
++      await fsPromises.rm(jsonPath, { force: true }).catch(() => {});
++      await fsPromises.rm(mediaDirPath, { recursive: true, force: true }).catch(() => {});
++
++      // Clean up any classroom-jobs for this stage
++      const jobsDir = pathModule.join(process.cwd(), 'data', 'classroom-jobs');
++      try {
++        const jobFiles = await fsPromises.readdir(jobsDir);
++        for (const jf of jobFiles) {
++          if (jf.includes(id)) {
++            await fsPromises.rm(pathModule.join(jobsDir, jf), { force: true }).catch(() => {});
++          }
++        }
++      } catch {}
++    } catch (fsErr) {
++      console.warn(`[DELETE /api/stages/${id}] Filesystem purge error:`, fsErr);
+     }
+-    return ownerJson({ ok: true }, 200, responseHeaders);
++
++    // 4. Purge interactive games folder in data/interactive-library/
++    try {
++      await deleteInteractiveLibraryStage(id);
++    } catch (libErr) {
++      console.warn(`[DELETE /api/stages/${id}] Interactive library delete error:`, libErr);
++    }
++
++    return ownerJson({ ok: true, success: true }, 200, responseHeaders);
+   });
+ }
+diff --git a/app/api/stages/route.ts b/app/api/stages/route.ts
+index 19b5e76d..ffa0a5ee 100644
+--- a/app/api/stages/route.ts
++++ b/app/api/stages/route.ts
+@@ -44,14 +44,27 @@ export async function GET(req: NextRequest) {
+   return withRequestOwnerId(req, async (ownerId, responseHeaders) => {
+     const store = await getOwnerScopedDocumentStore(ownerId);
+     let stages = await store.listDocuments();
+-    if (isAdmin) {
++    if (isAdmin && process.env.DATABASE_URL) {
+       try {
+-        const provider = await getServerPersistenceProvider(process.env.DATABASE_URL ?? '');
+-        const allDocs = await provider.documentStore.listDocuments();
++        const { Pool } = await import('pg');
++        const pool = new Pool({ connectionString: process.env.DATABASE_URL });
++        const res = await pool.query(
++          'SELECT id, name, interactive_mode, task_engine_mode, created_at, updated_at FROM document_stages ORDER BY updated_at DESC',
++        );
+         const map = new Map<string, any>();
+-        for (const doc of allDocs) map.set(doc.id, doc);
++        for (const doc of res.rows) {
++          map.set(doc.id, {
++            id: doc.id,
++            name: doc.name,
++            interactiveMode: doc.interactive_mode,
++            taskEngineMode: doc.task_engine_mode,
++            createdAt: doc.created_at,
++            updatedAt: doc.updated_at,
++          });
++        }
+         for (const s of stages) map.set(s.id, s);
+         stages = Array.from(map.values()).sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
++        await pool.end();
+       } catch {
+         // Keep store stages on error
+       }
+diff --git a/app/batch-studio/page.tsx b/app/batch-studio/page.tsx
+index d7499cd7..d2c504c8 100644
+--- a/app/batch-studio/page.tsx
++++ b/app/batch-studio/page.tsx
+@@ -24,6 +24,7 @@ import {
+   Zap,
+   Target,
+   BookOpen,
++  Gamepad2,
+ } from 'lucide-react';
+ import { Button } from '@/components/ui/button';
+ import { Card } from '@/components/ui/card';
+@@ -341,6 +342,15 @@ export default function BatchStudioPage() {
+           </div>
+ 
+           <div className="flex items-center gap-2">
++            <Button
++              variant="outline"
++              size="sm"
++              onClick={() => router.push('/interactive-hub')}
++              className="gap-1.5 border-purple-200 dark:border-purple-800 text-purple-600 dark:text-purple-400 hover:bg-purple-50 dark:hover:bg-purple-950/40"
++            >
++              <Gamepad2 className="w-4 h-4" />
++              互动展厅
++            </Button>
+             <Button
+               variant="outline"
+               size="sm"
+diff --git a/app/interactive-hub/page.tsx b/app/interactive-hub/page.tsx
+new file mode 100644
+index 00000000..f9d845b9
+--- /dev/null
++++ b/app/interactive-hub/page.tsx
+@@ -0,0 +1,816 @@
++'use client';
++
++import React, { useState, useEffect, useMemo } from 'react';
++import { useRouter } from 'next/navigation';
++import {
++  Gamepad2,
++  Atom,
++  GitBranch,
++  Code2,
++  Search,
++  ExternalLink,
++  Download,
++  BookOpen,
++  Sparkles,
++  Maximize2,
++  Minimize2,
++  X,
++  Play,
++  Layers,
++  LayoutGrid,
++  ChevronRight,
++  ArrowLeft,
++  Loader2,
++  FolderOpen,
++  RefreshCw,
++  CheckCircle2,
++} from 'lucide-react';
++import { Button } from '@/components/ui/button';
++import { Input } from '@/components/ui/input';
++import { Badge } from '@/components/ui/badge';
++import { Dialog, DialogContent } from '@/components/ui/dialog';
++
++interface InteractiveItem {
++  sceneId: string;
++  order: number;
++  title: string;
++  widgetType: string;
++  fileName: string;
++  concept?: string;
++  description?: string;
++  size: number;
++  createdAt: number;
++  stageId: string;
++  courseName: string;
++}
++
++interface CourseGroup {
++  stageId: string;
++  courseName: string;
++  folderName: string;
++  updatedAt: number;
++  items: InteractiveItem[];
++}
++
++interface OverviewData {
++  courses: Array<{
++    stageId: string;
++    courseName: string;
++    folderName: string;
++    updatedAt: number;
++    items: Array<Omit<InteractiveItem, 'stageId' | 'courseName'>>;
++  }>;
++  totalItems: number;
++  typeCounts: {
++    game: number;
++    simulation: number;
++    diagram: number;
++    code: number;
++    other: number;
++  };
++}
++
++export default function InteractiveHubPage() {
++  const router = useRouter();
++  const [loading, setLoading] = useState(true);
++  const [syncing, setSyncing] = useState(false);
++  const [syncMessage, setSyncMessage] = useState<string | null>(null);
++  const [data, setData] = useState<OverviewData | null>(null);
++  const [searchQuery, setSearchQuery] = useState('');
++  const [selectedType, setSelectedType] = useState<string>('all');
++  const [viewMode, setViewMode] = useState<'flat' | 'course'>('flat');
++
++  // Active playing item in modal
++  const [activeItem, setActiveItem] = useState<InteractiveItem | null>(null);
++  const [isFullscreen, setIsFullscreen] = useState(false);
++
++  // Load interactive library data
++  const loadData = async (forceSync = false) => {
++    try {
++      if (forceSync) {
++        setSyncing(true);
++      } else {
++        setLoading(true);
++      }
++      const url = forceSync ? '/api/interactive-library?refresh=1' : '/api/interactive-library';
++      const res = await fetch(url);
++      if (res.ok) {
++        const json = await res.json();
++        const payload = json.data || (json.courses ? json : null);
++        if (payload) {
++          setData(payload);
++          if (forceSync) {
++            setSyncMessage(`已成功完成归集！当前收录 ${payload.totalItems} 个互动场景，涵盖 ${payload.courses.length} 门课程`);
++            setTimeout(() => setSyncMessage(null), 4000);
++          }
++        }
++      }
++    } catch (err) {
++      console.error('Failed to load interactive library:', err);
++    } finally {
++      setLoading(false);
++      setSyncing(false);
++    }
++  };
++
++  // Trigger server-side full rescan & packaging
++  const triggerForceRescan = async (deepForce = false) => {
++    try {
++      setSyncing(true);
++      const res = await fetch('/api/interactive-library', {
++        method: 'POST',
++        headers: { 'Content-Type': 'application/json' },
++        body: JSON.stringify({ force: deepForce }),
++      });
++      if (res.ok) {
++        const json = await res.json();
++        const payload = json.data || (json.courses ? json : null);
++        if (payload) {
++          setData(payload);
++          setSyncMessage(
++            `全量扫描与同步归集成功！共检索到 ${payload.totalItems} 个互动场景（涵盖 ${payload.courses.length} 门课程）`
++          );
++          setTimeout(() => setSyncMessage(null), 4500);
++        }
++      }
++    } catch (err) {
++      console.error('Failed to sync interactive library:', err);
++    } finally {
++      setSyncing(false);
++    }
++  };
++
++  useEffect(() => {
++    loadData();
++  }, []);
++
++  // Flatten all items with course details attached
++  const allItems: InteractiveItem[] = useMemo(() => {
++    if (!data?.courses) return [];
++    const list: InteractiveItem[] = [];
++    for (const c of data.courses) {
++      for (const item of c.items) {
++        list.push({
++          ...item,
++          stageId: c.stageId,
++          courseName: c.courseName,
++        });
++      }
++    }
++    return list;
++  }, [data]);
++
++  // Filter items by type and search query
++  const filteredItems = useMemo(() => {
++    return allItems.filter((item) => {
++      const matchesType =
++        selectedType === 'all' || item.widgetType.toLowerCase() === selectedType.toLowerCase();
++
++      const q = searchQuery.trim().toLowerCase();
++      const matchesSearch =
++        !q ||
++        item.title.toLowerCase().includes(q) ||
++        item.courseName.toLowerCase().includes(q) ||
++        (item.concept && item.concept.toLowerCase().includes(q)) ||
++        (item.description && item.description.toLowerCase().includes(q));
++
++      return matchesType && matchesSearch;
++    });
++  }, [allItems, selectedType, searchQuery]);
++
++  // Group filtered items by course
++  const courseGroups = useMemo(() => {
++    const map = new Map<string, CourseGroup>();
++    for (const item of filteredItems) {
++      if (!map.has(item.stageId)) {
++        map.set(item.stageId, {
++          stageId: item.stageId,
++          courseName: item.courseName,
++          folderName: `${item.courseName}_${item.stageId}`,
++          updatedAt: item.createdAt,
++          items: [],
++        });
++      }
++      map.get(item.stageId)!.items.push(item);
++    }
++    return Array.from(map.values());
++  }, [filteredItems]);
++
++  const getTypeMeta = (type: string) => {
++    const t = type.toLowerCase();
++    switch (t) {
++      case 'game':
++        return {
++          label: '互动游戏',
++          color: 'bg-purple-500/10 text-purple-600 dark:text-purple-400 border-purple-500/20',
++          badgeColor: 'bg-purple-100 text-purple-700 dark:bg-purple-950/60 dark:text-purple-300',
++          icon: Gamepad2,
++        };
++      case 'simulation':
++        return {
++          label: '科学仿真',
++          color: 'bg-blue-500/10 text-blue-600 dark:text-blue-400 border-blue-500/20',
++          badgeColor: 'bg-blue-100 text-blue-700 dark:bg-blue-950/60 dark:text-blue-300',
++          icon: Atom,
++        };
++      case 'diagram':
++        return {
++          label: '算法图解',
++          color: 'bg-amber-500/10 text-amber-600 dark:text-amber-400 border-amber-500/20',
++          badgeColor: 'bg-amber-100 text-amber-700 dark:bg-amber-950/60 dark:text-amber-300',
++          icon: GitBranch,
++        };
++      case 'code':
++        return {
++          label: '代码工坊',
++          color: 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border-emerald-500/20',
++          badgeColor: 'bg-emerald-100 text-emerald-700 dark:bg-emerald-950/60 dark:text-emerald-300',
++          icon: Code2,
++        };
++      default:
++        return {
++          label: '互动实验',
++          color: 'bg-indigo-500/10 text-indigo-600 dark:text-indigo-400 border-indigo-500/20',
++          badgeColor: 'bg-indigo-100 text-indigo-700 dark:bg-indigo-950/60 dark:text-indigo-300',
++          icon: Sparkles,
++        };
++    }
++  };
++
++  const formatFileSize = (bytes: number) => {
++    if (!bytes) return '';
++    if (bytes < 1024) return `${bytes} B`;
++    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
++    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
++  };
++
++  return (
++    <div className="min-h-screen bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-slate-100">
++      {/* 顶部主导航条 */}
++      <header className="sticky top-0 z-40 bg-white/80 dark:bg-slate-900/80 backdrop-blur-md border-b border-slate-200/80 dark:border-slate-800">
++        <div className="max-w-7xl mx-auto px-4 sm:px-6 h-16 flex items-center justify-between gap-4">
++          <div className="flex items-center gap-3">
++            <Button
++              variant="ghost"
++              size="sm"
++              onClick={() => router.push('/')}
++              className="gap-1.5 text-slate-500 hover:text-slate-900 dark:text-slate-400 dark:hover:text-white"
++            >
++              <ArrowLeft className="w-4 h-4" />
++              <span>首页</span>
++            </Button>
++            <div className="h-4 w-px bg-slate-200 dark:bg-slate-800" />
++            <div className="flex items-center gap-2.5">
++              <div className="w-9 h-9 rounded-xl bg-gradient-to-tr from-purple-600 to-indigo-500 flex items-center justify-center text-white shadow-xs">
++                <Gamepad2 className="w-5 h-5" />
++              </div>
++              <div>
++                <h1 className="text-base font-bold tracking-tight text-slate-900 dark:text-white flex items-center gap-2">
++                  互动展厅
++                  <Badge variant="secondary" className="text-[10px] px-1.5 py-0 font-normal">
++                    独立离线应用
++                  </Badge>
++                </h1>
++                <p className="text-[11px] text-slate-500 dark:text-slate-400">
++                  全站仿真模拟、闯关游戏与图解实验集成中心
++                </p>
++              </div>
++            </div>
++          </div>
++
++          <div className="flex items-center gap-2">
++            <Button
++              variant="outline"
++              size="sm"
++              onClick={() => triggerForceRescan(false)}
++              disabled={syncing || loading}
++              className="gap-1.5 text-xs text-purple-600 dark:text-purple-400 border-purple-200 dark:border-purple-800 hover:bg-purple-50 dark:hover:bg-purple-950/40"
++              title="重新扫描全站课程并归集所有互动内容"
++            >
++              <RefreshCw className={`w-3.5 h-3.5 ${syncing ? 'animate-spin' : ''}`} />
++              <span>{syncing ? '正在归集...' : '强制同步归集'}</span>
++            </Button>
++            <Button
++              variant="outline"
++              size="sm"
++              onClick={() => router.push('/my-courses')}
++              className="gap-1.5 text-xs text-indigo-600 dark:text-indigo-400 border-indigo-200 dark:border-indigo-800"
++            >
++              <BookOpen className="w-3.5 h-3.5" />
++              我的课程
++            </Button>
++            <Button
++              variant="outline"
++              size="sm"
++              onClick={() => router.push('/batch-studio')}
++              className="gap-1.5 text-xs text-amber-600 dark:text-amber-400 border-amber-200 dark:border-amber-800"
++            >
++              <Sparkles className="w-3.5 h-3.5" />
++              批量制课
++            </Button>
++          </div>
++        </div>
++      </header>
++
++      {/* 主体内容 */}
++      <main className="max-w-7xl mx-auto px-4 sm:px-6 py-6 space-y-6">
++        {/* 同步提示通知条 */}
++        {syncMessage && (
++          <div className="bg-emerald-500/10 border border-emerald-500/30 text-emerald-700 dark:text-emerald-300 px-4 py-3 rounded-2xl text-xs flex items-center justify-between shadow-xs">
++            <div className="flex items-center gap-2.5">
++              <CheckCircle2 className="w-4 h-4 text-emerald-500 shrink-0" />
++              <span className="font-medium">{syncMessage}</span>
++            </div>
++            <button
++              onClick={() => setSyncMessage(null)}
++              className="text-emerald-500 hover:text-emerald-700 text-xs px-2 py-0.5 rounded-md hover:bg-emerald-500/10"
++            >
++              关闭
++            </button>
++          </div>
++        )}
++        {/* 顶部统计面板 */}
++        <div className="grid grid-cols-2 sm:grid-cols-5 gap-3.5">
++          <div
++            onClick={() => setSelectedType('all')}
++            className={`p-3.5 rounded-2xl border transition-all cursor-pointer ${
++              selectedType === 'all'
++                ? 'bg-white dark:bg-slate-900 border-indigo-500 ring-2 ring-indigo-500/20 shadow-xs'
++                : 'bg-white/60 dark:bg-slate-900/60 border-slate-200 dark:border-slate-800 hover:border-slate-300'
++            }`}
++          >
++            <div className="flex items-center justify-between mb-1.5">
++              <span className="text-xs text-slate-500">全部互动内容</span>
++              <Layers className="w-4 h-4 text-indigo-500" />
++            </div>
++            <div className="text-2xl font-bold tracking-tight">{data?.totalItems ?? 0}</div>
++            <div className="text-[10px] text-slate-400">涵盖 {data?.courses.length ?? 0} 门课程</div>
++          </div>
++
++          <div
++            onClick={() => setSelectedType('game')}
++            className={`p-3.5 rounded-2xl border transition-all cursor-pointer ${
++              selectedType === 'game'
++                ? 'bg-white dark:bg-slate-900 border-purple-500 ring-2 ring-purple-500/20 shadow-xs'
++                : 'bg-white/60 dark:bg-slate-900/60 border-slate-200 dark:border-slate-800 hover:border-slate-300'
++            }`}
++          >
++            <div className="flex items-center justify-between mb-1.5">
++              <span className="text-xs text-purple-600 dark:text-purple-400 font-medium">🎮 互动小游戏</span>
++              <Gamepad2 className="w-4 h-4 text-purple-500" />
++            </div>
++            <div className="text-2xl font-bold tracking-tight text-purple-600 dark:text-purple-400">
++              {data?.typeCounts.game ?? 0}
++            </div>
++            <div className="text-[10px] text-slate-400">通关与趣味策略</div>
++          </div>
++
++          <div
++            onClick={() => setSelectedType('simulation')}
++            className={`p-3.5 rounded-2xl border transition-all cursor-pointer ${
++              selectedType === 'simulation'
++                ? 'bg-white dark:bg-slate-900 border-blue-500 ring-2 ring-blue-500/20 shadow-xs'
++                : 'bg-white/60 dark:bg-slate-900/60 border-slate-200 dark:border-slate-800 hover:border-slate-300'
++            }`}
++          >
++            <div className="flex items-center justify-between mb-1.5">
++              <span className="text-xs text-blue-600 dark:text-blue-400 font-medium">🔬 科学与算法仿真</span>
++              <Atom className="w-4 h-4 text-blue-500" />
++            </div>
++            <div className="text-2xl font-bold tracking-tight text-blue-600 dark:text-blue-400">
++              {data?.typeCounts.simulation ?? 0}
++            </div>
++            <div className="text-[10px] text-slate-400">动态参数与机理推演</div>
++          </div>
++
++          <div
++            onClick={() => setSelectedType('diagram')}
++            className={`p-3.5 rounded-2xl border transition-all cursor-pointer ${
++              selectedType === 'diagram'
++                ? 'bg-white dark:bg-slate-900 border-amber-500 ring-2 ring-amber-500/20 shadow-xs'
++                : 'bg-white/60 dark:bg-slate-900/60 border-slate-200 dark:border-slate-800 hover:border-slate-300'
++            }`}
++          >
++            <div className="flex items-center justify-between mb-1.5">
++              <span className="text-xs text-amber-600 dark:text-amber-400 font-medium">📊 动态流程图解</span>
++              <GitBranch className="w-4 h-4 text-amber-500" />
++            </div>
++            <div className="text-2xl font-bold tracking-tight text-amber-600 dark:text-amber-400">
++              {data?.typeCounts.diagram ?? 0}
++            </div>
++            <div className="text-[10px] text-slate-400">结构透视与算法导图</div>
++          </div>
++
++          <div
++            onClick={() => setSelectedType('code')}
++            className={`p-3.5 rounded-2xl border transition-all cursor-pointer ${
++              selectedType === 'code'
++                ? 'bg-white dark:bg-slate-900 border-emerald-500 ring-2 ring-emerald-500/20 shadow-xs'
++                : 'bg-white/60 dark:bg-slate-900/60 border-slate-200 dark:border-slate-800 hover:border-slate-300'
++            }`}
++          >
++            <div className="flex items-center justify-between mb-1.5">
++              <span className="text-xs text-emerald-600 dark:text-emerald-400 font-medium">💻 代码交互工坊</span>
++              <Code2 className="w-4 h-4 text-emerald-500" />
++            </div>
++            <div className="text-2xl font-bold tracking-tight text-emerald-600 dark:text-emerald-400">
++              {data?.typeCounts.code ?? 0}
++            </div>
++            <div className="text-[10px] text-slate-400">代码拼装与状态执行</div>
++          </div>
++        </div>
++
++        {/* 筛选与搜索工具条 */}
++        <div className="bg-white dark:bg-slate-900 rounded-2xl p-4 border border-slate-200/80 dark:border-slate-800 shadow-xs flex flex-col md:flex-row items-center justify-between gap-4">
++          <div className="relative w-full md:w-80">
++            <Search className="w-4 h-4 absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400" />
++            <Input
++              type="text"
++              placeholder="搜索互动游戏、仿真实验或课程名称..."
++              value={searchQuery}
++              onChange={(e) => setSearchQuery(e.target.value)}
++              className="pl-9 bg-slate-50 dark:bg-slate-950 border-slate-200 dark:border-slate-800 rounded-xl text-xs h-9"
++            />
++          </div>
++
++          <div className="flex items-center gap-2 w-full md:w-auto justify-between md:justify-end">
++            {/* 快速刷新按钮 */}
++            <Button
++              variant="outline"
++              size="sm"
++              onClick={() => triggerForceRescan(false)}
++              disabled={syncing || loading}
++              className="gap-1 px-2.5 h-8 text-xs text-slate-600 dark:text-slate-400 hover:text-slate-900 border-slate-200 dark:border-slate-700"
++              title="刷新全量归集数据"
++            >
++              <RefreshCw className={`w-3.5 h-3.5 ${syncing ? 'animate-spin' : ''}`} />
++              <span className="hidden sm:inline">{syncing ? '同步中...' : '刷新'}</span>
++            </Button>
++
++            {/* 视图切换按钮 */}
++            <div className="flex items-center bg-slate-100 dark:bg-slate-800 p-0.5 rounded-xl border border-slate-200/80 dark:border-slate-700/80">
++              <button
++                onClick={() => setViewMode('flat')}
++                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-all ${
++                  viewMode === 'flat'
++                    ? 'bg-white dark:bg-slate-900 text-slate-900 dark:text-white shadow-xs'
++                    : 'text-slate-600 dark:text-slate-400 hover:text-slate-900'
++                }`}
++              >
++                <LayoutGrid className="w-3.5 h-3.5" />
++                全部卡片 ({filteredItems.length})
++              </button>
++              <button
++                onClick={() => setViewMode('course')}
++                className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-all ${
++                  viewMode === 'course'
++                    ? 'bg-white dark:bg-slate-900 text-slate-900 dark:text-white shadow-xs'
++                    : 'text-slate-600 dark:text-slate-400 hover:text-slate-900'
++                }`}
++              >
++                <FolderOpen className="w-3.5 h-3.5" />
++                按课程归类 ({courseGroups.length})
++              </button>
++            </div>
++          </div>
++        </div>
++
++        {/* 内容展示区 */}
++        {loading ? (
++          <div className="py-24 text-center">
++            <Loader2 className="w-8 h-8 animate-spin mx-auto text-indigo-500 mb-3" />
++            <div className="text-sm font-medium text-slate-600 dark:text-slate-300">
++              正在加载互动展厅...
++            </div>
++          </div>
++        ) : filteredItems.length === 0 ? (
++          <div className="bg-white dark:bg-slate-900 rounded-2xl p-12 text-center border border-slate-200 dark:border-slate-800">
++            <Gamepad2 className="w-12 h-12 mx-auto text-slate-300 dark:text-slate-700 mb-3" />
++            <h3 className="text-base font-semibold text-slate-800 dark:text-slate-200 mb-1">
++              未找到匹配的互动内容
++            </h3>
++            <p className="text-xs text-slate-500 max-w-sm mx-auto mb-4">
++              尝试清除筛选条件，或点击下方按钮执行全量重新扫描与归集。
++            </p>
++            <div className="flex items-center justify-center gap-3">
++              <Button
++                variant="outline"
++                size="sm"
++                onClick={() => {
++                  setSelectedType('all');
++                  setSearchQuery('');
++                }}
++              >
++                重置筛选条件
++              </Button>
++              <Button
++                size="sm"
++                onClick={() => triggerForceRescan(false)}
++                disabled={syncing}
++                className="gap-1.5 bg-indigo-600 hover:bg-indigo-700 text-white"
++              >
++                <RefreshCw className={`w-3.5 h-3.5 ${syncing ? 'animate-spin' : ''}`} />
++                {syncing ? '正在扫描全量课程...' : '全量重新扫描与归集'}
++              </Button>
++            </div>
++          </div>
++        ) : viewMode === 'flat' ? (
++          /* 全部卡片网格流 */
++          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
++            {filteredItems.map((item) => {
++              const meta = getTypeMeta(item.widgetType);
++              const Icon = meta.icon;
++              return (
++                <div
++                  key={`${item.stageId}-${item.sceneId}`}
++                  className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200/80 dark:border-slate-800 p-4 flex flex-col justify-between hover:shadow-md hover:border-indigo-500/30 transition-all group"
++                >
++                  <div>
++                    <div className="flex items-center justify-between gap-2 mb-2.5">
++                      <span
++                        className={`text-[10px] font-semibold px-2 py-0.5 rounded-full border flex items-center gap-1 ${meta.color}`}
++                      >
++                        <Icon className="w-3 h-3" />
++                        {meta.label}
++                      </span>
++                      <span className="text-[10px] text-slate-400">
++                        {formatFileSize(item.size)} · 离线HTML
++                      </span>
++                    </div>
++
++                    <h3 className="text-sm font-bold text-slate-900 dark:text-white mb-1.5 group-hover:text-indigo-600 dark:group-hover:text-indigo-400 transition-colors line-clamp-1">
++                      {item.title}
++                    </h3>
++
++                    <div className="text-[11px] text-slate-500 dark:text-slate-400 bg-slate-50 dark:bg-slate-950/60 p-2 rounded-xl mb-3 line-clamp-2">
++                      {item.description || item.concept || '独立自包含交互式单页面应用，支持脱机运行'}
++                    </div>
++
++                    <div className="flex items-center gap-1.5 text-[11px] text-slate-500 dark:text-slate-400 mb-4">
++                      <BookOpen className="w-3.5 h-3.5 text-slate-400 shrink-0" />
++                      <span className="truncate" title={item.courseName}>
++                        {item.courseName}
++                      </span>
++                      <span className="text-slate-300 dark:text-slate-700">·</span>
++                      <span className="shrink-0 text-slate-400">P{item.order}</span>
++                    </div>
++                  </div>
++
++                  <div className="pt-3 border-t border-slate-100 dark:border-slate-800/80 flex items-center justify-between gap-2">
++                    <Button
++                      size="sm"
++                      onClick={() => setActiveItem(item)}
++                      className="gap-1.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs h-8 px-3 font-medium flex-1 cursor-pointer"
++                    >
++                      <Play className="w-3.5 h-3.5 fill-current" />
++                      在线体验
++                    </Button>
++
++                    <Button
++                      variant="outline"
++                      size="icon"
++                      onClick={() =>
++                        window.open(
++                          `/api/interactive-library/${item.stageId}/${encodeURIComponent(item.fileName)}`,
++                          '_blank',
++                        )
++                      }
++                      title="在新标签页独立打开"
++                      className="w-8 h-8 rounded-xl border-slate-200 dark:border-slate-800 cursor-pointer"
++                    >
++                      <ExternalLink className="w-3.5 h-3.5 text-slate-500" />
++                    </Button>
++
++                    <Button
++                      variant="outline"
++                      size="icon"
++                      onClick={() =>
++                        window.open(
++                          `/api/interactive-library/${item.stageId}/${encodeURIComponent(item.fileName)}?download=1`,
++                          '_blank',
++                        )
++                      }
++                      title="下载单文件自包含 HTML"
++                      className="w-8 h-8 rounded-xl border-slate-200 dark:border-slate-800 cursor-pointer"
++                    >
++                      <Download className="w-3.5 h-3.5 text-slate-500" />
++                    </Button>
++                  </div>
++                </div>
++              );
++            })}
++          </div>
++        ) : (
++          /* 按课程归类折叠视图 */
++          <div className="space-y-6">
++            {courseGroups.map((group) => (
++              <div
++                key={group.stageId}
++                className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200/80 dark:border-slate-800 p-5 shadow-xs"
++              >
++                <div className="flex items-center justify-between gap-4 mb-4 pb-3 border-b border-slate-100 dark:border-slate-800">
++                  <div className="flex items-center gap-3">
++                    <div className="w-9 h-9 rounded-xl bg-indigo-50 dark:bg-indigo-950/60 text-indigo-600 dark:text-indigo-400 flex items-center justify-center shrink-0">
++                      <BookOpen className="w-4 h-4" />
++                    </div>
++                    <div>
++                      <h2 className="text-sm font-bold text-slate-900 dark:text-white">
++                        {group.courseName}
++                      </h2>
++                      <div className="text-[11px] text-slate-400">
++                        课程 ID: {group.stageId} · 包含 {group.items.length} 个独立互动页面
++                      </div>
++                    </div>
++                  </div>
++
++                  <Button
++                    variant="ghost"
++                    size="sm"
++                    onClick={() => router.push(`/classroom/${group.stageId}`)}
++                    className="text-xs text-indigo-600 dark:text-indigo-400 gap-1"
++                  >
++                    <span>进入授课</span>
++                    <ChevronRight className="w-3.5 h-3.5" />
++                  </Button>
++                </div>
++
++                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3.5">
++                  {group.items.map((item) => {
++                    const meta = getTypeMeta(item.widgetType);
++                    const Icon = meta.icon;
++                    return (
++                      <div
++                        key={item.sceneId}
++                        className="bg-slate-50 dark:bg-slate-950 rounded-xl p-3.5 border border-slate-200/60 dark:border-slate-800/80 flex flex-col justify-between hover:bg-slate-100/80 dark:hover:bg-slate-900 transition-colors"
++                      >
++                        <div>
++                          <div className="flex items-center justify-between gap-2 mb-2">
++                            <span
++                              className={`text-[9px] font-semibold px-1.5 py-0.5 rounded border flex items-center gap-1 ${meta.color}`}
++                            >
++                              <Icon className="w-2.5 h-2.5" />
++                              {meta.label}
++                            </span>
++                            <span className="text-[10px] text-slate-400">第 {item.order} 页</span>
++                          </div>
++                          <h4 className="text-xs font-bold text-slate-800 dark:text-slate-200 mb-1 line-clamp-1">
++                            {item.title}
++                          </h4>
++                          <p className="text-[10px] text-slate-500 line-clamp-2 mb-3">
++                            {item.description || item.concept || '单文件自包含 HTML 应用'}
++                          </p>
++                        </div>
++
++                        <div className="flex items-center gap-1.5 pt-2 border-t border-slate-200/50 dark:border-slate-800">
++                          <Button
++                            size="sm"
++                            onClick={() => setActiveItem(item)}
++                            className="h-7 text-[11px] px-2.5 bg-indigo-600 hover:bg-indigo-700 text-white flex-1 rounded-lg gap-1 cursor-pointer"
++                          >
++                            <Play className="w-3 h-3 fill-current" />
++                            体验
++                          </Button>
++                          <Button
++                            variant="outline"
++                            size="icon"
++                            onClick={() =>
++                              window.open(
++                                `/api/interactive-library/${item.stageId}/${encodeURIComponent(item.fileName)}`,
++                                '_blank',
++                              )
++                            }
++                            className="h-7 w-7 rounded-lg"
++                            title="新窗口打开"
++                          >
++                            <ExternalLink className="w-3 h-3" />
++                          </Button>
++                          <Button
++                            variant="outline"
++                            size="icon"
++                            onClick={() =>
++                              window.open(
++                                `/api/interactive-library/${item.stageId}/${encodeURIComponent(item.fileName)}?download=1`,
++                                '_blank',
++                              )
++                            }
++                            className="h-7 w-7 rounded-lg"
++                            title="下载 HTML"
++                          >
++                            <Download className="w-3 h-3" />
++                          </Button>
++                        </div>
++                      </div>
++                    );
++                  })}
++                </div>
++              </div>
++            ))}
++          </div>
++        )}
++      </main>
++
++      {/* 在线体验弹窗播放器 (Modal Player) */}
++      <Dialog open={Boolean(activeItem)} onOpenChange={(open) => !open && setActiveItem(null)}>
++        <DialogContent
++          className={`p-0 gap-0 overflow-hidden bg-slate-950 border-slate-800 transition-all ${
++            isFullscreen
++              ? 'fixed inset-0 w-screen h-screen max-w-none rounded-none'
++              : 'max-w-5xl h-[85vh] rounded-2xl'
++          }`}
++          showCloseButton={false}
++        >
++          {activeItem && (
++            <div className="flex flex-col h-full w-full">
++              {/* 弹窗顶部栏 */}
++              <div className="h-12 bg-slate-900 border-b border-slate-800 px-4 flex items-center justify-between gap-3 text-white shrink-0">
++                <div className="flex items-center gap-2.5 min-w-0">
++                  <span className="text-[10px] bg-indigo-500/20 text-indigo-400 border border-indigo-500/30 px-2 py-0.5 rounded font-medium shrink-0">
++                    {getTypeMeta(activeItem.widgetType).label}
++                  </span>
++                  <span className="text-xs font-bold truncate text-slate-100">
++                    {activeItem.title}
++                  </span>
++                  <span className="text-slate-600 hidden sm:inline">|</span>
++                  <span className="text-[11px] text-slate-400 truncate hidden sm:inline">
++                    {activeItem.courseName} (第 {activeItem.order} 页)
++                  </span>
++                </div>
++
++                <div className="flex items-center gap-1.5 shrink-0">
++                  <Button
++                    variant="ghost"
++                    size="sm"
++                    onClick={() =>
++                      window.open(
++                        `/api/interactive-library/${activeItem.stageId}/${encodeURIComponent(activeItem.fileName)}`,
++                        '_blank',
++                      )
++                    }
++                    className="h-8 px-2 text-xs text-slate-400 hover:text-white hover:bg-slate-800"
++                    title="新窗口打开"
++                  >
++                    <ExternalLink className="w-3.5 h-3.5 mr-1" />
++                    <span>新窗口</span>
++                  </Button>
++
++                  <Button
++                    variant="ghost"
++                    size="sm"
++                    onClick={() =>
++                      window.open(
++                        `/api/interactive-library/${activeItem.stageId}/${encodeURIComponent(activeItem.fileName)}?download=1`,
++                        '_blank',
++                      )
++                    }
++                    className="h-8 px-2 text-xs text-slate-400 hover:text-white hover:bg-slate-800"
++                    title="下载单文件 HTML"
++                  >
++                    <Download className="w-3.5 h-3.5 mr-1" />
++                    <span>下载</span>
++                  </Button>
++
++                  <Button
++                    variant="ghost"
++                    size="icon"
++                    onClick={() => setIsFullscreen(!isFullscreen)}
++                    className="h-8 w-8 text-slate-400 hover:text-white hover:bg-slate-800"
++                    title={isFullscreen ? '退出全屏' : '全屏'}
++                  >
++                    {isFullscreen ? (
++                      <Minimize2 className="w-3.5 h-3.5" />
++                    ) : (
++                      <Maximize2 className="w-3.5 h-3.5" />
++                    )}
++                  </Button>
++
++                  <Button
++                    variant="ghost"
++                    size="icon"
++                    onClick={() => {
++                      setActiveItem(null);
++                      setIsFullscreen(false);
++                    }}
++                    className="h-8 w-8 text-slate-400 hover:text-white hover:bg-red-950/60 hover:text-red-400"
++                    title="关闭"
++                  >
++                    <X className="w-4 h-4" />
++                  </Button>
++                </div>
++              </div>
++
++              {/* iframe 沙箱播放容器 */}
++              <div className="flex-1 w-full h-full bg-white relative">
++                <iframe
++                  src={`/api/interactive-library/${activeItem.stageId}/${encodeURIComponent(activeItem.fileName)}`}
++                  className="w-full h-full border-0 absolute inset-0"
++                  title={activeItem.title}
++                  sandbox="allow-scripts allow-forms allow-same-origin allow-popups"
++                />
++              </div>
++            </div>
++          )}
++        </DialogContent>
++      </Dialog>
++    </div>
++  );
++}
+diff --git a/app/my-courses/page.tsx b/app/my-courses/page.tsx
+index 1032a9d2..8d1495df 100644
+--- a/app/my-courses/page.tsx
++++ b/app/my-courses/page.tsx
+@@ -26,6 +26,7 @@ import {
+   CloudUpload,
+   HardDrive,
+   Database,
++  Gamepad2,
+ } from 'lucide-react';
+ import { useAuthStore } from '@/lib/store/auth-store';
+ import { UserNav } from '@/components/auth/user-nav';
+@@ -331,14 +332,20 @@ export default function MyCoursesPage() {
+         console.warn('Failed to delete from local storage:', e);
+       }
+ 
+-      // 2. 服务端 PostgreSQL 彻底删除
++      // 2. 服务端彻底删除 (PostgreSQL + 磁盘文件 + 互动展厅)
+       try {
+-        await fetch(`/api/stages/${encodeURIComponent(deletingCourse.id)}`, {
++        const res = await fetch(`/api/stages/${encodeURIComponent(deletingCourse.id)}`, {
+           method: 'DELETE',
+           credentials: 'include',
+         });
+-      } catch (e) {
++        if (!res.ok) {
++          const errData = await res.json().catch(() => null);
++          throw new Error(errData?.error || `HTTP ${res.status}`);
++        }
++      } catch (e: any) {
+         console.warn('Failed to delete from server:', e);
++        toast.error(`服务端删除失败: ${e.message || '网络异常'}`);
++        return;
+       }
+ 
+       setCourses((prev) => prev.filter((c) => c.id !== deletingCourse.id));
+@@ -427,6 +434,16 @@ export default function MyCoursesPage() {
+               批量快速制课
+             </Button>
+ 
++            <Button
++              variant="outline"
++              size="sm"
++              onClick={() => router.push('/interactive-hub')}
++              className="gap-1.5 text-purple-600 dark:text-purple-400 border-purple-500/30 hover:bg-purple-50 dark:hover:bg-purple-950/40 text-xs cursor-pointer"
++            >
++              <Gamepad2 className="w-3.5 h-3.5" />
++              互动展厅
++            </Button>
++
+             <Button
+               variant="default"
+               size="sm"
+diff --git a/app/page.tsx b/app/page.tsx
+index 910cbd69..dc9a8e7d 100644
+--- a/app/page.tsx
++++ b/app/page.tsx
+@@ -28,6 +28,7 @@ import {
+   Presentation,
+   Loader2,
+   BookOpen,
++  Gamepad2,
+ } from 'lucide-react';
+ import { useI18n } from '@/lib/hooks/use-i18n';
+ import { LanguageSwitcher } from '@/components/language-switcher';
+@@ -836,6 +837,16 @@ function HomePage() {
+           <span>批量制课</span>
+         </button>
+ 
++        {/* Interactive Hub Button */}
++        <button
++          onClick={() => router.push('/interactive-hub')}
++          className="flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium text-purple-600 dark:text-purple-400 bg-purple-500/10 hover:bg-purple-500/20 border border-purple-500/30 transition-all shadow-xs cursor-pointer"
++          title="互动实验与游戏展厅"
++        >
++          <Gamepad2 className="w-3.5 h-3.5 text-purple-500" />
++          <span>互动展厅</span>
++        </button>
++
+         {/* My Courses Button */}
+         <button
+           onClick={() => router.push('/my-courses')}
+diff --git a/components/auth/user-nav.tsx b/components/auth/user-nav.tsx
+index 5f9dcd7b..420c403b 100644
+--- a/components/auth/user-nav.tsx
++++ b/components/auth/user-nav.tsx
+@@ -12,7 +12,7 @@ import {
+   DropdownMenuSeparator,
+   DropdownMenuTrigger,
+ } from '@/components/ui/dropdown-menu';
+-import { LogIn, User as UserIcon, Shield, LogOut, Settings as SettingsIcon, BookOpen } from 'lucide-react';
++import { LogIn, User as UserIcon, Shield, LogOut, Settings as SettingsIcon, BookOpen, Gamepad2 } from 'lucide-react';
+ import { AuthDialog } from './auth-dialog';
+ import { UserProfileDialog } from './user-profile-dialog';
+ import { UserManagementDialog } from '../admin/user-management-dialog';
+@@ -92,6 +92,14 @@ export function UserNav({ onOpenSettings }: { onOpenSettings?: () => void }) {
+               我的课程中心
+             </DropdownMenuItem>
+ 
++            <DropdownMenuItem
++              onClick={() => router.push('/interactive-hub')}
++              className="rounded-xl py-2 cursor-pointer font-medium text-purple-600 dark:text-purple-400 focus:text-purple-600"
++            >
++              <Gamepad2 className="w-3.5 h-3.5 mr-2" />
++              互动实验与游戏展厅
++            </DropdownMenuItem>
++
+             <DropdownMenuItem onClick={() => setProfileModalOpen(true)} className="rounded-xl py-2 cursor-pointer">
+               <UserIcon className="w-3.5 h-3.5 mr-2 text-zinc-500" />
+               个人资料与密码
+diff --git a/lib/server/batch-generation/runner.ts b/lib/server/batch-generation/runner.ts
+index 29caef9d..606be77b 100644
+--- a/lib/server/batch-generation/runner.ts
++++ b/lib/server/batch-generation/runner.ts
+@@ -6,6 +6,7 @@ import { extractFileContent } from './extractor';
+ import { getBatchJob, updateBatchJob } from './store';
+ import type { BatchJob, SubTaskStep } from './types';
+ import { buildCourseScaleInstruction } from '@/lib/types/course-scale';
++import { syncInteractiveLibraryForStage } from '@/lib/server/interactive-library';
+ 
+ const log = createLogger('BatchJobRunner');
+ const runningBatchJobs = new Map<string, Promise<void>>();
+@@ -270,6 +271,11 @@ async function executeSingleMergedJob(
+     log.warn(`Failed to sync merged course ${result.id} to owner store:`, dbError);
+   }
+ 
++  // 5.5 自动打包并导出互动内容至互动展厅
++  void syncInteractiveLibraryForStage(result.stage, result.scenes).catch((err) => {
++    log.warn(`Failed to sync interactive library for merged course ${result.id}:`, err);
++  });
++
+   // 6. 标记批次完成
+   await updateBatchJob(jobId, (j) => {
+     j.status = 'completed';
+@@ -418,6 +424,11 @@ async function executeBatchIndependentJob(
+         log.warn(`Failed to sync course ${result.id} to owner store:`, dbError);
+       }
+ 
++      // 4.5 自动打包并导出互动内容至互动展厅
++      void syncInteractiveLibraryForStage(result.stage, result.scenes).catch((err) => {
++        log.warn(`Failed to sync interactive library for course ${result.id}:`, err);
++      });
++
+       // 5. 标记子任务成功
+       completedCount++;
+       await updateBatchJob(jobId, (j) => {
+diff --git a/lib/server/interactive-library/index.ts b/lib/server/interactive-library/index.ts
+new file mode 100644
+index 00000000..6e3154eb
+--- /dev/null
++++ b/lib/server/interactive-library/index.ts
+@@ -0,0 +1,447 @@
++import fs from 'fs/promises';
++import path from 'path';
++import { createLogger } from '@/lib/logger';
++import { inlineHtmlAssets } from '@/lib/export/inline-assets';
++import type { Scene } from '@/lib/types/stage';
++
++const log = createLogger('InteractiveLibrary');
++
++const INTERACTIVE_LIBRARY_DIR = path.join(process.cwd(), 'data', 'interactive-library');
++const CLASSROOMS_DIR = path.join(process.cwd(), 'data', 'classrooms');
++
++export interface InteractiveItemMeta {
++  sceneId: string;
++  order: number;
++  title: string;
++  widgetType: 'simulation' | 'game' | 'diagram' | 'code' | string;
++  fileName: string;
++  concept?: string;
++  description?: string;
++  size: number;
++  createdAt: number;
++}
++
++export interface InteractiveStageMeta {
++  stageId: string;
++  courseName: string;
++  folderName: string;
++  updatedAt: number;
++  items: InteractiveItemMeta[];
++}
++
++export interface InteractiveLibraryOverview {
++  courses: InteractiveStageMeta[];
++  totalItems: number;
++  typeCounts: {
++    game: number;
++    simulation: number;
++    diagram: number;
++    code: number;
++    other: number;
++  };
++}
++
++/** Sanitize file and directory name for safe filesystem storage */
++export function sanitizeFsName(name: string): string {
++  return (name || '未命名')
++    .replace(/[\\/:*?"<>|\r\n\t]/g, '_')
++    .replace(/\s+/g, ' ')
++    .trim()
++    .slice(0, 80);
++}
++
++/** Ensure base directory exists */
++async function ensureBaseDir(): Promise<void> {
++  await fs.mkdir(INTERACTIVE_LIBRARY_DIR, { recursive: true });
++}
++
++/**
++ * Find existing directory on disk for a given stageId (matches *_${stageId} or ${stageId})
++ */
++async function findStageDir(stageId: string): Promise<string | null> {
++  await ensureBaseDir();
++  try {
++    const entries = await fs.readdir(INTERACTIVE_LIBRARY_DIR, { withFileTypes: true });
++    for (const entry of entries) {
++      if (entry.isDirectory()) {
++        if (entry.name.endsWith(`_${stageId}`) || entry.name === stageId) {
++          return path.join(INTERACTIVE_LIBRARY_DIR, entry.name);
++        }
++      }
++    }
++  } catch (err) {
++    log.error('Failed to find stage dir:', err);
++  }
++  return null;
++}
++
++/**
++ * Sync and export all interactive scenes for a given stage into standalone HTML files.
++ */
++export async function syncInteractiveLibraryForStage(
++  stage: { id: string; name?: string; title?: string },
++  scenes: Scene[],
++  options?: { force?: boolean },
++): Promise<InteractiveStageMeta | null> {
++  const stageId = stage.id;
++  const courseName = stage.name || stage.title || stageId;
++  const safeCourseName = sanitizeFsName(courseName);
++
++  // Filter interactive scenes that have HTML content
++  const interactiveScenes: Scene[] = [];
++  scenes.forEach((s) => {
++    const rawContent = s.content as { type?: string; widgetType?: string; html?: string } | undefined;
++    const isInteractive =
++      s.type === 'interactive' ||
++      rawContent?.type === 'interactive' ||
++      Boolean(rawContent?.widgetType) ||
++      Boolean(rawContent?.html);
++
++    const html = rawContent?.html;
++    if (isInteractive && html && typeof html === 'string' && html.trim().length > 0) {
++      interactiveScenes.push(s);
++    }
++  });
++
++  const existingDir = await findStageDir(stageId);
++
++  // If there are no interactive scenes in this stage, clean up any existing folder
++  if (interactiveScenes.length === 0) {
++    if (existingDir) {
++      try {
++        await fs.rm(existingDir, { recursive: true, force: true });
++        log.info(`Removed empty interactive directory for stage ${stageId}`);
++      } catch (err) {
++        log.warn(`Failed to remove empty directory ${existingDir}:`, err);
++      }
++    }
++    return null;
++  }
++
++  await ensureBaseDir();
++
++  const targetFolderName = `${safeCourseName}_${stageId}`;
++  const targetDir = path.join(INTERACTIVE_LIBRARY_DIR, targetFolderName);
++
++  // If directory exists under an old name, rename it
++  if (existingDir && existingDir !== targetDir) {
++    try {
++      await fs.rename(existingDir, targetDir);
++      log.info(`Renamed stage directory from ${existingDir} to ${targetDir}`);
++    } catch {
++      await fs.mkdir(targetDir, { recursive: true });
++    }
++  } else {
++    await fs.mkdir(targetDir, { recursive: true });
++  }
++
++  const items: InteractiveItemMeta[] = [];
++  const now = Date.now();
++
++  for (let idx = 0; idx < interactiveScenes.length; idx++) {
++    const scene = interactiveScenes[idx];
++    const order = typeof scene.order === 'number' ? scene.order : idx + 1;
++    const sceneTitle = scene.title || `第${order}页互动`;
++    const safeTitle = sanitizeFsName(sceneTitle);
++    const fileName = `${String(order).padStart(2, '0')}_${safeTitle}.html`;
++    const filePath = path.join(targetDir, fileName);
++
++    const rawContent = scene.content as Record<string, unknown>;
++    const rawHtml = String(rawContent.html || '');
++    const widgetType =
++      String(rawContent.widgetType || '') ||
++      String((rawContent.widgetConfig as { type?: string })?.type || '') ||
++      'simulation';
++
++    const widgetConfig = (rawContent.widgetConfig as Record<string, unknown>) || {};
++    const concept = String(widgetConfig.concept || '');
++    const description = String(widgetConfig.description || '');
++
++    // Check if valid inlined file already exists to avoid redundant heavy packaging
++    let fileSize = 0;
++    let fileWritten = false;
++    if (!options?.force) {
++      try {
++        const stat = await fs.stat(filePath);
++        if (stat.size > 200) {
++          fileSize = stat.size;
++          fileWritten = true;
++        }
++      } catch {
++        fileWritten = false;
++      }
++    }
++
++    if (!fileWritten) {
++      // Perform deep asset inlining
++      let inlinedHtml = rawHtml;
++      try {
++        const { html } = await inlineHtmlAssets(rawHtml);
++        inlinedHtml = html;
++      } catch (err) {
++        log.warn(`Inlining assets for ${sceneTitle} failed; writing raw HTML`, err);
++        inlinedHtml = rawHtml;
++      }
++
++      await fs.writeFile(filePath, inlinedHtml, 'utf-8');
++      fileSize = Buffer.byteLength(inlinedHtml, 'utf-8');
++    }
++
++    items.push({
++      sceneId: scene.id,
++      order,
++      title: sceneTitle,
++      widgetType,
++      fileName,
++      concept: concept || undefined,
++      description: description || undefined,
++      size: fileSize,
++      createdAt: now,
++    });
++  }
++
++  const meta: InteractiveStageMeta = {
++    stageId,
++    courseName,
++    folderName: targetFolderName,
++    updatedAt: now,
++    items,
++  };
++
++  await fs.writeFile(
++    path.join(targetDir, 'meta.json'),
++    JSON.stringify(meta, null, 2),
++    'utf-8',
++  );
++
++  log.info(`Successfully synced ${items.length} interactive games to ${targetFolderName}`);
++  return meta;
++}
++
++/**
++ * Rename course folder and update meta.json when a course is renamed.
++ */
++export async function renameInteractiveLibraryStage(
++  stageId: string,
++  newCourseName: string,
++): Promise<boolean> {
++  const existingDir = await findStageDir(stageId);
++  if (!existingDir) return false;
++
++  const safeName = sanitizeFsName(newCourseName);
++  const targetDir = path.join(INTERACTIVE_LIBRARY_DIR, `${safeName}_${stageId}`);
++
++  try {
++    if (existingDir !== targetDir) {
++      await fs.rename(existingDir, targetDir);
++    }
++
++    const metaPath = path.join(targetDir, 'meta.json');
++    try {
++      const metaRaw = await fs.readFile(metaPath, 'utf-8');
++      const meta = JSON.parse(metaRaw) as InteractiveStageMeta;
++      meta.courseName = newCourseName;
++      meta.folderName = `${safeName}_${stageId}`;
++      meta.updatedAt = Date.now();
++      await fs.writeFile(metaPath, JSON.stringify(meta, null, 2), 'utf-8');
++    } catch {
++      // meta.json missing, will be recreated on next sync
++    }
++    log.info(`Renamed interactive library stage ${stageId} to ${newCourseName}`);
++    return true;
++  } catch (err) {
++    log.error(`Failed to rename interactive stage ${stageId}:`, err);
++    return false;
++  }
++}
++
++/**
++ * Delete course folder when a course is deleted.
++ */
++export async function deleteInteractiveLibraryStage(stageId: string): Promise<boolean> {
++  const existingDir = await findStageDir(stageId);
++  if (!existingDir) return false;
++
++  try {
++    await fs.rm(existingDir, { recursive: true, force: true });
++    log.info(`Deleted interactive library folder for stage ${stageId}: ${existingDir}`);
++    return true;
++  } catch (err) {
++    log.error(`Failed to delete interactive stage ${stageId}:`, err);
++    return false;
++  }
++}
++
++/**
++ * Read all interactive items from disk.
++ */
++export async function listInteractiveLibrary(): Promise<InteractiveLibraryOverview> {
++  await ensureBaseDir();
++
++  const courses: InteractiveStageMeta[] = [];
++  const typeCounts = {
++    game: 0,
++    simulation: 0,
++    diagram: 0,
++    code: 0,
++    other: 0,
++  };
++
++  try {
++    const entries = await fs.readdir(INTERACTIVE_LIBRARY_DIR, { withFileTypes: true });
++
++    for (const entry of entries) {
++      if (!entry.isDirectory()) continue;
++      const metaPath = path.join(INTERACTIVE_LIBRARY_DIR, entry.name, 'meta.json');
++      try {
++        const metaRaw = await fs.readFile(metaPath, 'utf-8');
++        const meta = JSON.parse(metaRaw) as InteractiveStageMeta;
++        courses.push(meta);
++
++        for (const item of meta.items) {
++          const t = item.widgetType.toLowerCase();
++          if (t === 'game') typeCounts.game++;
++          else if (t === 'simulation') typeCounts.simulation++;
++          else if (t === 'diagram') typeCounts.diagram++;
++          else if (t === 'code') typeCounts.code++;
++          else typeCounts.other++;
++        }
++      } catch {
++        // meta.json may not exist yet or was corrupted
++      }
++    }
++  } catch (err) {
++    log.error('Failed to list interactive library:', err);
++  }
++
++  // Sort courses by updatedAt descending
++  courses.sort((a, b) => b.updatedAt - a.updatedAt);
++
++  const totalItems =
++    typeCounts.game + typeCounts.simulation + typeCounts.diagram + typeCounts.code + typeCounts.other;
++
++  return {
++    courses,
++    totalItems,
++    typeCounts,
++  };
++}
++
++/**
++ * Safely get an HTML file's content for rendering or downloading.
++ */
++export async function getInteractiveHtmlFile(
++  stageId: string,
++  fileName: string,
++): Promise<{ html: string; title: string } | null> {
++  const stageDir = await findStageDir(stageId);
++  if (!stageDir) return null;
++
++  // Prevent path traversal
++  const safeFileName = path.basename(fileName);
++  const filePath = path.join(stageDir, safeFileName);
++
++  try {
++    const html = await fs.readFile(filePath, 'utf-8');
++    return { html, title: safeFileName.replace(/\.html$/i, '') };
++  } catch {
++    return null;
++  }
++}
++
++/**
++ * Backfill & Rescan: Scan all existing courses in data/classrooms/*.json and PostgreSQL database.
++ */
++export async function backfillInteractiveLibrary(options?: { force?: boolean }): Promise<number> {
++  let processed = 0;
++  const processedStageIds = new Set<string>();
++
++  // 1. Scan filesystem data/classrooms/*.json
++  try {
++    const files = await fs.readdir(CLASSROOMS_DIR);
++    for (const file of files) {
++      if (!file.endsWith('.json')) continue;
++      const fpath = path.join(CLASSROOMS_DIR, file);
++      try {
++        const raw = await fs.readFile(fpath, 'utf-8');
++        const data = JSON.parse(raw);
++        const stage = data.stage || { id: data.id || file.slice(0, -5), name: data.name };
++        const scenes = data.scenes || [];
++        if (Array.isArray(scenes) && scenes.length > 0) {
++          const res = await syncInteractiveLibraryForStage(stage, scenes, options);
++          if (res && res.items.length > 0) {
++            processed += res.items.length;
++            processedStageIds.add(stage.id);
++          }
++        }
++      } catch (err) {
++        log.warn(`Failed to backfill from ${file}:`, err);
++      }
++    }
++  } catch (err) {
++    log.error('Failed to read classrooms dir during backfill:', err);
++  }
++
++  // 2. Scan PostgreSQL database if configured
++  if (process.env.DATABASE_URL) {
++    try {
++      const { Pool } = await import('pg');
++      const pool = new Pool({ connectionString: process.env.DATABASE_URL });
++      const stagesRes = await pool.query('SELECT id, name FROM document_stages');
++      for (const row of stagesRes.rows) {
++        if (processedStageIds.has(row.id)) continue;
++        try {
++          const scenesRes = await pool.query(
++            'SELECT scene_order, data FROM document_scenes WHERE stage_id = $1 ORDER BY scene_order ASC',
++            [row.id],
++          );
++          if (scenesRes.rows.length > 0) {
++            const scenes = scenesRes.rows.map((r: { data: any }) => r.data).filter(Boolean);
++            const stage = { id: row.id, name: row.name };
++            const res = await syncInteractiveLibraryForStage(stage, scenes, options);
++            if (res && res.items.length > 0) {
++              processed += res.items.length;
++              processedStageIds.add(row.id);
++            }
++          }
++        } catch (err) {
++          log.warn(`Failed to backfill database stage ${row.id}:`, err);
++        }
++      }
++      await pool.end();
++    } catch (dbErr) {
++      log.warn('Failed to query database for interactive backfill:', dbErr);
++    }
++  }
++
++  // 3. Clean up orphaned interactive folders for courses that no longer exist
++  try {
++    const existingDirs = await fs.readdir(INTERACTIVE_LIBRARY_DIR, { withFileTypes: true });
++    for (const d of existingDirs) {
++      if (!d.isDirectory()) continue;
++      let stageId: string | null = null;
++      try {
++        const metaRaw = await fs.readFile(path.join(INTERACTIVE_LIBRARY_DIR, d.name, 'meta.json'), 'utf-8');
++        const meta = JSON.parse(metaRaw);
++        if (meta?.stageId) {
++          stageId = meta.stageId;
++        }
++      } catch {
++        // Fallback
++      }
++
++      const isLive = stageId
++        ? processedStageIds.has(stageId)
++        : Array.from(processedStageIds).some((id) => d.name.endsWith(`_${id}`) || d.name === id);
++
++      if (!isLive) {
++        log.info(`Purging orphaned interactive folder for deleted stage: ${d.name}`);
++        await fs.rm(path.join(INTERACTIVE_LIBRARY_DIR, d.name), { recursive: true, force: true });
++      }
++    }
++  } catch (err) {
++    log.warn('Failed to clean up orphaned interactive folders:', err);
++  }
++
++  return processed;
++}

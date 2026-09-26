@@ -23,8 +23,8 @@
 ### 3. 🛠️ 全生命周期课程管理
 - **进入播放（Play）**：一键跳转全屏互动授课教室 `/classroom/[id]`。
 - **深度二次编辑（Deep Edit）**：直达专业工作台 `/workspace?stageId=[id]`，在画布和智能体对话中任意修改幻灯片与互动组件。
-- **行内无感重命名（Inline Rename）**：卡片悬浮点击编辑图标，即可直接修改课程名称，系统自动双向同步更新本地 IndexedDB 与云端数据库。
-- **双轨彻底删除（Safe Purge）**：带有安全弹窗二次确认，确认后同步清除本地 IndexedDB 与云端数据库记录，杜绝残留。
+- **行内无感重命名（Inline Rename）**：卡片悬浮点击编辑图标，即可直接修改课程名称，系统自动双向同步更新本地 IndexedDB、云端数据库以及互动展厅（Interactive Hub）目录元数据。
+- **四维彻底物理级联删除（4-Tier Cascaded Purge）**：带有安全弹窗二次确认。确认后后端严格级联执行：1) 清理 PostgreSQL 数据库关联行；2) 物理删除 `data/classrooms/<id>.json` 课堂文件；3) 清除 `data/classrooms/<id>/` 媒体目录；4) 联动清理 `data/interactive-library/*_<id>/` 展厅离线应用。前端严格校验 HTTP 响应状态码，确保无假死、无孤儿数据残留。
 
 ### 4. 🧭 全站无缝导航穿透
 - 官方首页顶部导航栏新增「我的课程」胶囊按钮。

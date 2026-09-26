@@ -29,6 +29,10 @@ import { withRequestOwnerId } from '@/lib/server/agent-runtime/with-owner';
 import { STAGE_NAME_MAX_LENGTH } from '@/lib/server/agent-runtime/stage-limits';
 import { getSessionPayload } from '@/lib/server/auth/session';
 import { getServerPersistenceProvider } from '@/lib/persistence/server-provider';
+import {
+  renameInteractiveLibraryStage,
+  deleteInteractiveLibraryStage,
+} from '@/lib/server/interactive-library';
 
 export const runtime = 'nodejs';
 
@@ -109,6 +113,7 @@ export async function PATCH(req: NextRequest, { params }: Params) {
         ...document,
         stage: { ...document.stage, name, updatedAt: Date.now() },
       });
+      void renameInteractiveLibraryStage(id, name).catch(() => {});
     } catch (error) {
       return mapSaveError(error, responseHeaders);
     }
@@ -178,30 +183,92 @@ export async function PUT(req: NextRequest, { params }: Params) {
   });
 }
 
-// DELETE /api/stages/[id] — remove the course and its scenes/outline.
+// DELETE /api/stages/[id] — remove the course completely from DB, disk files, and interactive library.
 export async function DELETE(req: NextRequest, { params }: Params) {
   if (!isAgentRuntimeConfigured()) return new Response('Not found', { status: 404 });
 
   const session = getSessionPayload(req);
   const isAdmin = session?.role === 'admin';
+  const { id } = await params;
 
   return withRequestOwnerId(req, async (ownerId, responseHeaders) => {
-    const { id } = await params;
-    const store = await getOwnerScopedDocumentStore(ownerId);
+    let deletedViaStore = false;
     try {
+      const store = await getOwnerScopedDocumentStore(ownerId);
       await store.deleteDocument(id);
-    } catch (err) {
-      if (isAdmin) {
-        try {
-          const provider = await getServerPersistenceProvider(process.env.DATABASE_URL ?? '');
-          await provider.documentStore.deleteDocument(id);
-        } catch (innerErr) {
-          throw innerErr;
-        }
-      } else {
-        throw err;
-      }
+      deletedViaStore = true;
+    } catch {
+      // Owner-scoped delete failed (e.g. foreign owner); handled via admin cascade below
     }
-    return ownerJson({ ok: true }, 200, responseHeaders);
+
+    // 1. Direct database cascade purge if admin or store didn't handle it
+    if (!deletedViaStore && (isAdmin || !process.env.DATABASE_URL)) {
+      if (process.env.DATABASE_URL) {
+        try {
+          const { Pool } = await import('pg');
+          const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+          await pool.query('DELETE FROM document_scenes WHERE stage_id = $1', [id]);
+          await pool.query('DELETE FROM stage_meta WHERE stage_id = $1', [id]);
+          await pool.query('DELETE FROM document_stages WHERE id = $1', [id]);
+          try {
+            await pool.query('DELETE FROM document_asset_refs WHERE stage_id = $1', [id]);
+          } catch {}
+          try {
+            await pool.query('DELETE FROM document_asset_withdrawals WHERE stage_id = $1', [id]);
+          } catch {}
+          await pool.end();
+        } catch (dbErr) {
+          console.warn(`[DELETE /api/stages/${id}] Direct DB deletion encountered error:`, dbErr);
+        }
+      }
+    } else if (!deletedViaStore && !isAdmin) {
+      return ownerApiError('INVALID_REQUEST', 403, 'Permission denied', responseHeaders);
+    }
+
+    // 2. Direct database cleanup even if store delete succeeded (ensure stage_meta and scenes are clean)
+    if (isAdmin && process.env.DATABASE_URL) {
+      try {
+        const { Pool } = await import('pg');
+        const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+        await pool.query('DELETE FROM document_scenes WHERE stage_id = $1', [id]);
+        await pool.query('DELETE FROM stage_meta WHERE stage_id = $1', [id]);
+        await pool.query('DELETE FROM document_stages WHERE id = $1', [id]);
+        await pool.end();
+      } catch {}
+    }
+
+    // 3. Purge physical files in data/classrooms/
+    try {
+      const { promises: fsPromises } = await import('fs');
+      const pathModule = await import('path');
+      const classroomsDir = pathModule.join(process.cwd(), 'data', 'classrooms');
+      const jsonPath = pathModule.join(classroomsDir, `${id}.json`);
+      const mediaDirPath = pathModule.join(classroomsDir, id);
+
+      await fsPromises.rm(jsonPath, { force: true }).catch(() => {});
+      await fsPromises.rm(mediaDirPath, { recursive: true, force: true }).catch(() => {});
+
+      // Clean up any classroom-jobs for this stage
+      const jobsDir = pathModule.join(process.cwd(), 'data', 'classroom-jobs');
+      try {
+        const jobFiles = await fsPromises.readdir(jobsDir);
+        for (const jf of jobFiles) {
+          if (jf.includes(id)) {
+            await fsPromises.rm(pathModule.join(jobsDir, jf), { force: true }).catch(() => {});
+          }
+        }
+      } catch {}
+    } catch (fsErr) {
+      console.warn(`[DELETE /api/stages/${id}] Filesystem purge error:`, fsErr);
+    }
+
+    // 4. Purge interactive games folder in data/interactive-library/
+    try {
+      await deleteInteractiveLibraryStage(id);
+    } catch (libErr) {
+      console.warn(`[DELETE /api/stages/${id}] Interactive library delete error:`, libErr);
+    }
+
+    return ownerJson({ ok: true, success: true }, 200, responseHeaders);
   });
 }
