@@ -5,7 +5,8 @@ export type BatchJobStatus =
   | 'processing'
   | 'completed'
   | 'failed'
-  | 'partially_failed';
+  | 'partially_failed'
+  | 'cancelled';
 
 export type SubTaskStep =
   | 'queued'
@@ -15,7 +16,8 @@ export type SubTaskStep =
   | 'generating_tts'
   | 'persisting'
   | 'completed'
-  | 'failed';
+  | 'failed'
+  | 'cancelled';
 
 export interface BatchSubTask {
   id: string;
@@ -44,9 +46,11 @@ export interface BatchJob {
   requirement: string;
   enableTTS: boolean;
   enableImageGeneration: boolean;
+  enableInteractiveMode?: boolean;
   totalTasks: number;
   completedTasks: number;
   failedTasks: number;
+  cancelledTasks?: number;
   progress: number; // 0 - 100
   createdAt: string;
   updatedAt: string;

@@ -41,6 +41,9 @@ export async function POST(req: NextRequest) {
     const requirement = (formData.get('prompt') as string) || '';
     const enableTTS = formData.get('enableTTS') !== 'false';
     const enableImageGeneration = formData.get('enableImageGeneration') !== 'false';
+    const enableInteractiveMode =
+      formData.get('enableInteractiveMode') === 'true' ||
+      formData.get('interactiveMode') === 'true';
 
     const jobId = `batch_${nanoid(10)}`;
     const now = new Date().toISOString();
@@ -85,9 +88,11 @@ export async function POST(req: NextRequest) {
       requirement,
       enableTTS,
       enableImageGeneration,
+      enableInteractiveMode,
       totalTasks: tasks.length,
       completedTasks: 0,
       failedTasks: 0,
+      cancelledTasks: 0,
       progress: 0,
       createdAt: now,
       updatedAt: now,
@@ -138,6 +143,7 @@ export async function GET(req: NextRequest) {
         totalTasks: job.totalTasks,
         completedTasks: job.completedTasks,
         failedTasks: job.failedTasks,
+        cancelledTasks: job.cancelledTasks || 0,
         progress: job.progress,
         createdAt: job.createdAt,
         updatedAt: job.updatedAt,

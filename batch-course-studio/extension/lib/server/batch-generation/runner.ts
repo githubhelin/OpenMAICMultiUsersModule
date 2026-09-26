@@ -8,6 +8,7 @@ import type { BatchJob, SubTaskStep } from './types';
 
 const log = createLogger('BatchJobRunner');
 const runningBatchJobs = new Map<string, Promise<void>>();
+const jobAbortControllers = new Map<string, AbortController>();
 
 async function safeUnlink(path?: string): Promise<void> {
   if (!path) return;
@@ -18,9 +19,84 @@ async function safeUnlink(path?: string): Promise<void> {
   }
 }
 
+/** 取消/中断整个批量任务 */
+export async function cancelBatchJob(jobId: string, ownerId?: string): Promise<boolean> {
+  const job = await getBatchJob(jobId, ownerId);
+  if (!job) return false;
+
+  // 1. 触发正在运行中的 AbortController
+  const controller = jobAbortControllers.get(jobId);
+  if (controller) {
+    controller.abort();
+    jobAbortControllers.delete(jobId);
+  }
+
+  // 2. 将任务与所有未完成的子任务标记为 cancelled
+  await updateBatchJob(jobId, (j) => {
+    j.status = 'cancelled';
+    j.completedAt = new Date().toISOString();
+    for (const task of j.tasks) {
+      if (task.status !== 'completed' && task.status !== 'failed') {
+        task.status = 'cancelled';
+        task.stepMessage = '任务已取消 (用户中断)';
+        if (task.tempFilePath) {
+          safeUnlink(task.tempFilePath);
+        }
+      }
+    }
+    j.cancelledTasks = j.tasks.filter((t) => t.status === 'cancelled').length;
+  });
+
+  log.info(`Batch job ${jobId} successfully cancelled by owner ${ownerId || 'system'}`);
+  return true;
+}
+
+/** 取消/移除队列中的某个未完成子任务 */
+export async function cancelBatchSubTask(
+  jobId: string,
+  taskId: string,
+  ownerId?: string,
+): Promise<boolean> {
+  const job = await getBatchJob(jobId, ownerId);
+  if (!job) return false;
+
+  const targetTask = job.tasks.find((t) => t.id === taskId);
+  if (!targetTask) return false;
+
+  if (targetTask.status === 'completed') {
+    return false;
+  }
+
+  // 如果该任务正在积极运行中，尝试终止当前正在执行的 LLM 生成
+  if (targetTask.status !== 'queued') {
+    const controller = jobAbortControllers.get(jobId);
+    if (controller) {
+      controller.abort();
+    }
+  }
+
+  await updateBatchJob(jobId, (j) => {
+    const t = j.tasks.find((task) => task.id === taskId);
+    if (t) {
+      t.status = 'cancelled';
+      t.stepMessage = '已从队列中取消/移除';
+      if (t.tempFilePath) {
+        safeUnlink(t.tempFilePath);
+      }
+    }
+    j.cancelledTasks = j.tasks.filter((task) => task.status === 'cancelled').length;
+  });
+
+  log.info(`SubTask ${taskId} in batch job ${jobId} cancelled`);
+  return true;
+}
+
 export function runBatchJob(jobId: string, baseUrl: string): Promise<void> {
   const existing = runningBatchJobs.get(jobId);
   if (existing) return existing;
+
+  const controller = new AbortController();
+  jobAbortControllers.set(jobId, controller);
 
   const jobPromise = (async () => {
     try {
@@ -37,11 +113,19 @@ export function runBatchJob(jobId: string, baseUrl: string): Promise<void> {
       });
 
       if (initialJob.mode === 'single_merged') {
-        await executeSingleMergedJob(jobId, baseUrl);
+        await executeSingleMergedJob(jobId, baseUrl, controller);
       } else {
-        await executeBatchIndependentJob(jobId, baseUrl);
+        await executeBatchIndependentJob(jobId, baseUrl, controller);
       }
     } catch (error) {
+      if (controller.signal.aborted || (error as any)?.name === 'AbortError') {
+        log.info(`Batch job ${jobId} was aborted by user`);
+        await updateBatchJob(jobId, (job) => {
+          job.status = 'cancelled';
+          job.completedAt = new Date().toISOString();
+        });
+        return;
+      }
       log.error(`Batch job ${jobId} encountered unexpected error:`, error);
       const message = error instanceof Error ? error.message : String(error);
       await updateBatchJob(jobId, (job) => {
@@ -50,6 +134,7 @@ export function runBatchJob(jobId: string, baseUrl: string): Promise<void> {
         job.completedAt = new Date().toISOString();
       });
     } finally {
+      jobAbortControllers.delete(jobId);
       runningBatchJobs.delete(jobId);
     }
   })();
@@ -59,7 +144,11 @@ export function runBatchJob(jobId: string, baseUrl: string): Promise<void> {
 }
 
 /** 模式 A：多文件合为一门精品课程 */
-async function executeSingleMergedJob(jobId: string, baseUrl: string): Promise<void> {
+async function executeSingleMergedJob(
+  jobId: string,
+  baseUrl: string,
+  controller: AbortController,
+): Promise<void> {
   const job = await getBatchJob(jobId);
   if (!job) return;
 
@@ -70,6 +159,12 @@ async function executeSingleMergedJob(jobId: string, baseUrl: string): Promise<v
 
   // 1. 依次解析全部上传文件
   for (let i = 0; i < job.tasks.length; i++) {
+    if (controller.signal.aborted) {
+      const err = new Error('Batch job cancelled by user');
+      err.name = 'AbortError';
+      throw err;
+    }
+
     const task = job.tasks[i];
     const progress = Math.round(5 + (i / job.tasks.length) * 20);
 
@@ -114,6 +209,12 @@ async function executeSingleMergedJob(jobId: string, baseUrl: string): Promise<v
     }
   }
 
+  if (controller.signal.aborted) {
+    const err = new Error('Batch job cancelled by user');
+    err.name = 'AbortError';
+    throw err;
+  }
+
   // 2. 检查是否有有效提取内容
   const combinedText = extractedTexts.join('\n\n---\n\n').trim();
   if (!combinedText) {
@@ -137,12 +238,14 @@ async function executeSingleMergedJob(jobId: string, baseUrl: string): Promise<v
       },
       enableTTS: job.enableTTS,
       enableImageGeneration: job.enableImageGeneration,
+      interactiveMode: job.enableInteractiveMode,
     },
     {
       baseUrl,
+      signal: controller.signal,
       onProgress: async (p) => {
         // Map 0-100% of generateClassroom to 30% - 95% of batch job
-        const mappedProgress = Math.round(30 + (p.progress * 0.65));
+        const mappedProgress = Math.round(30 + p.progress * 0.65);
         await updateBatchJob(jobId, (j) => {
           j.progress = mappedProgress;
         });
@@ -178,19 +281,36 @@ async function executeSingleMergedJob(jobId: string, baseUrl: string): Promise<v
 }
 
 /** 模式 B：多文件分别独立生成课程 (一对一批量流水线) */
-async function executeBatchIndependentJob(jobId: string, baseUrl: string): Promise<void> {
-  const job = await getBatchJob(jobId);
-  if (!job) return;
+async function executeBatchIndependentJob(
+  jobId: string,
+  baseUrl: string,
+  controller: AbortController,
+): Promise<void> {
+  const initialJob = await getBatchJob(jobId);
+  if (!initialJob) return;
 
-  const totalTasks = job.tasks.length;
+  const totalTasks = initialJob.tasks.length;
   log.info(`Executing batch independent job ${jobId} with ${totalTasks} sequential tasks`);
 
   let completedCount = 0;
   let failedCount = 0;
 
   for (let i = 0; i < totalTasks; i++) {
-    const task = job.tasks[i];
+    // 检查整体任务是否已被取消或中断
+    const currentJob = await getBatchJob(jobId);
+    if (!currentJob || currentJob.status === 'cancelled' || controller.signal.aborted) {
+      log.info(`Batch job ${jobId} is cancelled, terminating independent queue immediately`);
+      break;
+    }
+
+    const task = currentJob.tasks[i];
     const taskIndex = i;
+
+    // 检查此特定子任务是否已被用户从队列中移除/取消
+    if (task.status === 'cancelled') {
+      log.info(`Task ${task.fileName} (${task.id}) was cancelled, skipping`);
+      continue;
+    }
 
     log.info(`[${i + 1}/${totalTasks}] Starting task: ${task.fileName}`);
 
@@ -212,6 +332,12 @@ async function executeBatchIndependentJob(jobId: string, baseUrl: string): Promi
       // 1. 提取当前文件内容
       const extracted = await extractFileContent(task.tempFilePath, task.fileName, task.mimeType);
 
+      if (controller.signal.aborted) {
+        const err = new Error('Batch job cancelled by user');
+        err.name = 'AbortError';
+        throw err;
+      }
+
       await updateBatchJob(jobId, (j) => {
         const target = j.tasks[taskIndex];
         if (target) {
@@ -223,7 +349,7 @@ async function executeBatchIndependentJob(jobId: string, baseUrl: string): Promi
 
       // 2. 组装当前课程的个性化提示词
       const courseTitle = extracted.title || task.fileName.replace(/\.[^/.]+$/, '');
-      const requirement = `【课程主题】：《${courseTitle}》\n${job.requirement ? '【教学总要求】：' + job.requirement + '\n' : ''}【课件核心内容】：\n${extracted.text.slice(0, 25000)}`;
+      const requirement = `【课程主题】：《${courseTitle}》\n${initialJob.requirement ? '【教学总要求】：' + initialJob.requirement + '\n' : ''}【课件核心内容】：\n${extracted.text.slice(0, 25000)}`;
 
       // 3. 执行生成
       const result = await generateClassroom(
@@ -233,11 +359,13 @@ async function executeBatchIndependentJob(jobId: string, baseUrl: string): Promi
             text: extracted.text.slice(0, 25000),
             images: extracted.images.slice(0, 15),
           },
-          enableTTS: job.enableTTS,
-          enableImageGeneration: job.enableImageGeneration,
+          enableTTS: initialJob.enableTTS,
+          enableImageGeneration: initialJob.enableImageGeneration,
+          interactiveMode: initialJob.enableInteractiveMode,
         },
         {
           baseUrl,
+          signal: controller.signal,
           onProgress: async (p) => {
             const stepMapping: Record<string, SubTaskStep> = {
               queued: 'planning_outline',
@@ -253,14 +381,17 @@ async function executeBatchIndependentJob(jobId: string, baseUrl: string): Promi
 
             await updateBatchJob(jobId, (j) => {
               const target = j.tasks[taskIndex];
-              if (target) {
+              if (target && target.status !== 'cancelled') {
                 target.status = currentSubStep;
                 target.progress = p.progress;
                 target.stepMessage = p.message;
               }
               // Compute overall batch progress
-              const currentTaskContribution = (p.progress / 100);
-              j.progress = Math.min(99, Math.round(((completedCount + currentTaskContribution) / totalTasks) * 100));
+              const currentTaskContribution = p.progress / 100;
+              j.progress = Math.min(
+                99,
+                Math.round(((completedCount + currentTaskContribution) / totalTasks) * 100),
+              );
             });
           },
         },
@@ -268,12 +399,12 @@ async function executeBatchIndependentJob(jobId: string, baseUrl: string): Promi
 
       // 4. 同步至当前用户的 PostgreSQL 存储
       try {
-        const store = await getOwnerScopedDocumentStore(job.ownerId);
+        const store = await getOwnerScopedDocumentStore(initialJob.ownerId);
         await store.saveDocument({
           stage: result.stage,
           scenes: result.scenes,
         });
-        log.info(`Course ${result.id} successfully saved to owner store (${job.ownerId})`);
+        log.info(`Course ${result.id} successfully saved to owner store (${initialJob.ownerId})`);
       } catch (dbError) {
         log.warn(`Failed to sync course ${result.id} to owner store:`, dbError);
       }
@@ -298,6 +429,30 @@ async function executeBatchIndependentJob(jobId: string, baseUrl: string): Promi
 
       log.info(`[${i + 1}/${totalTasks}] Finished: ${task.fileName} -> ${result.url}`);
     } catch (err) {
+      if (controller.signal.aborted || (err as any)?.name === 'AbortError') {
+        log.info(`[${i + 1}/${totalTasks}] Task ${task.fileName} aborted by user cancellation`);
+        await updateBatchJob(jobId, (j) => {
+          const target = j.tasks[taskIndex];
+          if (target && target.status !== 'completed') {
+            target.status = 'cancelled';
+            target.stepMessage = '任务已取消 (用户中断)';
+            target.completedAt = new Date().toISOString();
+          }
+          // Mark all remaining queued tasks as cancelled to stop token waste
+          for (let k = taskIndex + 1; k < j.tasks.length; k++) {
+            if (j.tasks[k].status === 'queued') {
+              j.tasks[k].status = 'cancelled';
+              j.tasks[k].stepMessage = '任务已取消 (用户中断)';
+              safeUnlink(j.tasks[k].tempFilePath);
+            }
+          }
+          j.cancelledTasks = j.tasks.filter((t) => t.status === 'cancelled').length;
+          j.status = 'cancelled';
+          j.completedAt = new Date().toISOString();
+        });
+        break;
+      }
+
       failedCount++;
       const errMsg = err instanceof Error ? err.message : String(err);
       log.error(`[${i + 1}/${totalTasks}] Failed: ${task.fileName}`, err);
@@ -317,12 +472,30 @@ async function executeBatchIndependentJob(jobId: string, baseUrl: string): Promi
     }
   }
 
-  // 6. 最终更新批次总体状态
+  // 6. 最终更新批次总体状态 (若非已取消)
+  const finalJob = await getBatchJob(jobId);
+  if (finalJob?.status === 'cancelled') {
+    log.info(`Batch independent job ${jobId} finished in cancelled state`);
+    return;
+  }
+
   await updateBatchJob(jobId, (j) => {
     j.progress = 100;
-    j.status = failedCount === 0 ? 'completed' : completedCount > 0 ? 'partially_failed' : 'failed';
+    const cancelledCount = j.tasks.filter((t) => t.status === 'cancelled').length;
+    j.cancelledTasks = cancelledCount;
+    if (j.status !== 'cancelled') {
+      if (failedCount === 0 && cancelledCount === 0) {
+        j.status = 'completed';
+      } else if (completedCount > 0) {
+        j.status = 'partially_failed';
+      } else {
+        j.status = 'failed';
+      }
+    }
     j.completedAt = new Date().toISOString();
   });
 
-  log.info(`Batch independent job ${jobId} finished: ${completedCount} succeeded, ${failedCount} failed`);
+  log.info(
+    `Batch independent job ${jobId} finished: ${completedCount} succeeded, ${failedCount} failed`,
+  );
 }

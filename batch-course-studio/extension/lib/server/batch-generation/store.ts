@@ -96,3 +96,28 @@ export async function listBatchJobs(ownerId: string): Promise<BatchJob[]> {
     return [];
   }
 }
+
+export async function deleteBatchJob(jobId: string, ownerId?: string): Promise<boolean> {
+  try {
+    const job = await getBatchJob(jobId, ownerId);
+    if (!job) return false;
+
+    for (const task of job.tasks) {
+      if (task.tempFilePath) {
+        try {
+          await fs.unlink(task.tempFilePath);
+        } catch {
+          // Ignore
+        }
+      }
+    }
+
+    const filePath = jobFilePath(jobId);
+    await fs.unlink(filePath);
+    return true;
+  } catch (error) {
+    log.error(`Failed to delete batch job ${jobId}:`, error);
+    return false;
+  }
+}
+
