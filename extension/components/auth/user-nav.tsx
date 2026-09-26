@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useState } from 'react';
+import { useRouter } from 'next/navigation';
 import { useAuthStore } from '@/lib/store/auth-store';
 import { Button } from '@/components/ui/button';
 import {
@@ -11,12 +12,13 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
-import { LogIn, User as UserIcon, Shield, LogOut, Settings as SettingsIcon } from 'lucide-react';
+import { LogIn, User as UserIcon, Shield, LogOut, Settings as SettingsIcon, BookOpen } from 'lucide-react';
 import { AuthDialog } from './auth-dialog';
 import { UserProfileDialog } from './user-profile-dialog';
 import { UserManagementDialog } from '../admin/user-management-dialog';
 
 export function UserNav({ onOpenSettings }: { onOpenSettings?: () => void }) {
+  const router = useRouter();
   const [mounted, setMounted] = useState(false);
   const { user, checkAuth, setAuthModalOpen, setProfileModalOpen, setAdminModalOpen, logout } = useAuthStore();
 
@@ -81,6 +83,14 @@ export function UserNav({ onOpenSettings }: { onOpenSettings?: () => void }) {
             </DropdownMenuLabel>
 
             <DropdownMenuSeparator className="my-1" />
+
+            <DropdownMenuItem
+              onClick={() => router.push('/my-courses')}
+              className="rounded-xl py-2 cursor-pointer font-medium text-indigo-600 dark:text-indigo-400 focus:text-indigo-600"
+            >
+              <BookOpen className="w-3.5 h-3.5 mr-2" />
+              我的课程中心
+            </DropdownMenuItem>
 
             <DropdownMenuItem onClick={() => setProfileModalOpen(true)} className="rounded-xl py-2 cursor-pointer">
               <UserIcon className="w-3.5 h-3.5 mr-2 text-zinc-500" />

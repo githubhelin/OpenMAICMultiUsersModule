@@ -558,10 +558,10 @@ index 00000000..45201511
 +  }
 +}
 diff --git a/app/api/classroom/route.ts b/app/api/classroom/route.ts
-index 3cbf7790..cd0a9bad 100644
+index 3cbf7790..29940834 100644
 --- a/app/api/classroom/route.ts
 +++ b/app/api/classroom/route.ts
-@@ -9,9 +9,14 @@ import {
+@@ -9,9 +9,17 @@ import {
    isValidClassroomId,
    persistClassroom,
    readClassroom,
@@ -572,11 +572,39 @@ index 3cbf7790..cd0a9bad 100644
 +import { isServerPersistenceConfigured } from '@/lib/config/feature-flags';
 +import { resolveStageAccess } from '@/lib/server/stage-access';
 +import { getServerPersistenceProvider } from '@/lib/persistence/server-provider';
++import { getSessionPayload } from '@/lib/server/auth/session';
++import { resolveRequestOwnerId } from '@/lib/server/agent-runtime/owner';
++import { getOwnerScopedDocumentStore } from '@/lib/server/agent-runtime/owner-scoped-documents';
 +import type { Stage, Scene } from '@/lib/types/stage';
  
  const log = createLogger('Classroom API');
  
-@@ -144,7 +149,28 @@ export async function GET(request: NextRequest) {
+@@ -113,6 +121,24 @@ export async function POST(request: NextRequest) {
+       return apiError(API_ERROR_CODES.INVALID_REQUEST, 409, 'Classroom id collision');
+     }
+ 
++    if (isServerPersistenceConfigured()) {
++      try {
++        const session = getSessionPayload(request);
++        const ownerId =
++          session && session.userId
++            ? `user:${session.userId}`
++            : resolveRequestOwnerId(request, new Headers());
++        const store = await getOwnerScopedDocumentStore(ownerId);
++        await store.saveDocument({
++          stage: { ...safeStage, id: persisted.id },
++          scenes: safeScenes.map((scene) => ({ ...scene, stageId: persisted.id })),
++        });
++        log.info(`Classroom ${persisted.id} also synced to owner store (${ownerId})`);
++      } catch (dbError) {
++        log.warn(`Classroom ${persisted.id} failed to sync to owner store:`, dbError);
++      }
++    }
++
+     return apiSuccess({ id: persisted.id, url: persisted.url }, 201);
+   } catch (error) {
+     log.error(
+@@ -144,7 +170,28 @@ export async function GET(request: NextRequest) {
        return apiError(API_ERROR_CODES.INVALID_REQUEST, 400, 'Invalid classroom id');
      }
  
@@ -606,11 +634,986 @@ index 3cbf7790..cd0a9bad 100644
      if (!classroom) {
        return apiError(API_ERROR_CODES.INVALID_REQUEST, 404, 'Classroom not found');
      }
+diff --git a/app/api/stages/[id]/route.ts b/app/api/stages/[id]/route.ts
+index 6bc07e84..23682901 100644
+--- a/app/api/stages/[id]/route.ts
++++ b/app/api/stages/[id]/route.ts
+@@ -27,6 +27,8 @@ import { getOwnerScopedDocumentStore } from '@/lib/server/agent-runtime/owner-sc
+ import { ownerApiError, ownerJson, ownerNotFound } from '@/lib/server/agent-runtime/route-response';
+ import { withRequestOwnerId } from '@/lib/server/agent-runtime/with-owner';
+ import { STAGE_NAME_MAX_LENGTH } from '@/lib/server/agent-runtime/stage-limits';
++import { getSessionPayload } from '@/lib/server/auth/session';
++import { getServerPersistenceProvider } from '@/lib/persistence/server-provider';
+ 
+ export const runtime = 'nodejs';
+ 
+@@ -180,10 +182,26 @@ export async function PUT(req: NextRequest, { params }: Params) {
+ export async function DELETE(req: NextRequest, { params }: Params) {
+   if (!isAgentRuntimeConfigured()) return new Response('Not found', { status: 404 });
+ 
++  const session = getSessionPayload(req);
++  const isAdmin = session?.role === 'admin';
++
+   return withRequestOwnerId(req, async (ownerId, responseHeaders) => {
+     const { id } = await params;
+     const store = await getOwnerScopedDocumentStore(ownerId);
+-    await store.deleteDocument(id);
++    try {
++      await store.deleteDocument(id);
++    } catch (err) {
++      if (isAdmin) {
++        try {
++          const provider = await getServerPersistenceProvider(process.env.DATABASE_URL ?? '');
++          await provider.documentStore.deleteDocument(id);
++        } catch (innerErr) {
++          throw innerErr;
++        }
++      } else {
++        throw err;
++      }
++    }
+     return ownerJson({ ok: true }, 200, responseHeaders);
+   });
+ }
+diff --git a/app/api/stages/route.ts b/app/api/stages/route.ts
+index a85831b5..19b5e76d 100644
+--- a/app/api/stages/route.ts
++++ b/app/api/stages/route.ts
+@@ -24,6 +24,9 @@ import { ownerJson } from '@/lib/server/agent-runtime/route-response';
+ import { STAGE_NAME_MAX_LENGTH } from '@/lib/server/agent-runtime/stage-limits';
+ import { withRequestOwnerId } from '@/lib/server/agent-runtime/with-owner';
+ 
++import { getSessionPayload } from '@/lib/server/auth/session';
++import { getServerPersistenceProvider } from '@/lib/persistence/server-provider';
++
+ export const runtime = 'nodejs';
+ 
+ /** Mint a fresh, collision-free course id in the same `stage-` family as the agent tools. */
+@@ -35,9 +38,24 @@ function createStageId(): string {
+ export async function GET(req: NextRequest) {
+   if (!isAgentRuntimeConfigured()) return new Response('Not found', { status: 404 });
+ 
++  const session = getSessionPayload(req);
++  const isAdmin = session?.role === 'admin';
++
+   return withRequestOwnerId(req, async (ownerId, responseHeaders) => {
+     const store = await getOwnerScopedDocumentStore(ownerId);
+-    const stages = await store.listDocuments();
++    let stages = await store.listDocuments();
++    if (isAdmin) {
++      try {
++        const provider = await getServerPersistenceProvider(process.env.DATABASE_URL ?? '');
++        const allDocs = await provider.documentStore.listDocuments();
++        const map = new Map<string, any>();
++        for (const doc of allDocs) map.set(doc.id, doc);
++        for (const s of stages) map.set(s.id, s);
++        stages = Array.from(map.values()).sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
++      } catch {
++        // Keep store stages on error
++      }
++    }
+     return ownerJson({ stages }, 200, responseHeaders);
+   });
+ }
+diff --git a/app/my-courses/page.tsx b/app/my-courses/page.tsx
+new file mode 100644
+index 00000000..1032a9d2
+--- /dev/null
++++ b/app/my-courses/page.tsx
+@@ -0,0 +1,880 @@
++'use client';
++
++import React, { useEffect, useState, useMemo, useTransition } from 'react';
++import { useRouter } from 'next/navigation';
++import {
++  BookOpen,
++  Sparkles,
++  Play,
++  Edit3,
++  Trash2,
++  Copy,
++  Check,
++  Search,
++  ArrowLeft,
++  Calendar,
++  Layers,
++  RefreshCw,
++  ExternalLink,
++  Plus,
++  AlertCircle,
++  Clock,
++  CheckCircle2,
++  Laptop,
++  FolderOpen,
++  Cloud,
++  CloudUpload,
++  HardDrive,
++  Database,
++} from 'lucide-react';
++import { useAuthStore } from '@/lib/store/auth-store';
++import { UserNav } from '@/components/auth/user-nav';
++import { AuthDialog } from '@/components/auth/auth-dialog';
++import {
++  listStages,
++  deleteStageData,
++  renameStage,
++  loadStageData,
++} from '@/lib/utils/stage-storage';
++import { Button } from '@/components/ui/button';
++import { Input } from '@/components/ui/input';
++import { Badge } from '@/components/ui/badge';
++import {
++  Dialog,
++  DialogContent,
++  DialogDescription,
++  DialogFooter,
++  DialogHeader,
++  DialogTitle,
++} from '@/components/ui/dialog';
++import { toast } from 'sonner';
++
++interface CourseItem {
++  id: string;
++  name: string;
++  description?: string;
++  sceneCount?: number;
++  createdAt: number;
++  updatedAt: number;
++  interactiveMode?: boolean;
++  taskEngineMode?: boolean;
++  folderId?: string;
++  isCloudSynced?: boolean;
++}
++
++type SortField = 'updatedAt' | 'createdAt' | 'name' | 'sceneCount';
++type FilterType = 'all' | 'interactive' | 'cloud' | 'local';
++
++export default function MyCoursesPage() {
++  const router = useRouter();
++  const { user, authModalOpen, setAuthModalOpen } = useAuthStore();
++
++  const [courses, setCourses] = useState<CourseItem[]>([]);
++  const [loading, setLoading] = useState(true);
++  const [isPending, startTransition] = useTransition();
++
++  // Search & Filter
++  const [searchQuery, setSearchQuery] = useState('');
++  const [sortField, setSortField] = useState<SortField>('updatedAt');
++  const [sortAsc, setSortAsc] = useState(false);
++  const [filterType, setFilterType] = useState<FilterType>('all');
++
++  // Rename state
++  const [renamingId, setRenamingId] = useState<string | null>(null);
++  const [renameDraft, setRenameDraft] = useState('');
++  const [renamingSubmitting, setRenamingSubmitting] = useState(false);
++
++  // Delete state
++  const [deletingCourse, setDeletingCourse] = useState<CourseItem | null>(null);
++  const [deleteSubmitting, setDeleteSubmitting] = useState(false);
++
++  // Cloud sync state
++  const [syncingId, setSyncingId] = useState<string | null>(null);
++  const [batchSyncing, setBatchSyncing] = useState(false);
++
++  // Copy feedback
++  const [copiedId, setCopiedId] = useState<string | null>(null);
++
++  // Fetch courses from both IndexedDB (historical) and PostgreSQL (cloud)
++  const fetchCourses = async () => {
++    setLoading(true);
++    try {
++      // 1. 获取本地 IndexedDB 存储的所有历史课程
++      let localStages: CourseItem[] = [];
++      try {
++        const local = await listStages();
++        localStages = local.map((s) => ({
++          ...s,
++          isCloudSynced: false,
++        }));
++      } catch (err) {
++        console.warn('Failed to load local stages:', err);
++      }
++
++      // 2. 获取服务端 PostgreSQL 云端数据库存储的所有课程（包含批量制课等）
++      let serverStages: CourseItem[] = [];
++      try {
++        const res = await fetch('/api/stages', {
++          credentials: 'include',
++        });
++        if (res.ok) {
++          const data = await res.json();
++          if (data && Array.isArray(data.stages)) {
++            serverStages = data.stages.map((s: any) => ({
++              ...s,
++              isCloudSynced: true,
++            }));
++          }
++        }
++      } catch (err) {
++        console.warn('Failed to load server stages:', err);
++      }
++
++      // 3. 智能双向聚合去重合并（确保全部历史本地课程与云端课程 100% 汇总）
++      const map = new Map<string, CourseItem>();
++
++      // 先存入云端课程
++      for (const s of serverStages) {
++        map.set(s.id, { ...s, isCloudSynced: true });
++      }
++
++      // 补入本地历史课件
++      for (const l of localStages) {
++        if (!map.has(l.id)) {
++          map.set(l.id, { ...l, isCloudSynced: false });
++        } else {
++          const existing = map.get(l.id)!;
++          map.set(l.id, {
++            ...existing,
++            isCloudSynced: true,
++            sceneCount: existing.sceneCount || l.sceneCount,
++            interactiveMode: existing.interactiveMode ?? l.interactiveMode,
++            taskEngineMode: existing.taskEngineMode ?? l.taskEngineMode,
++            updatedAt: Math.max(existing.updatedAt || 0, l.updatedAt || 0),
++          });
++        }
++      }
++
++      const merged = Array.from(map.values());
++      setCourses(merged);
++    } catch (err) {
++      console.error('Failed to fetch courses:', err);
++      toast.error('网络异常，获取课程失败');
++    } finally {
++      setLoading(false);
++    }
++  };
++
++  useEffect(() => {
++    fetchCourses();
++  }, []);
++
++  // Filtered and Sorted Courses
++  const filteredCourses = useMemo(() => {
++    return courses
++      .filter((course) => {
++        if (filterType === 'interactive' && !course.interactiveMode) return false;
++        if (filterType === 'cloud' && !course.isCloudSynced) return false;
++        if (filterType === 'local' && course.isCloudSynced) return false;
++
++        if (searchQuery.trim()) {
++          const q = searchQuery.toLowerCase().trim();
++          const matchName = course.name.toLowerCase().includes(q);
++          const matchDesc = course.description?.toLowerCase().includes(q);
++          const matchId = course.id.toLowerCase().includes(q);
++          return matchName || matchDesc || matchId;
++        }
++        return true;
++      })
++      .sort((a, b) => {
++        let valA: any = a[sortField] ?? 0;
++        let valB: any = b[sortField] ?? 0;
++        if (sortField === 'name') {
++          return sortAsc ? a.name.localeCompare(b.name) : b.name.localeCompare(a.name);
++        }
++        return sortAsc ? valA - valB : valB - valA;
++      });
++  }, [courses, searchQuery, sortField, sortAsc, filterType]);
++
++  // Total stats
++  const totalSlides = useMemo(() => {
++    return courses.reduce((sum, c) => sum + (c.sceneCount || 0), 0);
++  }, [courses]);
++
++  const interactiveCoursesCount = useMemo(() => {
++    return courses.filter((c) => c.interactiveMode).length;
++  }, [courses]);
++
++  const unsyncedCount = useMemo(() => {
++    return courses.filter((c) => !c.isCloudSynced).length;
++  }, [courses]);
++
++  // Sync single local course to cloud
++  const syncToCloud = async (course: CourseItem) => {
++    setSyncingId(course.id);
++    try {
++      const doc = await loadStageData(course.id);
++      if (!doc || !doc.stage) {
++        toast.error('未找到该课件的本地详细场景数据');
++        return;
++      }
++      const res = await fetch('/api/classroom', {
++        method: 'POST',
++        headers: { 'Content-Type': 'application/json' },
++        credentials: 'include',
++        body: JSON.stringify({
++          stage: doc.stage,
++          scenes: doc.scenes || [],
++        }),
++      });
++      if (res.ok) {
++        setCourses((prev) =>
++          prev.map((c) => (c.id === course.id ? { ...c, isCloudSynced: true } : c)),
++        );
++        toast.success(`课程 "${course.name}" 已成功备份至云端数据库`);
++      } else {
++        toast.error('云端备份失败，请检查网络');
++      }
++    } catch (err) {
++      console.error('Failed to sync course:', err);
++      toast.error('同步异常，请稍后重试');
++    } finally {
++      setSyncingId(null);
++    }
++  };
++
++  // Sync all local courses to cloud in batch
++  const syncAllLocalToCloud = async () => {
++    const unsynced = courses.filter((c) => !c.isCloudSynced);
++    if (unsynced.length === 0) {
++      toast.info('所有课件已全部存储于云端数据库中');
++      return;
++    }
++    setBatchSyncing(true);
++    toast.info(`开始后台同步 ${unsynced.length} 门历史课件到云端数据库...`);
++    let successCount = 0;
++    for (const c of unsynced) {
++      try {
++        const doc = await loadStageData(c.id);
++        if (doc && doc.stage) {
++          const res = await fetch('/api/classroom', {
++            method: 'POST',
++            headers: { 'Content-Type': 'application/json' },
++            credentials: 'include',
++            body: JSON.stringify({
++              stage: doc.stage,
++              scenes: doc.scenes || [],
++            }),
++          });
++          if (res.ok) {
++            successCount++;
++            setCourses((prev) =>
++              prev.map((item) => (item.id === c.id ? { ...item, isCloudSynced: true } : item)),
++            );
++          }
++        }
++      } catch (e) {
++        console.warn(`Failed to sync ${c.id}:`, e);
++      }
++    }
++    setBatchSyncing(false);
++    toast.success(`已成功将 ${successCount} 门历史课件同步至云端数据库！`);
++  };
++
++  // Rename Course (Dual Save: Local & Server)
++  const startRename = (course: CourseItem) => {
++    setRenamingId(course.id);
++    setRenameDraft(course.name);
++  };
++
++  const submitRename = async () => {
++    if (!renamingId || !renameDraft.trim()) return;
++    const newName = renameDraft.trim();
++    setRenamingSubmitting(true);
++    try {
++      // 1. 本地更新
++      try {
++        await renameStage(renamingId, newName);
++      } catch {}
++
++      // 2. 云端更新
++      try {
++        await fetch(`/api/stages/${encodeURIComponent(renamingId)}`, {
++          method: 'PATCH',
++          headers: { 'Content-Type': 'application/json' },
++          credentials: 'include',
++          body: JSON.stringify({ name: newName }),
++        });
++      } catch {}
++
++      setCourses((prev) =>
++        prev.map((c) => (c.id === renamingId ? { ...c, name: newName, updatedAt: Date.now() } : c)),
++      );
++      toast.success('课程重命名成功');
++      setRenamingId(null);
++    } catch {
++      toast.error('重命名请求异常');
++    } finally {
++      setRenamingSubmitting(false);
++    }
++  };
++
++  // Delete Course (Dual Delete: Local & Server)
++  const confirmDelete = async () => {
++    if (!deletingCourse) return;
++    setDeleteSubmitting(true);
++    try {
++      // 1. 本地 IndexedDB 彻底删除
++      try {
++        await deleteStageData(deletingCourse.id);
++      } catch (e) {
++        console.warn('Failed to delete from local storage:', e);
++      }
++
++      // 2. 服务端 PostgreSQL 彻底删除
++      try {
++        await fetch(`/api/stages/${encodeURIComponent(deletingCourse.id)}`, {
++          method: 'DELETE',
++          credentials: 'include',
++        });
++      } catch (e) {
++        console.warn('Failed to delete from server:', e);
++      }
++
++      setCourses((prev) => prev.filter((c) => c.id !== deletingCourse.id));
++      toast.success(`课程 "${deletingCourse.name}" 已成功删除`);
++      setDeletingCourse(null);
++    } catch {
++      toast.error('删除请求异常');
++    } finally {
++      setDeleteSubmitting(false);
++    }
++  };
++
++  // Copy share URL
++  const copyShareLink = (id: string) => {
++    const url = `${window.location.origin}/classroom/${encodeURIComponent(id)}`;
++    navigator.clipboard.writeText(url);
++    setCopiedId(id);
++    toast.success('课堂专属链接已复制到剪贴板');
++    setTimeout(() => setCopiedId(null), 2000);
++  };
++
++  const formatDate = (ts: number | string | undefined) => {
++    if (!ts) return '未知时间';
++    const d = new Date(typeof ts === 'number' ? ts : Number(ts));
++    if (isNaN(d.getTime())) return '未知时间';
++    return d.toLocaleString('zh-CN', {
++      year: 'numeric',
++      month: '2-digit',
++      day: '2-digit',
++      hour: '2-digit',
++      minute: '2-digit',
++    });
++  };
++
++  return (
++    <div className="min-h-screen bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-slate-100 flex flex-col">
++      {/* 顶部导航 */}
++      <header className="border-b border-slate-200 dark:border-slate-800 bg-white/80 dark:bg-slate-900/80 backdrop-blur sticky top-0 z-40">
++        <div className="max-w-7xl mx-auto px-4 sm:px-6 h-16 flex items-center justify-between">
++          <div className="flex items-center gap-3">
++            <Button
++              variant="ghost"
++              size="sm"
++              onClick={() => router.push('/')}
++              className="gap-1.5 text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white"
++            >
++              <ArrowLeft className="w-4 h-4" />
++              返回首页
++            </Button>
++            <div className="h-4 w-px bg-slate-200 dark:bg-slate-800" />
++            <div className="flex items-center gap-2.5">
++              <div className="w-8 h-8 rounded-lg bg-gradient-to-tr from-indigo-500 to-purple-500 flex items-center justify-center text-white shadow-sm shadow-indigo-500/20">
++                <BookOpen className="w-4 h-4" />
++              </div>
++              <div>
++                <h1 className="font-semibold text-base leading-tight">我的课程中心</h1>
++                <p className="text-xs text-slate-500 dark:text-slate-400">
++                  全量汇总管理本地历史与云端生成的所有课件
++                </p>
++              </div>
++            </div>
++          </div>
++
++          <div className="flex items-center gap-2.5">
++            {unsyncedCount > 0 && (
++              <Button
++                variant="outline"
++                size="sm"
++                onClick={syncAllLocalToCloud}
++                disabled={batchSyncing}
++                className="gap-1.5 text-emerald-600 dark:text-emerald-400 border-emerald-500/30 hover:bg-emerald-50 dark:hover:bg-emerald-950/40 text-xs"
++                title="将浏览器本地历史缓存的所有课程一键备份同步到 PostgreSQL 云端数据库"
++              >
++                <CloudUpload className={`w-3.5 h-3.5 ${batchSyncing ? 'animate-bounce' : ''}`} />
++                {batchSyncing ? '正在备份上云...' : `一键上云备份 (${unsyncedCount})`}
++              </Button>
++            )}
++
++            <Button
++              variant="outline"
++              size="sm"
++              onClick={() => router.push('/batch-studio')}
++              className="gap-1.5 text-amber-600 dark:text-amber-400 border-amber-500/30 hover:bg-amber-50 dark:hover:bg-amber-950/40 text-xs"
++            >
++              <Sparkles className="w-3.5 h-3.5" />
++              批量快速制课
++            </Button>
++
++            <Button
++              variant="default"
++              size="sm"
++              onClick={() => router.push('/')}
++              className="gap-1.5 shadow-sm text-xs"
++            >
++              <Plus className="w-3.5 h-3.5" />
++              制作新课程
++            </Button>
++
++            <Button
++              variant="ghost"
++              size="icon"
++              onClick={fetchCourses}
++              disabled={loading}
++              title="刷新列表"
++              className="w-8 h-8 rounded-lg text-slate-500 hover:text-slate-900 dark:hover:text-white"
++            >
++              <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
++            </Button>
++
++            <div className="h-4 w-px bg-slate-200 dark:bg-slate-800" />
++            <UserNav />
++          </div>
++        </div>
++      </header>
++
++      {/* 主体区域 */}
++      <main className="flex-1 max-w-7xl mx-auto w-full px-4 sm:px-6 py-6 space-y-6">
++        {/* 未登录提醒条 */}
++        {!user && (
++          <div className="p-4 rounded-2xl bg-amber-50/80 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800/60 flex items-center justify-between text-amber-900 dark:text-amber-200 text-sm">
++            <div className="flex items-center gap-2.5">
++              <AlertCircle className="w-5 h-5 text-amber-600 dark:text-amber-400 shrink-0" />
++              <span>您当前处于未登录状态。登录后可永久保存并多端漫游您的所有课程数据。</span>
++            </div>
++            <Button
++              size="sm"
++              onClick={() => setAuthModalOpen(true, 'login')}
++              className="bg-amber-600 hover:bg-amber-700 text-white shrink-0 text-xs rounded-xl"
++            >
++              立即登录 / 注册
++            </Button>
++          </div>
++        )}
++
++        {/* 顶部统计卡片 */}
++        <div className="grid grid-cols-1 sm:grid-cols-4 gap-4">
++          <div className="bg-white dark:bg-slate-900 rounded-2xl p-4 border border-slate-200/80 dark:border-slate-800 shadow-xs flex items-center gap-3.5">
++            <div className="w-10 h-10 rounded-xl bg-indigo-50 dark:bg-indigo-950/60 text-indigo-600 dark:text-indigo-400 flex items-center justify-center shrink-0">
++              <BookOpen className="w-5 h-5" />
++            </div>
++            <div>
++              <div className="text-2xl font-bold tracking-tight">{courses.length}</div>
++              <div className="text-xs text-slate-500 dark:text-slate-400">全部课件总数</div>
++            </div>
++          </div>
++
++          <div className="bg-white dark:bg-slate-900 rounded-2xl p-4 border border-slate-200/80 dark:border-slate-800 shadow-xs flex items-center gap-3.5">
++            <div className="w-10 h-10 rounded-xl bg-emerald-50 dark:bg-emerald-950/60 text-emerald-600 dark:text-emerald-400 flex items-center justify-center shrink-0">
++              <Layers className="w-5 h-5" />
++            </div>
++            <div>
++              <div className="text-2xl font-bold tracking-tight">{totalSlides}</div>
++              <div className="text-xs text-slate-500 dark:text-slate-400">幻灯片总张数</div>
++            </div>
++          </div>
++
++          <div className="bg-white dark:bg-slate-900 rounded-2xl p-4 border border-slate-200/80 dark:border-slate-800 shadow-xs flex items-center gap-3.5">
++            <div className="w-10 h-10 rounded-xl bg-purple-50 dark:bg-purple-950/60 text-purple-600 dark:text-purple-400 flex items-center justify-center shrink-0">
++              <Sparkles className="w-5 h-5" />
++            </div>
++            <div>
++              <div className="text-2xl font-bold tracking-tight">{interactiveCoursesCount}</div>
++              <div className="text-xs text-slate-500 dark:text-slate-400">深度交互课程</div>
++            </div>
++          </div>
++
++          <div className="bg-white dark:bg-slate-900 rounded-2xl p-4 border border-slate-200/80 dark:border-slate-800 shadow-xs flex items-center gap-3.5">
++            <div className="w-10 h-10 rounded-xl bg-blue-50 dark:bg-blue-950/60 text-blue-600 dark:text-blue-400 flex items-center justify-center shrink-0">
++              <Database className="w-5 h-5" />
++            </div>
++            <div>
++              <div className="text-2xl font-bold tracking-tight">{courses.length - unsyncedCount}</div>
++              <div className="text-xs text-slate-500 dark:text-slate-400">云端已同步 / 数据库</div>
++            </div>
++          </div>
++        </div>
++
++        {/* 筛选与搜索工具条 */}
++        <div className="bg-white dark:bg-slate-900 rounded-2xl p-3 border border-slate-200/80 dark:border-slate-800 shadow-xs flex flex-wrap items-center justify-between gap-3">
++          <div className="flex items-center gap-2 flex-1 min-w-[240px]">
++            <div className="relative flex-1">
++              <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
++              <Input
++                placeholder="搜索课程名称或关键字..."
++                value={searchQuery}
++                onChange={(e) => setSearchQuery(e.target.value)}
++                className="pl-9 h-9 text-xs rounded-xl bg-slate-50 dark:bg-slate-950 border-slate-200 dark:border-slate-800"
++              />
++            </div>
++            {searchQuery && (
++              <Button
++                variant="ghost"
++                size="sm"
++                onClick={() => setSearchQuery('')}
++                className="text-xs h-9 px-2 text-slate-500"
++              >
++                清除
++              </Button>
++            )}
++          </div>
++
++          <div className="flex items-center gap-2 flex-wrap">
++            {/* 模式筛选 */}
++            <div className="flex rounded-xl bg-slate-100 dark:bg-slate-800/80 p-0.5 text-xs">
++              <button
++                onClick={() => setFilterType('all')}
++                className={`px-3 py-1.5 rounded-lg font-medium transition-all ${
++                  filterType === 'all'
++                    ? 'bg-white dark:bg-slate-900 text-slate-900 dark:text-white shadow-xs'
++                    : 'text-slate-600 dark:text-slate-400 hover:text-slate-900'
++                }`}
++              >
++                全部 ({courses.length})
++              </button>
++              <button
++                onClick={() => setFilterType('interactive')}
++                className={`px-3 py-1.5 rounded-lg font-medium transition-all ${
++                  filterType === 'interactive'
++                    ? 'bg-white dark:bg-slate-900 text-slate-900 dark:text-white shadow-xs'
++                    : 'text-slate-600 dark:text-slate-400 hover:text-slate-900'
++                }`}
++              >
++                深度交互 ({interactiveCoursesCount})
++              </button>
++              <button
++                onClick={() => setFilterType('cloud')}
++                className={`px-3 py-1.5 rounded-lg font-medium transition-all ${
++                  filterType === 'cloud'
++                    ? 'bg-white dark:bg-slate-900 text-slate-900 dark:text-white shadow-xs'
++                    : 'text-slate-600 dark:text-slate-400 hover:text-slate-900'
++                }`}
++              >
++                云端已存 ({courses.length - unsyncedCount})
++              </button>
++              {unsyncedCount > 0 && (
++                <button
++                  onClick={() => setFilterType('local')}
++                  className={`px-3 py-1.5 rounded-lg font-medium transition-all ${
++                    filterType === 'local'
++                      ? 'bg-white dark:bg-slate-900 text-slate-900 dark:text-white shadow-xs'
++                      : 'text-slate-600 dark:text-slate-400 hover:text-slate-900'
++                  }`}
++                >
++                  待上云 ({unsyncedCount})
++                </button>
++              )}
++            </div>
++
++            {/* 排序选择 */}
++            <div className="flex items-center gap-1 text-xs">
++              <select
++                value={sortField}
++                onChange={(e) => setSortField(e.target.value as SortField)}
++                className="h-9 px-2.5 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-950 text-slate-700 dark:text-slate-300 text-xs outline-hidden cursor-pointer"
++              >
++                <option value="updatedAt">按更新时间</option>
++                <option value="createdAt">按创建时间</option>
++                <option value="sceneCount">按幻灯片张数</option>
++                <option value="name">按课件名称</option>
++              </select>
++              <Button
++                variant="outline"
++                size="icon"
++                onClick={() => setSortAsc(!sortAsc)}
++                title={sortAsc ? '升序 (点击切换降序)' : '降序 (点击切换升序)'}
++                className="h-9 w-9 rounded-xl border-slate-200 dark:border-slate-800 text-xs"
++              >
++                {sortAsc ? '↑' : '↓'}
++              </Button>
++            </div>
++          </div>
++        </div>
++
++        {/* 课程列表卡片网格 */}
++        {loading ? (
++          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
++            {[1, 2, 3, 4, 5, 6].map((i) => (
++              <div
++                key={i}
++                className="h-56 rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-5 animate-pulse flex flex-col justify-between"
++              >
++                <div className="space-y-3">
++                  <div className="h-5 bg-slate-200 dark:bg-slate-800 rounded-md w-3/4" />
++                  <div className="h-3 bg-slate-100 dark:bg-slate-800/60 rounded-md w-1/2" />
++                </div>
++                <div className="h-9 bg-slate-100 dark:bg-slate-800/60 rounded-xl" />
++              </div>
++            ))}
++          </div>
++        ) : filteredCourses.length === 0 ? (
++          <div className="rounded-2xl border border-dashed border-slate-300 dark:border-slate-800 bg-white/50 dark:bg-slate-900/50 p-12 text-center flex flex-col items-center justify-center space-y-4">
++            <div className="w-16 h-16 rounded-2xl bg-indigo-50 dark:bg-indigo-950/60 text-indigo-500 flex items-center justify-center">
++              <FolderOpen className="w-8 h-8 opacity-60" />
++            </div>
++            <div className="space-y-1">
++              <h3 className="font-semibold text-base">
++                {searchQuery ? '未找到匹配的课程' : '您当前尚未创建任何课程'}
++              </h3>
++              <p className="text-xs text-slate-500 dark:text-slate-400 max-w-sm">
++                {searchQuery
++                  ? '可以尝试减少或更换搜索关键词。'
++                  : '您可以使用批量制课工坊一次性导入多套教案，或在首页根据指令即刻生成一门交互课件。'}
++              </p>
++            </div>
++            {!searchQuery && (
++              <div className="flex items-center gap-2 pt-2">
++                <Button
++                  size="sm"
++                  onClick={() => router.push('/batch-studio')}
++                  className="gap-1.5 rounded-xl text-xs bg-amber-600 hover:bg-amber-700 text-white"
++                >
++                  <Sparkles className="w-3.5 h-3.5" />
++                  前往批量制课工坊
++                </Button>
++                <Button
++                  variant="outline"
++                  size="sm"
++                  onClick={() => router.push('/')}
++                  className="rounded-xl text-xs"
++                >
++                  制作单门课程
++                </Button>
++              </div>
++            )}
++          </div>
++        ) : (
++          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
++            {filteredCourses.map((course) => (
++              <div
++                key={course.id}
++                className="group rounded-2xl border border-slate-200/90 dark:border-slate-800/90 bg-white dark:bg-slate-900 shadow-xs hover:shadow-md hover:border-indigo-500/40 transition-all flex flex-col justify-between overflow-hidden"
++              >
++                {/* 顶部彩色条与徽标 */}
++                <div className="p-4 pb-2">
++                  <div className="flex items-center justify-between gap-2 mb-2.5">
++                    <div className="flex items-center gap-1.5 flex-wrap">
++                      {course.isCloudSynced ? (
++                        <span className="text-[10px] text-emerald-600 dark:text-emerald-400 bg-emerald-500/10 border border-emerald-500/20 px-1.5 py-0.5 rounded flex items-center gap-1 font-medium">
++                          <Cloud className="w-2.5 h-2.5" />
++                          云端已存
++                        </span>
++                      ) : (
++                        <button
++                          onClick={() => syncToCloud(course)}
++                          disabled={syncingId === course.id}
++                          className="text-[10px] text-amber-600 dark:text-amber-400 bg-amber-500/10 hover:bg-amber-500/20 border border-amber-500/30 px-1.5 py-0.5 rounded flex items-center gap-1 font-medium cursor-pointer transition-colors"
++                          title="该课程暂存与浏览器本地缓存中，点击即可备份至云端 PostgreSQL 数据库"
++                        >
++                          <CloudUpload className={`w-2.5 h-2.5 ${syncingId === course.id ? 'animate-spin' : ''}`} />
++                          {syncingId === course.id ? '备份中...' : '本地缓存 (点击上云)'}
++                        </button>
++                      )}
++
++                      {course.interactiveMode && (
++                        <Badge
++                          variant="secondary"
++                          className="bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20 text-[10px] px-2 py-0.5 rounded-md flex items-center gap-1 font-semibold"
++                        >
++                          <Sparkles className="w-2.5 h-2.5" />
++                          深度交互
++                        </Badge>
++                      )}
++
++                      {course.taskEngineMode && (
++                        <Badge
++                          variant="secondary"
++                          className="bg-purple-500/10 text-purple-600 dark:text-purple-400 border border-purple-500/20 text-[10px] px-2 py-0.5 rounded-md flex items-center gap-1 font-semibold"
++                        >
++                          <Laptop className="w-2.5 h-2.5" />
++                          智能体
++                        </Badge>
++                      )}
++
++                      <span className="text-[11px] font-medium text-slate-500 dark:text-slate-400 bg-slate-100 dark:bg-slate-800 px-2 py-0.5 rounded-md">
++                        {course.sceneCount ? `${course.sceneCount} 页幻灯片` : '课件'}
++                      </span>
++                    </div>
++
++                    <button
++                      onClick={() => setDeletingCourse(course)}
++                      className="text-slate-400 hover:text-red-600 dark:hover:text-red-400 p-1 rounded-lg hover:bg-red-50 dark:hover:bg-red-950/40 transition-all cursor-pointer"
++                      title="删除课程"
++                    >
++                      <Trash2 className="w-3.5 h-3.5" />
++                    </button>
++                  </div>
++
++                  {/* 课程名称 (支持内联重命名) */}
++                  {renamingId === course.id ? (
++                    <div className="flex items-center gap-1.5 my-1">
++                      <Input
++                        value={renameDraft}
++                        onChange={(e) => setRenameDraft(e.target.value)}
++                        onKeyDown={(e) => {
++                          if (e.key === 'Enter') submitRename();
++                          if (e.key === 'Escape') setRenamingId(null);
++                        }}
++                        autoFocus
++                        disabled={renamingSubmitting}
++                        className="h-8 text-xs font-semibold rounded-lg"
++                      />
++                      <Button
++                        size="sm"
++                        onClick={submitRename}
++                        disabled={renamingSubmitting || !renameDraft.trim()}
++                        className="h-8 px-2.5 text-xs rounded-lg"
++                      >
++                        保存
++                      </Button>
++                      <Button
++                        size="sm"
++                        variant="ghost"
++                        onClick={() => setRenamingId(null)}
++                        className="h-8 px-2 text-xs rounded-lg text-slate-500"
++                      >
++                        取消
++                      </Button>
++                    </div>
++                  ) : (
++                    <div className="flex items-start justify-between gap-1.5 group/title">
++                      <h2
++                        onClick={() => router.push(`/classroom/${encodeURIComponent(course.id)}`)}
++                        className="font-semibold text-sm leading-snug line-clamp-2 text-slate-900 dark:text-slate-100 group-hover:text-indigo-600 dark:group-hover:text-indigo-400 cursor-pointer transition-colors"
++                        title={course.name}
++                      >
++                        {course.name}
++                      </h2>
++                      <button
++                        onClick={() => startRename(course)}
++                        className="opacity-0 group-hover/title:opacity-100 text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 p-1 rounded transition-opacity shrink-0 cursor-pointer"
++                        title="重命名课程"
++                      >
++                        <Edit3 className="w-3 h-3" />
++                      </button>
++                    </div>
++                  )}
++
++                  {/* 描述或提示 */}
++                  {course.description && (
++                    <p className="text-xs text-slate-500 dark:text-slate-400 line-clamp-2 mt-1">
++                      {course.description}
++                    </p>
++                  )}
++
++                  {/* 时间与ID */}
++                  <div className="flex items-center justify-between text-[11px] text-slate-400 dark:text-slate-500 mt-3 pt-2.5 border-t border-slate-100 dark:border-slate-800/60 font-mono">
++                    <span className="flex items-center gap-1 font-sans">
++                      <Clock className="w-3 h-3" />
++                      {formatDate(course.updatedAt || course.createdAt)}
++                    </span>
++                    <span className="truncate max-w-[120px]" title={course.id}>
++                      {course.id}
++                    </span>
++                  </div>
++                </div>
++
++                {/* 底部功能按钮 */}
++                <div className="p-3 bg-slate-50/70 dark:bg-slate-950/40 border-t border-slate-100 dark:border-slate-800/60 flex items-center gap-1.5">
++                  <Button
++                    size="sm"
++                    onClick={() => router.push(`/classroom/${encodeURIComponent(course.id)}`)}
++                    className="flex-1 gap-1.5 text-xs rounded-xl h-8 font-medium bg-indigo-600 hover:bg-indigo-700 text-white shadow-xs"
++                  >
++                    <Play className="w-3 h-3 fill-current" />
++                    进入课堂
++                  </Button>
++
++                  <Button
++                    variant="outline"
++                    size="sm"
++                    onClick={() => router.push(`/workspace?stageId=${encodeURIComponent(course.id)}`)}
++                    className="gap-1 text-xs rounded-xl h-8 border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-300 hover:bg-white dark:hover:bg-slate-800"
++                    title="在 MAIC Pro 工作台中精细编辑此课件"
++                  >
++                    <Edit3 className="w-3 h-3" />
++                    工作台编辑
++                  </Button>
++
++                  <Button
++                    variant="ghost"
++                    size="icon"
++                    onClick={() => copyShareLink(course.id)}
++                    className="w-8 h-8 rounded-xl text-slate-400 hover:text-slate-800 dark:hover:text-white"
++                    title="复制课堂链接"
++                  >
++                    {copiedId === course.id ? (
++                      <Check className="w-3.5 h-3.5 text-emerald-500" />
++                    ) : (
++                      <Copy className="w-3.5 h-3.5" />
++                    )}
++                  </Button>
++                </div>
++              </div>
++            ))}
++          </div>
++        )}
++      </main>
++
++      {/* 删除确认对话框 */}
++      <Dialog open={Boolean(deletingCourse)} onOpenChange={(open) => !open && setDeletingCourse(null)}>
++        <DialogContent className="max-w-md rounded-2xl">
++          <DialogHeader>
++            <DialogTitle className="flex items-center gap-2 text-red-600 dark:text-red-400">
++              <AlertCircle className="w-5 h-5" />
++              确认彻底删除该课程？
++            </DialogTitle>
++            <DialogDescription className="text-xs pt-1.5 text-slate-600 dark:text-slate-300">
++              确定要删除课程{' '}
++              <strong className="text-slate-900 dark:text-white font-semibold">
++                "{deletingCourse?.name}"
++              </strong>{' '}
++              吗？删除后，该课程对应的所有幻灯片场景、大纲记录与课堂数据将被彻底从本地及云端数据库中永久移除，且无法恢复。
++            </DialogDescription>
++          </DialogHeader>
++          <DialogFooter className="gap-2 sm:gap-0 pt-2">
++            <Button
++              variant="outline"
++              size="sm"
++              onClick={() => setDeletingCourse(null)}
++              disabled={deleteSubmitting}
++              className="rounded-xl text-xs"
++            >
++              取消
++            </Button>
++            <Button
++              variant="destructive"
++              size="sm"
++              onClick={confirmDelete}
++              disabled={deleteSubmitting}
++              className="rounded-xl text-xs bg-red-600 hover:bg-red-700 text-white font-medium"
++            >
++              {deleteSubmitting ? '正在删除...' : '确认彻底删除'}
++            </Button>
++          </DialogFooter>
++        </DialogContent>
++      </Dialog>
++    </div>
++  );
++}
 diff --git a/app/page.tsx b/app/page.tsx
-index 31059149..dd329425 100644
+index 31059149..910cbd69 100644
 --- a/app/page.tsx
 +++ b/app/page.tsx
-@@ -36,6 +36,8 @@ import { InputGroup, InputGroupInput, InputGroupButton } from '@/components/ui/i
+@@ -27,6 +27,7 @@ import {
+   X,
+   Presentation,
+   Loader2,
++  BookOpen,
+ } from 'lucide-react';
+ import { useI18n } from '@/lib/hooks/use-i18n';
+ import { LanguageSwitcher } from '@/components/language-switcher';
+@@ -36,6 +37,8 @@ import { InputGroup, InputGroupInput, InputGroupButton } from '@/components/ui/i
  import { Textarea as UITextarea } from '@/components/ui/textarea';
  import { cn } from '@/lib/utils';
  import { SettingsDialog } from '@/components/settings';
@@ -619,7 +1622,60 @@ index 31059149..dd329425 100644
  import { GenerationToolbar } from '@/components/generation/generation-toolbar';
  import { AgentBar } from '@/components/agent/agent-bar';
  import { useTheme } from '@/lib/hooks/use-theme';
-@@ -217,6 +219,7 @@ function HomePage() {
+@@ -89,6 +92,8 @@ import {
+ } from '@/lib/config/feature-flags';
+ import { useImportPptx } from '@/lib/import/use-import-pptx';
+ import { InteractiveModeButton } from '@/components/generation/interactive-mode-button';
++import { CourseScalePicker } from '@/components/generation/course-scale-picker';
++import type { CourseScale } from '@/lib/types/course-scale';
+ import { ProBadge } from '@/components/workbench/ProBadge';
+ import { arrivedByProSwap, startProSwap } from '@/lib/workbench/pro-swap';
+ import {
+@@ -100,6 +105,7 @@ const log = createLogger('Home');
+ 
+ const RECENT_OPEN_STORAGE_KEY = 'recentClassroomsOpen';
+ const INTERACTIVE_MODE_STORAGE_KEY = 'interactiveModeEnabled';
++const COURSE_SCALE_STORAGE_KEY = 'openmaic:courseScale';
+ 
+ // PPTX import is still scaffolding: `useImportPptx` has no `onImported` consumer
+ // yet, so the flow only logs the parsed slides. Hide the entry point behind a
+@@ -112,6 +118,7 @@ let workbenchRuntimeCache: boolean | null = null;
+ interface FormState {
+   courseMaterials: SelectedCourseMaterial[];
+   requirement: string;
++  courseScale: CourseScale;
+   interactiveMode: boolean;
+   vocationalTestMode: boolean;
+ }
+@@ -119,6 +126,7 @@ interface FormState {
+ const initialFormState: FormState = {
+   courseMaterials: [],
+   requirement: '',
++  courseScale: 'standard',
+   interactiveMode: false,
+   vocationalTestMode: false,
+ };
+@@ -201,6 +209,19 @@ function HomePage() {
+     } catch {
+       /* localStorage unavailable */
+     }
++    try {
++      const savedCourseScale = localStorage.getItem(COURSE_SCALE_STORAGE_KEY) as CourseScale;
++      if (
++        savedCourseScale &&
++        (savedCourseScale === 'micro' ||
++          savedCourseScale === 'standard' ||
++          savedCourseScale === 'thematic')
++      ) {
++        setForm((prev) => ({ ...prev, courseScale: savedCourseScale }));
++      }
++    } catch {
++      /* localStorage unavailable */
++    }
+   }, []);
+ 
+   // Restore requirement draft from localStorage on mount. The previous derived-state
+@@ -217,6 +238,7 @@ function HomePage() {
  
    const [themeOpen, setThemeOpen] = useState(false);
    const [error, setError] = useState<string | null>(null);
@@ -627,7 +1683,24 @@ index 31059149..dd329425 100644
    // True while the Generate click drains upload-time ingests and builds the
    // generation session. Doubles as the guard flag that freezes the course
    // material set for the duration of prep and as the switch that disables the
-@@ -783,26 +786,37 @@ function HomePage() {
+@@ -504,6 +526,8 @@ function HomePage() {
+     try {
+       if (field === 'interactiveMode')
+         localStorage.setItem(INTERACTIVE_MODE_STORAGE_KEY, String(value));
++      if (field === 'courseScale')
++        localStorage.setItem(COURSE_SCALE_STORAGE_KEY, String(value));
+       if (field === 'requirement') updateRequirementCache(value as string);
+     } catch {
+       /* ignore */
+@@ -599,6 +623,7 @@ function HomePage() {
+       const userProfile = useUserProfileStore.getState();
+       const requirements: UserRequirements = {
+         requirement: form.requirement,
++        courseScale: form.courseScale,
+         userNickname: userProfile.nickname || undefined,
+         userBio: userProfile.bio || undefined,
+         // Course-level web search now lives in settings (课程模型配置 → 联网调研)
+@@ -783,26 +808,57 @@ function HomePage() {
            )}
          </div>
  
@@ -658,6 +1731,26 @@ index 31059149..dd329425 100644
 -            <Settings className="w-4 h-4 group-hover:rotate-90 transition-transform duration-500" />
 -          </button>
 -        </div>
++        {/* Batch Studio Button */}
++        <button
++          onClick={() => router.push('/batch-studio')}
++          className="flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium text-amber-600 dark:text-amber-400 bg-amber-500/10 hover:bg-amber-500/20 border border-amber-500/30 transition-all shadow-xs cursor-pointer"
++          title="批量快速制课工坊"
++        >
++          <Sparkles className="w-3.5 h-3.5 text-amber-500" />
++          <span>批量制课</span>
++        </button>
++
++        {/* My Courses Button */}
++        <button
++          onClick={() => router.push('/my-courses')}
++          className="flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium text-indigo-600 dark:text-indigo-400 bg-indigo-500/10 hover:bg-indigo-500/20 border border-indigo-500/30 transition-all shadow-xs cursor-pointer"
++          title="我的课程中心"
++        >
++          <BookOpen className="w-3.5 h-3.5 text-indigo-500" />
++          <span>我的课程</span>
++        </button>
++
 +        {/* User Account Navigation */}
 +        <UserNav onOpenSettings={() => setSettingsOpen(true)} />
        </div>
@@ -682,6 +1775,20 @@ index 31059149..dd329425 100644
  
        {/* ═══ Background Decor ═══ */}
        <div className="absolute inset-0 overflow-hidden pointer-events-none">
+@@ -904,6 +960,13 @@ function HomePage() {
+                 />
+               </div>
+ 
++              {/* Course scale selector */}
++              <CourseScalePicker
++                value={form.courseScale}
++                onChange={(scale) => updateForm('courseScale', scale)}
++                disabled={preparingGenerate}
++              />
++
+               {/* Interactive mode toggle */}
+               <Tooltip>
+                 <TooltipTrigger asChild>
 diff --git a/components/admin/user-management-dialog.tsx b/components/admin/user-management-dialog.tsx
 new file mode 100644
 index 00000000..d481e353
@@ -1514,13 +2621,14 @@ index 00000000..5fe69b5d
 +}
 diff --git a/components/auth/user-nav.tsx b/components/auth/user-nav.tsx
 new file mode 100644
-index 00000000..dc5a9ca1
+index 00000000..5f9dcd7b
 --- /dev/null
 +++ b/components/auth/user-nav.tsx
-@@ -0,0 +1,135 @@
+@@ -0,0 +1,145 @@
 +'use client';
 +
 +import { useEffect, useState } from 'react';
++import { useRouter } from 'next/navigation';
 +import { useAuthStore } from '@/lib/store/auth-store';
 +import { Button } from '@/components/ui/button';
 +import {
@@ -1531,12 +2639,13 @@ index 00000000..dc5a9ca1
 +  DropdownMenuSeparator,
 +  DropdownMenuTrigger,
 +} from '@/components/ui/dropdown-menu';
-+import { LogIn, User as UserIcon, Shield, LogOut, Settings as SettingsIcon } from 'lucide-react';
++import { LogIn, User as UserIcon, Shield, LogOut, Settings as SettingsIcon, BookOpen } from 'lucide-react';
 +import { AuthDialog } from './auth-dialog';
 +import { UserProfileDialog } from './user-profile-dialog';
 +import { UserManagementDialog } from '../admin/user-management-dialog';
 +
 +export function UserNav({ onOpenSettings }: { onOpenSettings?: () => void }) {
++  const router = useRouter();
 +  const [mounted, setMounted] = useState(false);
 +  const { user, checkAuth, setAuthModalOpen, setProfileModalOpen, setAdminModalOpen, logout } = useAuthStore();
 +
@@ -1601,6 +2710,14 @@ index 00000000..dc5a9ca1
 +            </DropdownMenuLabel>
 +
 +            <DropdownMenuSeparator className="my-1" />
++
++            <DropdownMenuItem
++              onClick={() => router.push('/my-courses')}
++              className="rounded-xl py-2 cursor-pointer font-medium text-indigo-600 dark:text-indigo-400 focus:text-indigo-600"
++            >
++              <BookOpen className="w-3.5 h-3.5 mr-2" />
++              我的课程中心
++            </DropdownMenuItem>
 +
 +            <DropdownMenuItem onClick={() => setProfileModalOpen(true)} className="rounded-xl py-2 cursor-pointer">
 +              <UserIcon className="w-3.5 h-3.5 mr-2 text-zinc-500" />
@@ -1888,7 +3005,7 @@ index 00000000..5239f696
 +  );
 +}
 diff --git a/components/settings/index.tsx b/components/settings/index.tsx
-index 4febe100..7f76a15a 100644
+index 617b6f6a..66836cab 100644
 --- a/components/settings/index.tsx
 +++ b/components/settings/index.tsx
 @@ -48,6 +48,7 @@ import {
@@ -1899,15 +3016,15 @@ index 4febe100..7f76a15a 100644
  import { toast } from 'sonner';
  import { type ProviderId } from '@/lib/ai/providers';
  import { PROVIDERS, MONO_LOGO_PROVIDERS } from '@/lib/ai/providers';
-@@ -283,6 +284,7 @@ interface SettingsDialogProps {
+@@ -284,6 +285,7 @@ interface SettingsDialogProps {
  
  export function SettingsDialog({ open, onOpenChange, initialSection }: SettingsDialogProps) {
    const { t } = useI18n();
 +  const isAdmin = useAuthStore((state) => state.user?.role === 'admin');
  
    // Get settings from store
-   const providerId = useSettingsStore((state) => state.providerId);
-@@ -879,6 +881,10 @@ export function SettingsDialog({ open, onOpenChange, initialSection }: SettingsD
+   const _modelId = useSettingsStore((state) => state.modelId);
+@@ -897,6 +899,10 @@ export function SettingsDialog({ open, onOpenChange, initialSection }: SettingsD
      );
    };
  
@@ -2117,6 +3234,27 @@ index 00000000..90d79220
 +    },
 +  ],
 +};
+diff --git a/lib/ai/model-aliases.ts b/lib/ai/model-aliases.ts
+index 2e4122e4..c4a7ca31 100644
+--- a/lib/ai/model-aliases.ts
++++ b/lib/ai/model-aliases.ts
+@@ -1,7 +1,15 @@
+-const MODEL_ID_ALIASES: ReadonlyMap<string, string> = new Map([['openai:gpt-5.6-sol', 'gpt-5.6']]);
++const MODEL_ID_ALIASES: ReadonlyMap<string, string> = new Map([
++  ['openai:gpt-5.6-sol', 'gpt-5.6'],
++  ['openai:gemini-3.7-flash-high', 'gemini-3.8-flash-high'],
++  ['google:gemini-3.7-flash-high', 'gemini-3.8-flash-high'],
++  ['unknown:gemini-3.7-flash-high', 'gemini-3.8-flash-high'],
++]);
+ 
+ /** Resolve aliases used for local catalog, settings, capability, and usage lookups. */
+ export function getCanonicalModelId(providerId: string, modelId: string): string {
++  if (modelId === 'gemini-3.7-flash-high') {
++    return 'gemini-3.8-flash-high';
++  }
+   return MODEL_ID_ALIASES.get(`${providerId}:${modelId}`) ?? modelId;
+ }
+ 
 diff --git a/lib/server/agent-runtime/owner.ts b/lib/server/agent-runtime/owner.ts
 index f582ec1e..2d96848c 100644
 --- a/lib/server/agent-runtime/owner.ts
@@ -2574,15 +3712,120 @@ index 00000000..e347982e
 +  avatar: string;
 +  exp: number;
 +}
+diff --git a/lib/server/provider-config.ts b/lib/server/provider-config.ts
+index 28986cae..0672e9a2 100644
+--- a/lib/server/provider-config.ts
++++ b/lib/server/provider-config.ts
+@@ -15,6 +15,7 @@ import {
+   isQwenVoiceCloneModel,
+   TTS_PROVIDERS,
+ } from '@/lib/audio/constants';
++import { getCanonicalModelId } from '@/lib/ai/model-aliases';
+ 
+ const log = createLogger('ServerProviderConfig');
+ 
+@@ -657,6 +658,33 @@ export function resolveProxy(providerId: string): string | undefined {
+   return getConfig().providers[providerId]?.proxy;
+ }
+ 
++/**
++ * Resolve LLM model for a server-managed provider.
++ * When server configures an allowed model list (e.g. OPENAI_MODELS), ensure the
++ * model is in that allowed list; otherwise fall back to DEFAULT_MODEL or serverModels[0].
++ */
++export function resolveLLMModel(providerId: string, clientModel?: string): string | undefined {
++  const serverModels = getConfig().providers[providerId]?.models;
++  if (serverModels?.length) {
++    if (clientModel && serverModels.includes(clientModel)) return clientModel;
++    if (clientModel) {
++      const canonical = getCanonicalModelId(providerId, clientModel);
++      if (serverModels.includes(canonical)) return canonical;
++    }
++    const defaultModel = process.env.DEFAULT_MODEL;
++    if (defaultModel) {
++      const colonIndex = defaultModel.indexOf(':');
++      const defProvider = colonIndex > 0 ? defaultModel.slice(0, colonIndex) : '';
++      const defModel = colonIndex > 0 ? defaultModel.slice(colonIndex + 1) : defaultModel;
++      if (defProvider === providerId && serverModels.includes(defModel)) {
++        return defModel;
++      }
++    }
++    return serverModels[0];
++  }
++  return clientModel;
++}
++
+ // ---------------------------------------------------------------------------
+ // Public API — TTS
+ // ---------------------------------------------------------------------------
+diff --git a/lib/server/resolve-model.ts b/lib/server/resolve-model.ts
+index d5972f3a..356774b3 100644
+--- a/lib/server/resolve-model.ts
++++ b/lib/server/resolve-model.ts
+@@ -12,6 +12,7 @@ import {
+   isServerConfiguredProvider,
+   resolveApiKey,
+   resolveBaseUrl,
++  resolveLLMModel,
+   resolveProxy,
+ } from '@/lib/server/provider-config';
+ import { validateUrlForSSRF } from '@/lib/server/ssrf-guard';
+@@ -80,7 +81,7 @@ export async function resolveModel(params: {
+   const userRoute = envRoute ? undefined : getUserStageRoute(params.userRoutes ?? {}, params.stage);
+   const stageRoute: UserStageRoute | undefined = envRoute ?? userRoute;
+   const stageModel = stageRoute?.model;
+-  const modelString = stageModel || params.modelString || process.env.DEFAULT_MODEL;
++  let modelString = stageModel || params.modelString || process.env.DEFAULT_MODEL;
+   if (!modelString) {
+     throw new Error(
+       'No model could be resolved. Configure DEFAULT_MODEL (and/or a MODEL_ROUTES entry for this stage), or send a model via x-model.',
+@@ -109,6 +110,18 @@ export async function resolveModel(params: {
+   // public targets, so the hop target is checked regardless of who chose the
+   // origin.
+   const managed = isServerConfiguredProvider('providers', providerId);
++
++  // For server-managed providers, ensure the model is allowed by server config (e.g. OPENAI_MODELS).
++  // If the client sent an obsolete or unconfigured model, gracefully fall back to server's current model.
++  let effectiveModelId = modelId;
++  if (managed) {
++    const validatedModelId = resolveLLMModel(providerId, modelId);
++    if (validatedModelId && validatedModelId !== modelId) {
++      effectiveModelId = validatedModelId;
++      modelString = `${providerId}:${effectiveModelId}`;
++    }
++  }
++
+   const registeredProviderType = getProvider(providerId)?.type;
+   if (
+     clientProviderType &&
+@@ -138,7 +151,7 @@ export async function resolveModel(params: {
+   const proxy = resolveProxy(providerId);
+   const { model, modelInfo } = getModel({
+     providerId,
+-    modelId,
++    modelId: effectiveModelId,
+     apiKey,
+     baseUrl,
+     proxy,
+@@ -164,7 +177,7 @@ export async function resolveModel(params: {
+     modelInfo,
+     modelString,
+     providerId,
+-    modelId,
++    modelId: effectiveModelId,
+     apiKey,
+     baseUrl,
+     thinkingConfig,
 diff --git a/lib/server/ssrf-guard.ts b/lib/server/ssrf-guard.ts
-index 425c5df2..44cab9b0 100644
+index 425c5df2..16aeebbf 100644
 --- a/lib/server/ssrf-guard.ts
 +++ b/lib/server/ssrf-guard.ts
-@@ -160,23 +160,36 @@ function isCloudMetadataAddress(value: string): boolean {
+@@ -160,23 +160,37 @@ function isCloudMetadataAddress(value: string): boolean {
   * IP-literal URL (for which Node never runs `connect.lookup`) and a hostname
   * that resolves into the same range get the same decision.
   */
 +function isFakeIp(canonical: string): boolean {
++  if (process.env.ALLOW_FAKE_IP !== 'true') return false;
 +  try {
 +    const parsed = ipaddr.parse(canonical);
 +    if (parsed.kind() === 'ipv4') {
@@ -2776,8 +4019,284 @@ index 00000000..d429cd58
 +    }
 +  )
 +);
+diff --git a/lib/store/settings.ts b/lib/store/settings.ts
+index d26e71e4..87e4efc5 100644
+--- a/lib/store/settings.ts
++++ b/lib/store/settings.ts
+@@ -12,7 +12,7 @@ import { persist } from 'zustand/middleware';
+ import type { ProviderId } from '@/lib/ai/providers';
+ import type { ProvidersConfig } from '@/lib/types/settings';
+ import { PROVIDERS } from '@/lib/ai/providers';
+-import { findModelById, getCanonicalModelId } from '@/lib/ai/model-aliases';
++import { findModelById, getCanonicalModelId, modelIdsMatch } from '@/lib/ai/model-aliases';
+ import type { ThinkingConfig } from '@/lib/types/provider';
+ import { getThinkingConfigKey, supportsConfigurableThinking } from '@/lib/ai/thinking-config';
+ import { getCatalogThinkingCapability } from '@/lib/ai/model-metadata';
+@@ -118,21 +118,58 @@ function pruneUnusableStageRoutes(
+ }
+ 
+ /**
+- * Stage routes that are operator-only and can never take effect from the
+- * client-side Course Model Config UI. `maic-agent-driver` is resolved
+- * exclusively from the operator's MODEL_ROUTES (with an explicit api dialect
+- * and contextWindow) in agent-runtime/agent-driver-model.ts, so a persisted
+- * user route for it is dead weight. Drop any leftover entry; returns null when
+- * nothing changed so callers can skip the write.
++ * Prune stage routes that are operator-only or point to models no longer available
++ * on the configured provider. If an operator updates environment models (e.g. from
++ * 3.7 to 3.8, or in the future to 4.0), stale stage routes are automatically purged
++ * so the stages seamlessly fall back to following the current mainline model.
+  */
+-function pruneOperatorOnlyStageRoutes(
++export function pruneInvalidStageRoutes(
+   routes: SettingsState['llmStageRoutes'] | undefined,
++  providersConfig: ProvidersConfig | undefined,
+ ): SettingsState['llmStageRoutes'] | null {
+-  if (!routes || !('maic-agent-driver' in routes)) return null;
+-  const { 'maic-agent-driver': _retired, ...rest } = routes;
+-  return rest;
++  if (!routes) return null;
++  let changed = false;
++  const filtered: SettingsState['llmStageRoutes'] = {};
++
++  for (const [stage, selection] of Object.entries(routes)) {
++    if (!selection) {
++      changed = true;
++      continue;
++    }
++    // Operator-only stage: cannot be user-routed
++    if (stage === 'maic-agent-driver') {
++      changed = true;
++      continue;
++    }
++    const provider = providersConfig?.[selection.providerId];
++    // Provider disabled or removed
++    if (!provider || provider.enabled === false) {
++      changed = true;
++      continue;
++    }
++
++    // Check if the selected model is still in the provider's allowed models list
++    const available = provider.models ?? [];
++    if (available.length > 0) {
++      const isAvailable = available.some(
++        (m) =>
++          m.id === selection.modelId ||
++          modelIdsMatch(selection.providerId, m.id, selection.modelId),
++      );
++      if (!isAvailable) {
++        changed = true;
++        continue;
++      }
++    }
++
++    filtered[stage] = selection;
++  }
++
++  return changed ? filtered : null;
+ }
+ 
++export const pruneOperatorOnlyStageRoutes = pruneInvalidStageRoutes;
++
+ function pruneThinkingConfigs(
+   thinkingConfigs: Record<string, ThinkingConfig> | undefined,
+   providersConfig: ProvidersConfig | undefined,
+@@ -1071,6 +1108,76 @@ function stripLegacyServerBaseUrl(state: Partial<SettingsState>): void {
+   }
+ }
+ 
++/**
++ * Automatically migrate legacy model references (e.g. gemini-3.7-flash-high -> gemini-3.8-flash-high).
++ * Ensures old client-side persisted state doesn't keep calling deprecated models.
++ */
++export function migrateLegacyModelIds(state: Partial<SettingsState>): void {
++  if (state.modelId === 'gemini-3.7-flash-high') {
++    state.modelId = 'gemini-3.8-flash-high';
++  }
++
++  if (state.llmStageRoutes) {
++    const updatedRoutes: typeof state.llmStageRoutes = { ...state.llmStageRoutes };
++    let changed = false;
++    for (const [stage, route] of Object.entries(updatedRoutes)) {
++      if (route && route.modelId === 'gemini-3.7-flash-high') {
++        updatedRoutes[stage] = { ...route, modelId: 'gemini-3.8-flash-high' };
++        changed = true;
++      }
++    }
++    if (changed) {
++      state.llmStageRoutes = updatedRoutes;
++    }
++  }
++
++  if (state.providersConfig) {
++    for (const providerCfg of Object.values(state.providersConfig)) {
++      if (providerCfg && Array.isArray(providerCfg.models)) {
++        let changed = false;
++        const newModels = providerCfg.models.map((m) => {
++          if (m.id === 'gemini-3.7-flash-high') {
++            changed = true;
++            return {
++              ...m,
++              id: 'gemini-3.8-flash-high',
++              name:
++                m.name === 'gemini-3.7-flash-high'
++                  ? 'gemini-3.8-flash-high'
++                  : m.name.replace(/3\.7/g, '3.8'),
++            };
++          }
++          return m;
++        });
++        if (changed) {
++          const seen = new Set<string>();
++          providerCfg.models = newModels.filter((m) => {
++            if (seen.has(m.id)) return false;
++            seen.add(m.id);
++            return true;
++          });
++        }
++      }
++    }
++  }
++
++  if (state.thinkingConfigs) {
++    const updatedThinking = { ...state.thinkingConfigs };
++    let changed = false;
++    for (const [key, val] of Object.entries(updatedThinking)) {
++      if (key.includes('gemini-3.7-flash-high')) {
++        const newKey = key.replace(/gemini-3\.7-flash-high/g, 'gemini-3.8-flash-high');
++        delete updatedThinking[key];
++        updatedThinking[newKey] = val;
++        changed = true;
++      }
++    }
++    if (changed) {
++      state.thinkingConfigs = updatedThinking;
++    }
++  }
++}
++
+ export const useSettingsStore = create<SettingsState>()(
+   persist(
+     (set, get) => {
+@@ -2178,10 +2285,14 @@ export const useSettingsStore = create<SettingsState>()(
+               // (LLM first-load auto-select removed: the symmetric provider
+               // recovery + resolveSelectedModel above now resolve LLM provider
+               // and model atomically at the source, covering server-configured
+-              // AND client-API-key providers — see #580.)
++              const prunedStageRoutes = pruneInvalidStageRoutes(
++                state.llmStageRoutes,
++                newProvidersConfig,
++              );
+ 
+               return {
+                 providersConfig: newProvidersConfig,
++                ...(prunedStageRoutes ? { llmStageRoutes: prunedStageRoutes } : {}),
+                 ttsProvidersConfig: newTTSConfig,
+                 asrProvidersConfig: newASRConfig,
+                 pdfProvidersConfig: newPDFConfig,
+@@ -2494,9 +2605,10 @@ export const useSettingsStore = create<SettingsState>()(
+         ensureValidProviderSelections(state);
+         ensureBuiltInAudioProviders(state);
+         ensureBuiltInWebSearchProviders(state);
++        migrateLegacyModelIds(state);
+         state.thinkingConfigs = pruneThinkingConfigs(state.thinkingConfigs, state.providersConfig);
+-        const prunedOperatorOnly = pruneOperatorOnlyStageRoutes(state.llmStageRoutes);
+-        if (prunedOperatorOnly) state.llmStageRoutes = prunedOperatorOnly;
++        const prunedInvalid = pruneInvalidStageRoutes(state.llmStageRoutes, state.providersConfig);
++        if (prunedInvalid) state.llmStageRoutes = prunedInvalid;
+ 
+         return state;
+       },
+@@ -2537,13 +2649,17 @@ export const useSettingsStore = create<SettingsState>()(
+         ensureBuiltInWebSearchProviders(merged as Partial<SettingsState>);
+         ensureValidProviderSelections(merged as Partial<SettingsState>);
+         stripLegacyServerBaseUrl(merged as Partial<SettingsState>);
++        migrateLegacyModelIds(merged as Partial<SettingsState>);
+         const typedMerged = merged as Partial<SettingsState>;
+         typedMerged.thinkingConfigs = pruneThinkingConfigs(
+           typedMerged.thinkingConfigs,
+           typedMerged.providersConfig,
+         );
+-        const prunedOperatorOnly = pruneOperatorOnlyStageRoutes(typedMerged.llmStageRoutes);
+-        if (prunedOperatorOnly) typedMerged.llmStageRoutes = prunedOperatorOnly;
++        const prunedInvalid = pruneInvalidStageRoutes(
++          typedMerged.llmStageRoutes,
++          typedMerged.providersConfig,
++        );
++        if (prunedInvalid) typedMerged.llmStageRoutes = prunedInvalid;
+         return merged as SettingsState;
+       },
+     },
+diff --git a/lib/utils/model-config.ts b/lib/utils/model-config.ts
+index 1818c25f..9132d395 100644
+--- a/lib/utils/model-config.ts
++++ b/lib/utils/model-config.ts
+@@ -5,7 +5,7 @@ import {
+   normalizeThinkingConfig,
+   supportsConfigurableThinking,
+ } from '@/lib/ai/thinking-config';
+-import { findModelById } from '@/lib/ai/model-aliases';
++import { findModelById, modelIdsMatch } from '@/lib/ai/model-aliases';
+ import { getCatalogThinkingCapability } from '@/lib/ai/model-metadata';
+ 
+ /**
+@@ -13,20 +13,29 @@ import { getCatalogThinkingCapability } from '@/lib/ai/model-metadata';
+  */
+ export function getCurrentModelConfig() {
+   const { providerId, modelId, providersConfig, thinkingConfigs } = useSettingsStore.getState();
+-  const modelString = `${providerId}:${modelId}`;
++  const providerConfig = providersConfig[providerId];
++  const availableModels = providerConfig?.models ?? [];
++  const effectiveModelId =
++    availableModels.length > 0 &&
++    !availableModels.some((m) => m.id === modelId || modelIdsMatch(providerId, m.id, modelId))
++      ? availableModels[0]?.id || modelId
++      : modelId;
++  const modelString = `${providerId}:${effectiveModelId}`;
+ 
+   // Get current provider's config
+-  const providerConfig = providersConfig[providerId];
+-  const modelInfo = findModelById(providerId, providerConfig?.models, modelId);
++  const modelInfo = findModelById(providerId, providerConfig?.models, effectiveModelId);
+   const thinking =
+-    modelInfo?.capabilities?.thinking ?? getCatalogThinkingCapability(providerId, modelId);
++    modelInfo?.capabilities?.thinking ?? getCatalogThinkingCapability(providerId, effectiveModelId);
+   const thinkingConfig = supportsConfigurableThinking(thinking)
+-    ? normalizeThinkingConfig(thinking, thinkingConfigs[getThinkingConfigKey(providerId, modelId)])
++    ? normalizeThinkingConfig(
++        thinking,
++        thinkingConfigs[getThinkingConfigKey(providerId, effectiveModelId)],
++      )
+     : undefined;
+ 
+   return {
+     providerId,
+-    modelId,
++    modelId: effectiveModelId,
+     modelString,
+     apiKey: providerConfig?.apiKey || '',
+     baseUrl: providerConfig?.baseUrl || '',
+@@ -58,6 +67,18 @@ export function getStageRoutesHeaderValue(): string | undefined {
+     // a route onto an unusable provider would make the server fail that stage
+     // instead of falling back to the main model, so it is dropped here.
+     if (!config || config.enabled === false || !isLLMProviderConfigured(config)) continue;
++
++    // Check if the selected model still exists in available models for this provider
++    const availableModels = config.models ?? [];
++    if (availableModels.length > 0) {
++      const isModelValid = availableModels.some(
++        (m) =>
++          m.id === selection.modelId ||
++          modelIdsMatch(selection.providerId, m.id, selection.modelId),
++      );
++      if (!isModelValid) continue; // Model is obsolete or no longer exists; skip sending stale route!
++    }
++
+     routes[stage] = {
+       model: `${selection.providerId}:${selection.modelId}`,
+       apiKey: config?.apiKey || undefined,
 diff --git a/lib/utils/stage-storage.ts b/lib/utils/stage-storage.ts
-index e7b54322..22635cea 100644
+index e7b54322..6be4a2e9 100644
 --- a/lib/utils/stage-storage.ts
 +++ b/lib/utils/stage-storage.ts
 @@ -29,6 +29,7 @@ import {
@@ -2916,63 +4435,20 @@ index e7b54322..22635cea 100644
              releaseCaller(undefined);
              // The public deletion remains bounded, but this callback deliberately
              // retains the exclusive lock until a late runtime cascade can no longer
-@@ -786,12 +882,17 @@ async function listOwnerStagesFromServer(): Promise<StageListItem[]> {
-  */
+@@ -787,11 +883,9 @@ async function listOwnerStagesFromServer(): Promise<StageListItem[]> {
  export async function listStages(): Promise<StageListItem[]> {
    try {
-+    let serverStages: StageListItem[] = [];
-+    try {
-+      serverStages = await listOwnerStagesFromServer();
-+    } catch {
-+      // Server persistence unavailable or network unreachable
-+    }
-+
      if (isBrowserPersistenceEnabled()) {
 -      // Server persistence is on: the generic document listing answers 403 by
 -      // design, so the home/workspace library lists through the owner-scoped
 -      // workbench surface instead.
--      return await listOwnerStagesFromServer();
-+      return serverStages;
+       return await listOwnerStagesFromServer();
      }
 +
      const summaries = await getDocumentStore().listDocuments();
      const ids = new Set(summaries.map((summary) => summary.id));
      const legacy = await getLegacyDocumentStore().listStages();
-@@ -807,7 +908,7 @@ export async function listStages(): Promise<StageListItem[]> {
-     // not in the DocumentStore; join it in so callers can group courses.
-     const memberships = await db.stageFolders.toArray();
-     const folderByStage = new Map(memberships.map((m) => [m.stageId, m.folderId]));
--    return [
-+    const localStages = [
-       ...summaries,
-       ...legacyOnly
-         .filter((stage) => stage !== null)
-@@ -821,11 +922,19 @@ export async function listStages(): Promise<StageListItem[]> {
-           interactiveMode: stage.interactiveMode,
-           taskEngineMode: stage.taskEngineMode,
-         })),
--    ]
--      .map((item) =>
--        folderByStage.get(item.id) ? { ...item, folderId: folderByStage.get(item.id) } : item,
--      )
--      .sort((a, b) => b.updatedAt - a.updatedAt);
-+    ].map((item) =>
-+      folderByStage.get(item.id) ? { ...item, folderId: folderByStage.get(item.id) } : item,
-+    );
-+
-+    const localIds = new Set(localStages.map((s) => s.id));
-+    const combined = [...localStages];
-+    for (const serverStage of serverStages) {
-+      if (!localIds.has(serverStage.id)) {
-+        combined.push(serverStage);
-+      }
-+    }
-+
-+    return combined.sort((a, b) => b.updatedAt - a.updatedAt);
-   } catch (error) {
-     log.error('Failed to list stages:', error);
-     throw error;
-@@ -926,7 +1035,13 @@ export async function getFirstSlideByStages(
+@@ -926,7 +1020,13 @@ export async function getFirstSlideByStages(
    try {
      await Promise.all(
        stageIds.map(async (stageId) => {
@@ -2987,7 +4463,7 @@ index e7b54322..22635cea 100644
          const firstSlide = document?.scenes.find((s) => s.content?.type === 'slide');
          if (firstSlide && firstSlide.content.type === 'slide') {
            const slide = structuredClone(firstSlide.content.canvas);
-@@ -1090,10 +1205,20 @@ export async function getFirstSlideByStages(
+@@ -1090,10 +1190,20 @@ export async function getFirstSlideByStages(
   */
  export async function renameStage(stageId: string, newName: string): Promise<void> {
    try {
@@ -3012,7 +4488,7 @@ index e7b54322..22635cea 100644
      log.info(`Renamed stage ${stageId} to "${newName}"`);
    } catch (error) {
      log.error('Failed to rename stage:', error);
-@@ -1108,7 +1233,12 @@ export async function stageExists(stageId: string): Promise<boolean> {
+@@ -1108,7 +1218,12 @@ export async function stageExists(stageId: string): Promise<boolean> {
    try {
      const summaries = await getDocumentStore().listDocuments();
      if (summaries.some((stage) => stage.id === stageId)) return true;
@@ -3026,33 +4502,19 @@ index e7b54322..22635cea 100644
    } catch (error) {
      log.error('Failed to check stage existence:', error);
      return false;
-@@ -1192,11 +1322,31 @@ async function listOwnerFoldersFromServer(): Promise<FolderRecord[]> {
+@@ -1192,11 +1307,17 @@ async function listOwnerFoldersFromServer(): Promise<FolderRecord[]> {
   * List all folders, ordered by their `order` field (ascending).
   */
  export async function listFolders(): Promise<FolderRecord[]> {
 -  if (isBrowserPersistenceEnabled()) {
 -    return await listOwnerFoldersFromServer();
 +  try {
-+    let serverFolders: FolderRecord[] = [];
-+    try {
-+      serverFolders = await listOwnerFoldersFromServer();
-+    } catch {
-+      // offline or server unconfigured
-+    }
-+
 +    if (isBrowserPersistenceEnabled()) {
-+      return serverFolders;
++      return await listOwnerFoldersFromServer();
 +    }
 +
 +    const localFolders = await db.folders.toArray();
-+    const localIds = new Set(localFolders.map((f) => f.id));
-+    const combined = [...localFolders];
-+    for (const sf of serverFolders) {
-+      if (!localIds.has(sf.id)) {
-+        combined.push(sf);
-+      }
-+    }
-+    return combined.sort((a, b) => a.order - b.order);
++    return localFolders.sort((a, b) => a.order - b.order);
 +  } catch (error) {
 +    log.error('Failed to list folders:', error);
 +    throw error;
@@ -3062,7 +4524,7 @@ index e7b54322..22635cea 100644
  }
  
  /** Validate a folder name against the width rule and (optionally) duplicates. */
-@@ -1248,24 +1398,26 @@ export async function createFolder(name: string): Promise<FolderRecord> {
+@@ -1248,24 +1369,26 @@ export async function createFolder(name: string): Promise<FolderRecord> {
      return await createOwnerFolderFromServer(name);
    }
    const now = Date.now();
@@ -3094,7 +4556,7 @@ index e7b54322..22635cea 100644
  }
  
  /** PG mode: rename a folder through the owner-scoped route. */
-@@ -1300,6 +1452,7 @@ export async function renameFolder(id: string, name: string): Promise<void> {
+@@ -1300,6 +1423,7 @@ export async function renameFolder(id: string, name: string): Promise<void> {
      await db.folders.put({ ...folder, name: name.trim(), updatedAt: now });
      log.info(`Renamed folder ${id} to "${name}"`);
    });
@@ -3102,7 +4564,7 @@ index e7b54322..22635cea 100644
  }
  
  export type DeleteFolderMode = 'ungroup' | 'remove';
-@@ -1340,6 +1493,7 @@ export async function deleteFolder(id: string, mode: DeleteFolderMode = 'ungroup
+@@ -1340,6 +1464,7 @@ export async function deleteFolder(id: string, mode: DeleteFolderMode = 'ungroup
      await deleteOwnerFolderFromServer(id, mode);
      return;
    }
@@ -3189,6 +4651,21 @@ index 00000000..104eb0c7
 +}
 +
 +main();
+diff --git a/tests/ai/model-aliases.test.ts b/tests/ai/model-aliases.test.ts
+index 02646826..e133e816 100644
+--- a/tests/ai/model-aliases.test.ts
++++ b/tests/ai/model-aliases.test.ts
+@@ -23,4 +23,10 @@ describe('model aliases', () => {
+     expect(findModelById('openai', models, 'gpt-5.6-sol')).toBe(models[1]);
+     expect(findModelById('openrouter', [models[1]], 'gpt-5.6-sol')).toBeUndefined();
+   });
++
++  it('canonicalizes gemini-3.7-flash-high to gemini-3.8-flash-high', () => {
++    expect(getCanonicalModelId('openai', 'gemini-3.7-flash-high')).toBe('gemini-3.8-flash-high');
++    expect(getCanonicalModelId('google', 'gemini-3.7-flash-high')).toBe('gemini-3.8-flash-high');
++    expect(getCanonicalModelId('unknown', 'gemini-3.7-flash-high')).toBe('gemini-3.8-flash-high');
++  });
+ });
 diff --git a/tests/auth/auth-crypto.test.ts b/tests/auth/auth-crypto.test.ts
 new file mode 100644
 index 00000000..be7682fa
@@ -3251,5 +4728,231 @@ index 00000000..be7682fa
 +    // Expired token (expires in -1 second)
 +    const expiredToken = signToken(payload, -1);
 +    expect(verifyToken(expiredToken)).toBeNull();
++  });
++});
+diff --git a/tests/server/provider-config.test.ts b/tests/server/provider-config.test.ts
+index 863e89d9..fb7ad94a 100644
+--- a/tests/server/provider-config.test.ts
++++ b/tests/server/provider-config.test.ts
+@@ -626,6 +626,18 @@ pdf:
+       expect(resolveImageModel('seedream')).toBe('model-a');
+     });
+ 
++    it('allowlists the client LLM model against <PREFIX>_MODELS and falls back when obsolete', async () => {
++      vi.stubEnv('OPENAI_API_KEY', 'sk-test');
++      vi.stubEnv('OPENAI_MODELS', 'gemini-3.8-flash-high,claude-sonnet-4');
++      vi.stubEnv('DEFAULT_MODEL', 'openai:gemini-3.8-flash-high');
++      const { resolveLLMModel } = await import('@/lib/server/provider-config');
++      // Allowed client model
++      expect(resolveLLMModel('openai', 'claude-sonnet-4')).toBe('claude-sonnet-4');
++      // Obsolete / unlisted model falls back to DEFAULT_MODEL
++      expect(resolveLLMModel('openai', 'gemini-3.7-flash-high')).toBe('gemini-3.8-flash-high');
++      expect(resolveLLMModel('openai', 'some-nonexistent-model')).toBe('gemini-3.8-flash-high');
++    });
++
+     it('lets the client image model win when nothing is pinned server-side', async () => {
+       const { resolveImageModel } = await import('@/lib/server/provider-config');
+       expect(resolveImageModel('seedream', 'client-model')).toBe('client-model');
+diff --git a/tests/server/provider-redirect-wiring.test.ts b/tests/server/provider-redirect-wiring.test.ts
+index 2e3b2fc4..fffa03c6 100644
+--- a/tests/server/provider-redirect-wiring.test.ts
++++ b/tests/server/provider-redirect-wiring.test.ts
+@@ -26,6 +26,7 @@ vi.mock('@/lib/server/provider-config', () => ({
+   isServerConfiguredProvider: () => mocks.serverManaged,
+   resolveApiKey: (_id: string, clientKey: string) => clientKey || 'server-key',
+   resolveBaseUrl: (_id: string, clientBaseUrl?: string) => clientBaseUrl,
++  resolveLLMModel: (_id: string, modelId?: string) => modelId,
+   resolveProxy: () => undefined,
+ }));
+ 
+diff --git a/tests/server/resolve-model.test.ts b/tests/server/resolve-model.test.ts
+index 5217b880..2ea3097d 100644
+--- a/tests/server/resolve-model.test.ts
++++ b/tests/server/resolve-model.test.ts
+@@ -12,6 +12,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
+ const mocks = vi.hoisted(() => ({
+   getModelCalls: [] as Array<Record<string, unknown>>,
+   serverManaged: false,
++  serverAllowedModels: undefined as string[] | undefined,
+ }));
+ 
+ vi.mock('@/lib/ai/providers', async (importOriginal) => {
+@@ -30,6 +31,14 @@ vi.mock('@/lib/server/provider-config', () => ({
+   resolveApiKey: (_id: string, clientKey: string) => clientKey || 'server-key',
+   resolveBaseUrl: (_id: string, clientBaseUrl?: string) => clientBaseUrl,
+   resolveProxy: () => undefined,
++  resolveLLMModel: (_id: string, clientModel?: string) => {
++    if (mocks.serverAllowedModels && clientModel) {
++      if (!mocks.serverAllowedModels.includes(clientModel)) {
++        return mocks.serverAllowedModels[0];
++      }
++    }
++    return clientModel;
++  },
+ }));
+ 
+ vi.mock('@/lib/server/ssrf-guard', () => ({
+@@ -41,6 +50,7 @@ describe('resolveModel — per-stage resolution order', () => {
+     vi.resetModules();
+     mocks.getModelCalls.length = 0;
+     mocks.serverManaged = false;
++    mocks.serverAllowedModels = undefined;
+     delete process.env.MODEL_ROUTES;
+     delete process.env.DEFAULT_MODEL;
+   });
+@@ -313,4 +323,40 @@ describe('resolveModel — per-stage resolution order', () => {
+     expect(call.baseUrl).toBe('https://user.example/v1');
+     expect(call.apiKey).toBe('user-anthropic-key');
+   });
++
++  it('dynamically falls back to server allowed model when client requests an obsolete/unsupported model', async () => {
++    mocks.serverManaged = true;
++    mocks.serverAllowedModels = ['gemini-3.8-flash-high', 'claude-sonnet-4'];
++    const { resolveModel } = await import('@/lib/server/resolve-model');
++    const r1 = await resolveModel({
++      stage: 'scene-content',
++      modelString: 'openai:gemini-3.7-flash-high',
++    });
++    expect(r1.modelId).toBe('gemini-3.8-flash-high');
++    expect(r1.modelString).toBe('openai:gemini-3.8-flash-high');
++
++    const r2 = await resolveModel({
++      stage: 'scene-actions',
++      userRoutes: {
++        'scene-actions': {
++          model: 'openai:gemini-3.7-flash-high',
++        },
++      },
++    });
++    expect(r2.modelId).toBe('gemini-3.8-flash-high');
++    expect(r2.modelString).toBe('openai:gemini-3.8-flash-high');
++
++    // Also works when future model transitions happen (e.g. 3.8 retired, 4.0 added)
++    mocks.serverAllowedModels = ['gemini-4.0-flash', 'claude-sonnet-4'];
++    const r3 = await resolveModel({
++      stage: 'scene-actions',
++      userRoutes: {
++        'scene-actions': {
++          model: 'openai:gemini-3.8-flash-high',
++        },
++      },
++    });
++    expect(r3.modelId).toBe('gemini-4.0-flash');
++    expect(r3.modelString).toBe('openai:gemini-4.0-flash');
++  });
+ });
+diff --git a/tests/store/settings-legacy-model-migration.test.ts b/tests/store/settings-legacy-model-migration.test.ts
+new file mode 100644
+index 00000000..d4ee312a
+--- /dev/null
++++ b/tests/store/settings-legacy-model-migration.test.ts
+@@ -0,0 +1,109 @@
++import { describe, expect, it } from 'vitest';
++import { migrateLegacyModelIds, type SettingsState } from '@/lib/store/settings';
++
++describe('migrateLegacyModelIds', () => {
++  it('migrates main modelId from gemini-3.7-flash-high to gemini-3.8-flash-high', () => {
++    const state: Partial<SettingsState> = {
++      modelId: 'gemini-3.7-flash-high',
++    };
++    migrateLegacyModelIds(state);
++    expect(state.modelId).toBe('gemini-3.8-flash-high');
++  });
++
++  it('migrates stage routes from gemini-3.7-flash-high to gemini-3.8-flash-high', () => {
++    const state: Partial<SettingsState> = {
++      llmStageRoutes: {
++        'scene-content': { providerId: 'openai', modelId: 'gemini-3.7-flash-high' },
++        'scene-actions': { providerId: 'openai', modelId: 'gemini-3.7-flash-high' },
++        'quiz-grade': { providerId: 'openai', modelId: 'gpt-4o' },
++      },
++    };
++    migrateLegacyModelIds(state);
++    expect(state.llmStageRoutes?.['scene-content']?.modelId).toBe('gemini-3.8-flash-high');
++    expect(state.llmStageRoutes?.['scene-actions']?.modelId).toBe('gemini-3.8-flash-high');
++    expect(state.llmStageRoutes?.['quiz-grade']?.modelId).toBe('gpt-4o');
++  });
++
++  it('migrates provider models', () => {
++    const state = {
++      providersConfig: {
++        openai: {
++          apiKey: 'key',
++          baseUrl: 'url',
++          name: 'OpenAI',
++          type: 'openai',
++          requiresApiKey: true,
++          isBuiltIn: true,
++          models: [
++            { id: 'gemini-3.7-flash-high', name: 'gemini-3.7-flash-high' },
++            { id: 'other-model', name: 'Other Model' },
++          ],
++        },
++      },
++    } as unknown as Partial<SettingsState>;
++    migrateLegacyModelIds(state);
++    expect(state.providersConfig?.openai.models).toEqual([
++      { id: 'gemini-3.8-flash-high', name: 'gemini-3.8-flash-high' },
++      { id: 'other-model', name: 'Other Model' },
++    ]);
++  });
++
++  it('migrates thinkingConfigs keys', () => {
++    const state: Partial<SettingsState> = {
++      thinkingConfigs: {
++        'openai:gemini-3.7-flash-high': { enabled: true, level: 'high' },
++        'openai:gpt-5': { enabled: false },
++      },
++    };
++    migrateLegacyModelIds(state);
++    expect(state.thinkingConfigs?.['openai:gemini-3.8-flash-high']).toEqual({
++      enabled: true,
++      level: 'high',
++    });
++    expect(state.thinkingConfigs?.['openai:gemini-3.7-flash-high']).toBeUndefined();
++    expect(state.thinkingConfigs?.['openai:gpt-5']).toEqual({ enabled: false });
++  });
++});
++
++describe('pruneInvalidStageRoutes', () => {
++  it('dynamically prunes stage routes whose model is no longer available in the provider', async () => {
++    const { pruneInvalidStageRoutes } = await import('@/lib/store/settings');
++    const providersConfig = {
++      openai: {
++        models: [
++          { id: 'gemini-4.0-flash', name: 'Gemini 4.0' },
++          { id: 'claude-sonnet-4', name: 'Claude Sonnet 4' },
++        ],
++        enabled: true,
++      },
++    } as never;
++
++    const routes = {
++      'scene-content': { providerId: 'openai' as never, modelId: 'gemini-3.8-flash-high' }, // obsolete model
++      'scene-actions': { providerId: 'openai' as never, modelId: 'gemini-4.0-flash' }, // valid model
++      'maic-agent-driver': { providerId: 'openai' as never, modelId: 'gemini-4.0-flash' }, // operator only
++    };
++
++    const pruned = pruneInvalidStageRoutes(routes, providersConfig);
++    expect(pruned).toEqual({
++      'scene-actions': { providerId: 'openai', modelId: 'gemini-4.0-flash' },
++    });
++  });
++
++  it('keeps valid routes and returns null when nothing changed', async () => {
++    const { pruneInvalidStageRoutes } = await import('@/lib/store/settings');
++    const providersConfig = {
++      openai: {
++        models: [{ id: 'gemini-4.0-flash', name: 'Gemini 4.0' }],
++        enabled: true,
++      },
++    } as never;
++
++    const routes = {
++      'scene-actions': { providerId: 'openai' as never, modelId: 'gemini-4.0-flash' },
++    };
++
++    const pruned = pruneInvalidStageRoutes(routes, providersConfig);
++    expect(pruned).toBeNull();
 +  });
 +});

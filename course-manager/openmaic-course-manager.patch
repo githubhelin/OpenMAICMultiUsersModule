@@ -1,0 +1,1232 @@
+diff --git a/app/api/classroom/route.ts b/app/api/classroom/route.ts
+index 3cbf7790..29940834 100644
+--- a/app/api/classroom/route.ts
++++ b/app/api/classroom/route.ts
+@@ -9,9 +9,17 @@ import {
+   isValidClassroomId,
+   persistClassroom,
+   readClassroom,
++  type PersistedClassroomData,
+ } from '@/lib/server/classroom-storage';
+ import { sanitizeSceneContent } from '@/lib/server/sanitize-scene-content';
+ import { createLogger } from '@/lib/logger';
++import { isServerPersistenceConfigured } from '@/lib/config/feature-flags';
++import { resolveStageAccess } from '@/lib/server/stage-access';
++import { getServerPersistenceProvider } from '@/lib/persistence/server-provider';
++import { getSessionPayload } from '@/lib/server/auth/session';
++import { resolveRequestOwnerId } from '@/lib/server/agent-runtime/owner';
++import { getOwnerScopedDocumentStore } from '@/lib/server/agent-runtime/owner-scoped-documents';
++import type { Stage, Scene } from '@/lib/types/stage';
+ 
+ const log = createLogger('Classroom API');
+ 
+@@ -113,6 +121,24 @@ export async function POST(request: NextRequest) {
+       return apiError(API_ERROR_CODES.INVALID_REQUEST, 409, 'Classroom id collision');
+     }
+ 
++    if (isServerPersistenceConfigured()) {
++      try {
++        const session = getSessionPayload(request);
++        const ownerId =
++          session && session.userId
++            ? `user:${session.userId}`
++            : resolveRequestOwnerId(request, new Headers());
++        const store = await getOwnerScopedDocumentStore(ownerId);
++        await store.saveDocument({
++          stage: { ...safeStage, id: persisted.id },
++          scenes: safeScenes.map((scene) => ({ ...scene, stageId: persisted.id })),
++        });
++        log.info(`Classroom ${persisted.id} also synced to owner store (${ownerId})`);
++      } catch (dbError) {
++        log.warn(`Classroom ${persisted.id} failed to sync to owner store:`, dbError);
++      }
++    }
++
+     return apiSuccess({ id: persisted.id, url: persisted.url }, 201);
+   } catch (error) {
+     log.error(
+@@ -144,7 +170,28 @@ export async function GET(request: NextRequest) {
+       return apiError(API_ERROR_CODES.INVALID_REQUEST, 400, 'Invalid classroom id');
+     }
+ 
+-    const classroom = await readClassroom(id);
++    let classroom: PersistedClassroomData | null = await readClassroom(id);
++    if (!classroom && isServerPersistenceConfigured()) {
++      try {
++        const access = await resolveStageAccess(id);
++        if (access?.deletedAt) {
++          return apiError(API_ERROR_CODES.INVALID_REQUEST, 404, 'Classroom not found');
++        }
++        const provider = await getServerPersistenceProvider(process.env.DATABASE_URL ?? '');
++        const doc = await provider.documentStore.loadDocument(id);
++        if (doc && doc.stage) {
++          classroom = {
++            id: doc.stage.id,
++            stage: doc.stage as unknown as Stage,
++            scenes: (doc.scenes || []) as unknown as Scene[],
++            createdAt: new Date(doc.stage.createdAt || Date.now()).toISOString(),
++          };
++        }
++      } catch (dbError) {
++        log.warn(`Database fallback for classroom [id=${id}] failed:`, dbError);
++      }
++    }
++
+     if (!classroom) {
+       return apiError(API_ERROR_CODES.INVALID_REQUEST, 404, 'Classroom not found');
+     }
+diff --git a/app/api/stages/[id]/route.ts b/app/api/stages/[id]/route.ts
+index 6bc07e84..23682901 100644
+--- a/app/api/stages/[id]/route.ts
++++ b/app/api/stages/[id]/route.ts
+@@ -27,6 +27,8 @@ import { getOwnerScopedDocumentStore } from '@/lib/server/agent-runtime/owner-sc
+ import { ownerApiError, ownerJson, ownerNotFound } from '@/lib/server/agent-runtime/route-response';
+ import { withRequestOwnerId } from '@/lib/server/agent-runtime/with-owner';
+ import { STAGE_NAME_MAX_LENGTH } from '@/lib/server/agent-runtime/stage-limits';
++import { getSessionPayload } from '@/lib/server/auth/session';
++import { getServerPersistenceProvider } from '@/lib/persistence/server-provider';
+ 
+ export const runtime = 'nodejs';
+ 
+@@ -180,10 +182,26 @@ export async function PUT(req: NextRequest, { params }: Params) {
+ export async function DELETE(req: NextRequest, { params }: Params) {
+   if (!isAgentRuntimeConfigured()) return new Response('Not found', { status: 404 });
+ 
++  const session = getSessionPayload(req);
++  const isAdmin = session?.role === 'admin';
++
+   return withRequestOwnerId(req, async (ownerId, responseHeaders) => {
+     const { id } = await params;
+     const store = await getOwnerScopedDocumentStore(ownerId);
+-    await store.deleteDocument(id);
++    try {
++      await store.deleteDocument(id);
++    } catch (err) {
++      if (isAdmin) {
++        try {
++          const provider = await getServerPersistenceProvider(process.env.DATABASE_URL ?? '');
++          await provider.documentStore.deleteDocument(id);
++        } catch (innerErr) {
++          throw innerErr;
++        }
++      } else {
++        throw err;
++      }
++    }
+     return ownerJson({ ok: true }, 200, responseHeaders);
+   });
+ }
+diff --git a/app/api/stages/route.ts b/app/api/stages/route.ts
+index a85831b5..19b5e76d 100644
+--- a/app/api/stages/route.ts
++++ b/app/api/stages/route.ts
+@@ -24,6 +24,9 @@ import { ownerJson } from '@/lib/server/agent-runtime/route-response';
+ import { STAGE_NAME_MAX_LENGTH } from '@/lib/server/agent-runtime/stage-limits';
+ import { withRequestOwnerId } from '@/lib/server/agent-runtime/with-owner';
+ 
++import { getSessionPayload } from '@/lib/server/auth/session';
++import { getServerPersistenceProvider } from '@/lib/persistence/server-provider';
++
+ export const runtime = 'nodejs';
+ 
+ /** Mint a fresh, collision-free course id in the same `stage-` family as the agent tools. */
+@@ -35,9 +38,24 @@ function createStageId(): string {
+ export async function GET(req: NextRequest) {
+   if (!isAgentRuntimeConfigured()) return new Response('Not found', { status: 404 });
+ 
++  const session = getSessionPayload(req);
++  const isAdmin = session?.role === 'admin';
++
+   return withRequestOwnerId(req, async (ownerId, responseHeaders) => {
+     const store = await getOwnerScopedDocumentStore(ownerId);
+-    const stages = await store.listDocuments();
++    let stages = await store.listDocuments();
++    if (isAdmin) {
++      try {
++        const provider = await getServerPersistenceProvider(process.env.DATABASE_URL ?? '');
++        const allDocs = await provider.documentStore.listDocuments();
++        const map = new Map<string, any>();
++        for (const doc of allDocs) map.set(doc.id, doc);
++        for (const s of stages) map.set(s.id, s);
++        stages = Array.from(map.values()).sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
++      } catch {
++        // Keep store stages on error
++      }
++    }
+     return ownerJson({ stages }, 200, responseHeaders);
+   });
+ }
+diff --git a/app/my-courses/page.tsx b/app/my-courses/page.tsx
+new file mode 100644
+index 00000000..1032a9d2
+--- /dev/null
++++ b/app/my-courses/page.tsx
+@@ -0,0 +1,880 @@
++'use client';
++
++import React, { useEffect, useState, useMemo, useTransition } from 'react';
++import { useRouter } from 'next/navigation';
++import {
++  BookOpen,
++  Sparkles,
++  Play,
++  Edit3,
++  Trash2,
++  Copy,
++  Check,
++  Search,
++  ArrowLeft,
++  Calendar,
++  Layers,
++  RefreshCw,
++  ExternalLink,
++  Plus,
++  AlertCircle,
++  Clock,
++  CheckCircle2,
++  Laptop,
++  FolderOpen,
++  Cloud,
++  CloudUpload,
++  HardDrive,
++  Database,
++} from 'lucide-react';
++import { useAuthStore } from '@/lib/store/auth-store';
++import { UserNav } from '@/components/auth/user-nav';
++import { AuthDialog } from '@/components/auth/auth-dialog';
++import {
++  listStages,
++  deleteStageData,
++  renameStage,
++  loadStageData,
++} from '@/lib/utils/stage-storage';
++import { Button } from '@/components/ui/button';
++import { Input } from '@/components/ui/input';
++import { Badge } from '@/components/ui/badge';
++import {
++  Dialog,
++  DialogContent,
++  DialogDescription,
++  DialogFooter,
++  DialogHeader,
++  DialogTitle,
++} from '@/components/ui/dialog';
++import { toast } from 'sonner';
++
++interface CourseItem {
++  id: string;
++  name: string;
++  description?: string;
++  sceneCount?: number;
++  createdAt: number;
++  updatedAt: number;
++  interactiveMode?: boolean;
++  taskEngineMode?: boolean;
++  folderId?: string;
++  isCloudSynced?: boolean;
++}
++
++type SortField = 'updatedAt' | 'createdAt' | 'name' | 'sceneCount';
++type FilterType = 'all' | 'interactive' | 'cloud' | 'local';
++
++export default function MyCoursesPage() {
++  const router = useRouter();
++  const { user, authModalOpen, setAuthModalOpen } = useAuthStore();
++
++  const [courses, setCourses] = useState<CourseItem[]>([]);
++  const [loading, setLoading] = useState(true);
++  const [isPending, startTransition] = useTransition();
++
++  // Search & Filter
++  const [searchQuery, setSearchQuery] = useState('');
++  const [sortField, setSortField] = useState<SortField>('updatedAt');
++  const [sortAsc, setSortAsc] = useState(false);
++  const [filterType, setFilterType] = useState<FilterType>('all');
++
++  // Rename state
++  const [renamingId, setRenamingId] = useState<string | null>(null);
++  const [renameDraft, setRenameDraft] = useState('');
++  const [renamingSubmitting, setRenamingSubmitting] = useState(false);
++
++  // Delete state
++  const [deletingCourse, setDeletingCourse] = useState<CourseItem | null>(null);
++  const [deleteSubmitting, setDeleteSubmitting] = useState(false);
++
++  // Cloud sync state
++  const [syncingId, setSyncingId] = useState<string | null>(null);
++  const [batchSyncing, setBatchSyncing] = useState(false);
++
++  // Copy feedback
++  const [copiedId, setCopiedId] = useState<string | null>(null);
++
++  // Fetch courses from both IndexedDB (historical) and PostgreSQL (cloud)
++  const fetchCourses = async () => {
++    setLoading(true);
++    try {
++      // 1. 获取本地 IndexedDB 存储的所有历史课程
++      let localStages: CourseItem[] = [];
++      try {
++        const local = await listStages();
++        localStages = local.map((s) => ({
++          ...s,
++          isCloudSynced: false,
++        }));
++      } catch (err) {
++        console.warn('Failed to load local stages:', err);
++      }
++
++      // 2. 获取服务端 PostgreSQL 云端数据库存储的所有课程（包含批量制课等）
++      let serverStages: CourseItem[] = [];
++      try {
++        const res = await fetch('/api/stages', {
++          credentials: 'include',
++        });
++        if (res.ok) {
++          const data = await res.json();
++          if (data && Array.isArray(data.stages)) {
++            serverStages = data.stages.map((s: any) => ({
++              ...s,
++              isCloudSynced: true,
++            }));
++          }
++        }
++      } catch (err) {
++        console.warn('Failed to load server stages:', err);
++      }
++
++      // 3. 智能双向聚合去重合并（确保全部历史本地课程与云端课程 100% 汇总）
++      const map = new Map<string, CourseItem>();
++
++      // 先存入云端课程
++      for (const s of serverStages) {
++        map.set(s.id, { ...s, isCloudSynced: true });
++      }
++
++      // 补入本地历史课件
++      for (const l of localStages) {
++        if (!map.has(l.id)) {
++          map.set(l.id, { ...l, isCloudSynced: false });
++        } else {
++          const existing = map.get(l.id)!;
++          map.set(l.id, {
++            ...existing,
++            isCloudSynced: true,
++            sceneCount: existing.sceneCount || l.sceneCount,
++            interactiveMode: existing.interactiveMode ?? l.interactiveMode,
++            taskEngineMode: existing.taskEngineMode ?? l.taskEngineMode,
++            updatedAt: Math.max(existing.updatedAt || 0, l.updatedAt || 0),
++          });
++        }
++      }
++
++      const merged = Array.from(map.values());
++      setCourses(merged);
++    } catch (err) {
++      console.error('Failed to fetch courses:', err);
++      toast.error('网络异常，获取课程失败');
++    } finally {
++      setLoading(false);
++    }
++  };
++
++  useEffect(() => {
++    fetchCourses();
++  }, []);
++
++  // Filtered and Sorted Courses
++  const filteredCourses = useMemo(() => {
++    return courses
++      .filter((course) => {
++        if (filterType === 'interactive' && !course.interactiveMode) return false;
++        if (filterType === 'cloud' && !course.isCloudSynced) return false;
++        if (filterType === 'local' && course.isCloudSynced) return false;
++
++        if (searchQuery.trim()) {
++          const q = searchQuery.toLowerCase().trim();
++          const matchName = course.name.toLowerCase().includes(q);
++          const matchDesc = course.description?.toLowerCase().includes(q);
++          const matchId = course.id.toLowerCase().includes(q);
++          return matchName || matchDesc || matchId;
++        }
++        return true;
++      })
++      .sort((a, b) => {
++        let valA: any = a[sortField] ?? 0;
++        let valB: any = b[sortField] ?? 0;
++        if (sortField === 'name') {
++          return sortAsc ? a.name.localeCompare(b.name) : b.name.localeCompare(a.name);
++        }
++        return sortAsc ? valA - valB : valB - valA;
++      });
++  }, [courses, searchQuery, sortField, sortAsc, filterType]);
++
++  // Total stats
++  const totalSlides = useMemo(() => {
++    return courses.reduce((sum, c) => sum + (c.sceneCount || 0), 0);
++  }, [courses]);
++
++  const interactiveCoursesCount = useMemo(() => {
++    return courses.filter((c) => c.interactiveMode).length;
++  }, [courses]);
++
++  const unsyncedCount = useMemo(() => {
++    return courses.filter((c) => !c.isCloudSynced).length;
++  }, [courses]);
++
++  // Sync single local course to cloud
++  const syncToCloud = async (course: CourseItem) => {
++    setSyncingId(course.id);
++    try {
++      const doc = await loadStageData(course.id);
++      if (!doc || !doc.stage) {
++        toast.error('未找到该课件的本地详细场景数据');
++        return;
++      }
++      const res = await fetch('/api/classroom', {
++        method: 'POST',
++        headers: { 'Content-Type': 'application/json' },
++        credentials: 'include',
++        body: JSON.stringify({
++          stage: doc.stage,
++          scenes: doc.scenes || [],
++        }),
++      });
++      if (res.ok) {
++        setCourses((prev) =>
++          prev.map((c) => (c.id === course.id ? { ...c, isCloudSynced: true } : c)),
++        );
++        toast.success(`课程 "${course.name}" 已成功备份至云端数据库`);
++      } else {
++        toast.error('云端备份失败，请检查网络');
++      }
++    } catch (err) {
++      console.error('Failed to sync course:', err);
++      toast.error('同步异常，请稍后重试');
++    } finally {
++      setSyncingId(null);
++    }
++  };
++
++  // Sync all local courses to cloud in batch
++  const syncAllLocalToCloud = async () => {
++    const unsynced = courses.filter((c) => !c.isCloudSynced);
++    if (unsynced.length === 0) {
++      toast.info('所有课件已全部存储于云端数据库中');
++      return;
++    }
++    setBatchSyncing(true);
++    toast.info(`开始后台同步 ${unsynced.length} 门历史课件到云端数据库...`);
++    let successCount = 0;
++    for (const c of unsynced) {
++      try {
++        const doc = await loadStageData(c.id);
++        if (doc && doc.stage) {
++          const res = await fetch('/api/classroom', {
++            method: 'POST',
++            headers: { 'Content-Type': 'application/json' },
++            credentials: 'include',
++            body: JSON.stringify({
++              stage: doc.stage,
++              scenes: doc.scenes || [],
++            }),
++          });
++          if (res.ok) {
++            successCount++;
++            setCourses((prev) =>
++              prev.map((item) => (item.id === c.id ? { ...item, isCloudSynced: true } : item)),
++            );
++          }
++        }
++      } catch (e) {
++        console.warn(`Failed to sync ${c.id}:`, e);
++      }
++    }
++    setBatchSyncing(false);
++    toast.success(`已成功将 ${successCount} 门历史课件同步至云端数据库！`);
++  };
++
++  // Rename Course (Dual Save: Local & Server)
++  const startRename = (course: CourseItem) => {
++    setRenamingId(course.id);
++    setRenameDraft(course.name);
++  };
++
++  const submitRename = async () => {
++    if (!renamingId || !renameDraft.trim()) return;
++    const newName = renameDraft.trim();
++    setRenamingSubmitting(true);
++    try {
++      // 1. 本地更新
++      try {
++        await renameStage(renamingId, newName);
++      } catch {}
++
++      // 2. 云端更新
++      try {
++        await fetch(`/api/stages/${encodeURIComponent(renamingId)}`, {
++          method: 'PATCH',
++          headers: { 'Content-Type': 'application/json' },
++          credentials: 'include',
++          body: JSON.stringify({ name: newName }),
++        });
++      } catch {}
++
++      setCourses((prev) =>
++        prev.map((c) => (c.id === renamingId ? { ...c, name: newName, updatedAt: Date.now() } : c)),
++      );
++      toast.success('课程重命名成功');
++      setRenamingId(null);
++    } catch {
++      toast.error('重命名请求异常');
++    } finally {
++      setRenamingSubmitting(false);
++    }
++  };
++
++  // Delete Course (Dual Delete: Local & Server)
++  const confirmDelete = async () => {
++    if (!deletingCourse) return;
++    setDeleteSubmitting(true);
++    try {
++      // 1. 本地 IndexedDB 彻底删除
++      try {
++        await deleteStageData(deletingCourse.id);
++      } catch (e) {
++        console.warn('Failed to delete from local storage:', e);
++      }
++
++      // 2. 服务端 PostgreSQL 彻底删除
++      try {
++        await fetch(`/api/stages/${encodeURIComponent(deletingCourse.id)}`, {
++          method: 'DELETE',
++          credentials: 'include',
++        });
++      } catch (e) {
++        console.warn('Failed to delete from server:', e);
++      }
++
++      setCourses((prev) => prev.filter((c) => c.id !== deletingCourse.id));
++      toast.success(`课程 "${deletingCourse.name}" 已成功删除`);
++      setDeletingCourse(null);
++    } catch {
++      toast.error('删除请求异常');
++    } finally {
++      setDeleteSubmitting(false);
++    }
++  };
++
++  // Copy share URL
++  const copyShareLink = (id: string) => {
++    const url = `${window.location.origin}/classroom/${encodeURIComponent(id)}`;
++    navigator.clipboard.writeText(url);
++    setCopiedId(id);
++    toast.success('课堂专属链接已复制到剪贴板');
++    setTimeout(() => setCopiedId(null), 2000);
++  };
++
++  const formatDate = (ts: number | string | undefined) => {
++    if (!ts) return '未知时间';
++    const d = new Date(typeof ts === 'number' ? ts : Number(ts));
++    if (isNaN(d.getTime())) return '未知时间';
++    return d.toLocaleString('zh-CN', {
++      year: 'numeric',
++      month: '2-digit',
++      day: '2-digit',
++      hour: '2-digit',
++      minute: '2-digit',
++    });
++  };
++
++  return (
++    <div className="min-h-screen bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-slate-100 flex flex-col">
++      {/* 顶部导航 */}
++      <header className="border-b border-slate-200 dark:border-slate-800 bg-white/80 dark:bg-slate-900/80 backdrop-blur sticky top-0 z-40">
++        <div className="max-w-7xl mx-auto px-4 sm:px-6 h-16 flex items-center justify-between">
++          <div className="flex items-center gap-3">
++            <Button
++              variant="ghost"
++              size="sm"
++              onClick={() => router.push('/')}
++              className="gap-1.5 text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white"
++            >
++              <ArrowLeft className="w-4 h-4" />
++              返回首页
++            </Button>
++            <div className="h-4 w-px bg-slate-200 dark:bg-slate-800" />
++            <div className="flex items-center gap-2.5">
++              <div className="w-8 h-8 rounded-lg bg-gradient-to-tr from-indigo-500 to-purple-500 flex items-center justify-center text-white shadow-sm shadow-indigo-500/20">
++                <BookOpen className="w-4 h-4" />
++              </div>
++              <div>
++                <h1 className="font-semibold text-base leading-tight">我的课程中心</h1>
++                <p className="text-xs text-slate-500 dark:text-slate-400">
++                  全量汇总管理本地历史与云端生成的所有课件
++                </p>
++              </div>
++            </div>
++          </div>
++
++          <div className="flex items-center gap-2.5">
++            {unsyncedCount > 0 && (
++              <Button
++                variant="outline"
++                size="sm"
++                onClick={syncAllLocalToCloud}
++                disabled={batchSyncing}
++                className="gap-1.5 text-emerald-600 dark:text-emerald-400 border-emerald-500/30 hover:bg-emerald-50 dark:hover:bg-emerald-950/40 text-xs"
++                title="将浏览器本地历史缓存的所有课程一键备份同步到 PostgreSQL 云端数据库"
++              >
++                <CloudUpload className={`w-3.5 h-3.5 ${batchSyncing ? 'animate-bounce' : ''}`} />
++                {batchSyncing ? '正在备份上云...' : `一键上云备份 (${unsyncedCount})`}
++              </Button>
++            )}
++
++            <Button
++              variant="outline"
++              size="sm"
++              onClick={() => router.push('/batch-studio')}
++              className="gap-1.5 text-amber-600 dark:text-amber-400 border-amber-500/30 hover:bg-amber-50 dark:hover:bg-amber-950/40 text-xs"
++            >
++              <Sparkles className="w-3.5 h-3.5" />
++              批量快速制课
++            </Button>
++
++            <Button
++              variant="default"
++              size="sm"
++              onClick={() => router.push('/')}
++              className="gap-1.5 shadow-sm text-xs"
++            >
++              <Plus className="w-3.5 h-3.5" />
++              制作新课程
++            </Button>
++
++            <Button
++              variant="ghost"
++              size="icon"
++              onClick={fetchCourses}
++              disabled={loading}
++              title="刷新列表"
++              className="w-8 h-8 rounded-lg text-slate-500 hover:text-slate-900 dark:hover:text-white"
++            >
++              <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
++            </Button>
++
++            <div className="h-4 w-px bg-slate-200 dark:bg-slate-800" />
++            <UserNav />
++          </div>
++        </div>
++      </header>
++
++      {/* 主体区域 */}
++      <main className="flex-1 max-w-7xl mx-auto w-full px-4 sm:px-6 py-6 space-y-6">
++        {/* 未登录提醒条 */}
++        {!user && (
++          <div className="p-4 rounded-2xl bg-amber-50/80 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800/60 flex items-center justify-between text-amber-900 dark:text-amber-200 text-sm">
++            <div className="flex items-center gap-2.5">
++              <AlertCircle className="w-5 h-5 text-amber-600 dark:text-amber-400 shrink-0" />
++              <span>您当前处于未登录状态。登录后可永久保存并多端漫游您的所有课程数据。</span>
++            </div>
++            <Button
++              size="sm"
++              onClick={() => setAuthModalOpen(true, 'login')}
++              className="bg-amber-600 hover:bg-amber-700 text-white shrink-0 text-xs rounded-xl"
++            >
++              立即登录 / 注册
++            </Button>
++          </div>
++        )}
++
++        {/* 顶部统计卡片 */}
++        <div className="grid grid-cols-1 sm:grid-cols-4 gap-4">
++          <div className="bg-white dark:bg-slate-900 rounded-2xl p-4 border border-slate-200/80 dark:border-slate-800 shadow-xs flex items-center gap-3.5">
++            <div className="w-10 h-10 rounded-xl bg-indigo-50 dark:bg-indigo-950/60 text-indigo-600 dark:text-indigo-400 flex items-center justify-center shrink-0">
++              <BookOpen className="w-5 h-5" />
++            </div>
++            <div>
++              <div className="text-2xl font-bold tracking-tight">{courses.length}</div>
++              <div className="text-xs text-slate-500 dark:text-slate-400">全部课件总数</div>
++            </div>
++          </div>
++
++          <div className="bg-white dark:bg-slate-900 rounded-2xl p-4 border border-slate-200/80 dark:border-slate-800 shadow-xs flex items-center gap-3.5">
++            <div className="w-10 h-10 rounded-xl bg-emerald-50 dark:bg-emerald-950/60 text-emerald-600 dark:text-emerald-400 flex items-center justify-center shrink-0">
++              <Layers className="w-5 h-5" />
++            </div>
++            <div>
++              <div className="text-2xl font-bold tracking-tight">{totalSlides}</div>
++              <div className="text-xs text-slate-500 dark:text-slate-400">幻灯片总张数</div>
++            </div>
++          </div>
++
++          <div className="bg-white dark:bg-slate-900 rounded-2xl p-4 border border-slate-200/80 dark:border-slate-800 shadow-xs flex items-center gap-3.5">
++            <div className="w-10 h-10 rounded-xl bg-purple-50 dark:bg-purple-950/60 text-purple-600 dark:text-purple-400 flex items-center justify-center shrink-0">
++              <Sparkles className="w-5 h-5" />
++            </div>
++            <div>
++              <div className="text-2xl font-bold tracking-tight">{interactiveCoursesCount}</div>
++              <div className="text-xs text-slate-500 dark:text-slate-400">深度交互课程</div>
++            </div>
++          </div>
++
++          <div className="bg-white dark:bg-slate-900 rounded-2xl p-4 border border-slate-200/80 dark:border-slate-800 shadow-xs flex items-center gap-3.5">
++            <div className="w-10 h-10 rounded-xl bg-blue-50 dark:bg-blue-950/60 text-blue-600 dark:text-blue-400 flex items-center justify-center shrink-0">
++              <Database className="w-5 h-5" />
++            </div>
++            <div>
++              <div className="text-2xl font-bold tracking-tight">{courses.length - unsyncedCount}</div>
++              <div className="text-xs text-slate-500 dark:text-slate-400">云端已同步 / 数据库</div>
++            </div>
++          </div>
++        </div>
++
++        {/* 筛选与搜索工具条 */}
++        <div className="bg-white dark:bg-slate-900 rounded-2xl p-3 border border-slate-200/80 dark:border-slate-800 shadow-xs flex flex-wrap items-center justify-between gap-3">
++          <div className="flex items-center gap-2 flex-1 min-w-[240px]">
++            <div className="relative flex-1">
++              <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
++              <Input
++                placeholder="搜索课程名称或关键字..."
++                value={searchQuery}
++                onChange={(e) => setSearchQuery(e.target.value)}
++                className="pl-9 h-9 text-xs rounded-xl bg-slate-50 dark:bg-slate-950 border-slate-200 dark:border-slate-800"
++              />
++            </div>
++            {searchQuery && (
++              <Button
++                variant="ghost"
++                size="sm"
++                onClick={() => setSearchQuery('')}
++                className="text-xs h-9 px-2 text-slate-500"
++              >
++                清除
++              </Button>
++            )}
++          </div>
++
++          <div className="flex items-center gap-2 flex-wrap">
++            {/* 模式筛选 */}
++            <div className="flex rounded-xl bg-slate-100 dark:bg-slate-800/80 p-0.5 text-xs">
++              <button
++                onClick={() => setFilterType('all')}
++                className={`px-3 py-1.5 rounded-lg font-medium transition-all ${
++                  filterType === 'all'
++                    ? 'bg-white dark:bg-slate-900 text-slate-900 dark:text-white shadow-xs'
++                    : 'text-slate-600 dark:text-slate-400 hover:text-slate-900'
++                }`}
++              >
++                全部 ({courses.length})
++              </button>
++              <button
++                onClick={() => setFilterType('interactive')}
++                className={`px-3 py-1.5 rounded-lg font-medium transition-all ${
++                  filterType === 'interactive'
++                    ? 'bg-white dark:bg-slate-900 text-slate-900 dark:text-white shadow-xs'
++                    : 'text-slate-600 dark:text-slate-400 hover:text-slate-900'
++                }`}
++              >
++                深度交互 ({interactiveCoursesCount})
++              </button>
++              <button
++                onClick={() => setFilterType('cloud')}
++                className={`px-3 py-1.5 rounded-lg font-medium transition-all ${
++                  filterType === 'cloud'
++                    ? 'bg-white dark:bg-slate-900 text-slate-900 dark:text-white shadow-xs'
++                    : 'text-slate-600 dark:text-slate-400 hover:text-slate-900'
++                }`}
++              >
++                云端已存 ({courses.length - unsyncedCount})
++              </button>
++              {unsyncedCount > 0 && (
++                <button
++                  onClick={() => setFilterType('local')}
++                  className={`px-3 py-1.5 rounded-lg font-medium transition-all ${
++                    filterType === 'local'
++                      ? 'bg-white dark:bg-slate-900 text-slate-900 dark:text-white shadow-xs'
++                      : 'text-slate-600 dark:text-slate-400 hover:text-slate-900'
++                  }`}
++                >
++                  待上云 ({unsyncedCount})
++                </button>
++              )}
++            </div>
++
++            {/* 排序选择 */}
++            <div className="flex items-center gap-1 text-xs">
++              <select
++                value={sortField}
++                onChange={(e) => setSortField(e.target.value as SortField)}
++                className="h-9 px-2.5 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-950 text-slate-700 dark:text-slate-300 text-xs outline-hidden cursor-pointer"
++              >
++                <option value="updatedAt">按更新时间</option>
++                <option value="createdAt">按创建时间</option>
++                <option value="sceneCount">按幻灯片张数</option>
++                <option value="name">按课件名称</option>
++              </select>
++              <Button
++                variant="outline"
++                size="icon"
++                onClick={() => setSortAsc(!sortAsc)}
++                title={sortAsc ? '升序 (点击切换降序)' : '降序 (点击切换升序)'}
++                className="h-9 w-9 rounded-xl border-slate-200 dark:border-slate-800 text-xs"
++              >
++                {sortAsc ? '↑' : '↓'}
++              </Button>
++            </div>
++          </div>
++        </div>
++
++        {/* 课程列表卡片网格 */}
++        {loading ? (
++          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
++            {[1, 2, 3, 4, 5, 6].map((i) => (
++              <div
++                key={i}
++                className="h-56 rounded-2xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-5 animate-pulse flex flex-col justify-between"
++              >
++                <div className="space-y-3">
++                  <div className="h-5 bg-slate-200 dark:bg-slate-800 rounded-md w-3/4" />
++                  <div className="h-3 bg-slate-100 dark:bg-slate-800/60 rounded-md w-1/2" />
++                </div>
++                <div className="h-9 bg-slate-100 dark:bg-slate-800/60 rounded-xl" />
++              </div>
++            ))}
++          </div>
++        ) : filteredCourses.length === 0 ? (
++          <div className="rounded-2xl border border-dashed border-slate-300 dark:border-slate-800 bg-white/50 dark:bg-slate-900/50 p-12 text-center flex flex-col items-center justify-center space-y-4">
++            <div className="w-16 h-16 rounded-2xl bg-indigo-50 dark:bg-indigo-950/60 text-indigo-500 flex items-center justify-center">
++              <FolderOpen className="w-8 h-8 opacity-60" />
++            </div>
++            <div className="space-y-1">
++              <h3 className="font-semibold text-base">
++                {searchQuery ? '未找到匹配的课程' : '您当前尚未创建任何课程'}
++              </h3>
++              <p className="text-xs text-slate-500 dark:text-slate-400 max-w-sm">
++                {searchQuery
++                  ? '可以尝试减少或更换搜索关键词。'
++                  : '您可以使用批量制课工坊一次性导入多套教案，或在首页根据指令即刻生成一门交互课件。'}
++              </p>
++            </div>
++            {!searchQuery && (
++              <div className="flex items-center gap-2 pt-2">
++                <Button
++                  size="sm"
++                  onClick={() => router.push('/batch-studio')}
++                  className="gap-1.5 rounded-xl text-xs bg-amber-600 hover:bg-amber-700 text-white"
++                >
++                  <Sparkles className="w-3.5 h-3.5" />
++                  前往批量制课工坊
++                </Button>
++                <Button
++                  variant="outline"
++                  size="sm"
++                  onClick={() => router.push('/')}
++                  className="rounded-xl text-xs"
++                >
++                  制作单门课程
++                </Button>
++              </div>
++            )}
++          </div>
++        ) : (
++          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
++            {filteredCourses.map((course) => (
++              <div
++                key={course.id}
++                className="group rounded-2xl border border-slate-200/90 dark:border-slate-800/90 bg-white dark:bg-slate-900 shadow-xs hover:shadow-md hover:border-indigo-500/40 transition-all flex flex-col justify-between overflow-hidden"
++              >
++                {/* 顶部彩色条与徽标 */}
++                <div className="p-4 pb-2">
++                  <div className="flex items-center justify-between gap-2 mb-2.5">
++                    <div className="flex items-center gap-1.5 flex-wrap">
++                      {course.isCloudSynced ? (
++                        <span className="text-[10px] text-emerald-600 dark:text-emerald-400 bg-emerald-500/10 border border-emerald-500/20 px-1.5 py-0.5 rounded flex items-center gap-1 font-medium">
++                          <Cloud className="w-2.5 h-2.5" />
++                          云端已存
++                        </span>
++                      ) : (
++                        <button
++                          onClick={() => syncToCloud(course)}
++                          disabled={syncingId === course.id}
++                          className="text-[10px] text-amber-600 dark:text-amber-400 bg-amber-500/10 hover:bg-amber-500/20 border border-amber-500/30 px-1.5 py-0.5 rounded flex items-center gap-1 font-medium cursor-pointer transition-colors"
++                          title="该课程暂存与浏览器本地缓存中，点击即可备份至云端 PostgreSQL 数据库"
++                        >
++                          <CloudUpload className={`w-2.5 h-2.5 ${syncingId === course.id ? 'animate-spin' : ''}`} />
++                          {syncingId === course.id ? '备份中...' : '本地缓存 (点击上云)'}
++                        </button>
++                      )}
++
++                      {course.interactiveMode && (
++                        <Badge
++                          variant="secondary"
++                          className="bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20 text-[10px] px-2 py-0.5 rounded-md flex items-center gap-1 font-semibold"
++                        >
++                          <Sparkles className="w-2.5 h-2.5" />
++                          深度交互
++                        </Badge>
++                      )}
++
++                      {course.taskEngineMode && (
++                        <Badge
++                          variant="secondary"
++                          className="bg-purple-500/10 text-purple-600 dark:text-purple-400 border border-purple-500/20 text-[10px] px-2 py-0.5 rounded-md flex items-center gap-1 font-semibold"
++                        >
++                          <Laptop className="w-2.5 h-2.5" />
++                          智能体
++                        </Badge>
++                      )}
++
++                      <span className="text-[11px] font-medium text-slate-500 dark:text-slate-400 bg-slate-100 dark:bg-slate-800 px-2 py-0.5 rounded-md">
++                        {course.sceneCount ? `${course.sceneCount} 页幻灯片` : '课件'}
++                      </span>
++                    </div>
++
++                    <button
++                      onClick={() => setDeletingCourse(course)}
++                      className="text-slate-400 hover:text-red-600 dark:hover:text-red-400 p-1 rounded-lg hover:bg-red-50 dark:hover:bg-red-950/40 transition-all cursor-pointer"
++                      title="删除课程"
++                    >
++                      <Trash2 className="w-3.5 h-3.5" />
++                    </button>
++                  </div>
++
++                  {/* 课程名称 (支持内联重命名) */}
++                  {renamingId === course.id ? (
++                    <div className="flex items-center gap-1.5 my-1">
++                      <Input
++                        value={renameDraft}
++                        onChange={(e) => setRenameDraft(e.target.value)}
++                        onKeyDown={(e) => {
++                          if (e.key === 'Enter') submitRename();
++                          if (e.key === 'Escape') setRenamingId(null);
++                        }}
++                        autoFocus
++                        disabled={renamingSubmitting}
++                        className="h-8 text-xs font-semibold rounded-lg"
++                      />
++                      <Button
++                        size="sm"
++                        onClick={submitRename}
++                        disabled={renamingSubmitting || !renameDraft.trim()}
++                        className="h-8 px-2.5 text-xs rounded-lg"
++                      >
++                        保存
++                      </Button>
++                      <Button
++                        size="sm"
++                        variant="ghost"
++                        onClick={() => setRenamingId(null)}
++                        className="h-8 px-2 text-xs rounded-lg text-slate-500"
++                      >
++                        取消
++                      </Button>
++                    </div>
++                  ) : (
++                    <div className="flex items-start justify-between gap-1.5 group/title">
++                      <h2
++                        onClick={() => router.push(`/classroom/${encodeURIComponent(course.id)}`)}
++                        className="font-semibold text-sm leading-snug line-clamp-2 text-slate-900 dark:text-slate-100 group-hover:text-indigo-600 dark:group-hover:text-indigo-400 cursor-pointer transition-colors"
++                        title={course.name}
++                      >
++                        {course.name}
++                      </h2>
++                      <button
++                        onClick={() => startRename(course)}
++                        className="opacity-0 group-hover/title:opacity-100 text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 p-1 rounded transition-opacity shrink-0 cursor-pointer"
++                        title="重命名课程"
++                      >
++                        <Edit3 className="w-3 h-3" />
++                      </button>
++                    </div>
++                  )}
++
++                  {/* 描述或提示 */}
++                  {course.description && (
++                    <p className="text-xs text-slate-500 dark:text-slate-400 line-clamp-2 mt-1">
++                      {course.description}
++                    </p>
++                  )}
++
++                  {/* 时间与ID */}
++                  <div className="flex items-center justify-between text-[11px] text-slate-400 dark:text-slate-500 mt-3 pt-2.5 border-t border-slate-100 dark:border-slate-800/60 font-mono">
++                    <span className="flex items-center gap-1 font-sans">
++                      <Clock className="w-3 h-3" />
++                      {formatDate(course.updatedAt || course.createdAt)}
++                    </span>
++                    <span className="truncate max-w-[120px]" title={course.id}>
++                      {course.id}
++                    </span>
++                  </div>
++                </div>
++
++                {/* 底部功能按钮 */}
++                <div className="p-3 bg-slate-50/70 dark:bg-slate-950/40 border-t border-slate-100 dark:border-slate-800/60 flex items-center gap-1.5">
++                  <Button
++                    size="sm"
++                    onClick={() => router.push(`/classroom/${encodeURIComponent(course.id)}`)}
++                    className="flex-1 gap-1.5 text-xs rounded-xl h-8 font-medium bg-indigo-600 hover:bg-indigo-700 text-white shadow-xs"
++                  >
++                    <Play className="w-3 h-3 fill-current" />
++                    进入课堂
++                  </Button>
++
++                  <Button
++                    variant="outline"
++                    size="sm"
++                    onClick={() => router.push(`/workspace?stageId=${encodeURIComponent(course.id)}`)}
++                    className="gap-1 text-xs rounded-xl h-8 border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-300 hover:bg-white dark:hover:bg-slate-800"
++                    title="在 MAIC Pro 工作台中精细编辑此课件"
++                  >
++                    <Edit3 className="w-3 h-3" />
++                    工作台编辑
++                  </Button>
++
++                  <Button
++                    variant="ghost"
++                    size="icon"
++                    onClick={() => copyShareLink(course.id)}
++                    className="w-8 h-8 rounded-xl text-slate-400 hover:text-slate-800 dark:hover:text-white"
++                    title="复制课堂链接"
++                  >
++                    {copiedId === course.id ? (
++                      <Check className="w-3.5 h-3.5 text-emerald-500" />
++                    ) : (
++                      <Copy className="w-3.5 h-3.5" />
++                    )}
++                  </Button>
++                </div>
++              </div>
++            ))}
++          </div>
++        )}
++      </main>
++
++      {/* 删除确认对话框 */}
++      <Dialog open={Boolean(deletingCourse)} onOpenChange={(open) => !open && setDeletingCourse(null)}>
++        <DialogContent className="max-w-md rounded-2xl">
++          <DialogHeader>
++            <DialogTitle className="flex items-center gap-2 text-red-600 dark:text-red-400">
++              <AlertCircle className="w-5 h-5" />
++              确认彻底删除该课程？
++            </DialogTitle>
++            <DialogDescription className="text-xs pt-1.5 text-slate-600 dark:text-slate-300">
++              确定要删除课程{' '}
++              <strong className="text-slate-900 dark:text-white font-semibold">
++                "{deletingCourse?.name}"
++              </strong>{' '}
++              吗？删除后，该课程对应的所有幻灯片场景、大纲记录与课堂数据将被彻底从本地及云端数据库中永久移除，且无法恢复。
++            </DialogDescription>
++          </DialogHeader>
++          <DialogFooter className="gap-2 sm:gap-0 pt-2">
++            <Button
++              variant="outline"
++              size="sm"
++              onClick={() => setDeletingCourse(null)}
++              disabled={deleteSubmitting}
++              className="rounded-xl text-xs"
++            >
++              取消
++            </Button>
++            <Button
++              variant="destructive"
++              size="sm"
++              onClick={confirmDelete}
++              disabled={deleteSubmitting}
++              className="rounded-xl text-xs bg-red-600 hover:bg-red-700 text-white font-medium"
++            >
++              {deleteSubmitting ? '正在删除...' : '确认彻底删除'}
++            </Button>
++          </DialogFooter>
++        </DialogContent>
++      </Dialog>
++    </div>
++  );
++}
+diff --git a/app/page.tsx b/app/page.tsx
+index 31059149..910cbd69 100644
+--- a/app/page.tsx
++++ b/app/page.tsx
+@@ -27,6 +27,7 @@ import {
+   X,
+   Presentation,
+   Loader2,
++  BookOpen,
+ } from 'lucide-react';
+ import { useI18n } from '@/lib/hooks/use-i18n';
+ import { LanguageSwitcher } from '@/components/language-switcher';
+@@ -36,6 +37,8 @@ import { InputGroup, InputGroupInput, InputGroupButton } from '@/components/ui/i
+ import { Textarea as UITextarea } from '@/components/ui/textarea';
+ import { cn } from '@/lib/utils';
+ import { SettingsDialog } from '@/components/settings';
++import { UserNav } from '@/components/auth/user-nav';
++import { useAuthStore } from '@/lib/store/auth-store';
+ import { GenerationToolbar } from '@/components/generation/generation-toolbar';
+ import { AgentBar } from '@/components/agent/agent-bar';
+ import { useTheme } from '@/lib/hooks/use-theme';
+@@ -89,6 +92,8 @@ import {
+ } from '@/lib/config/feature-flags';
+ import { useImportPptx } from '@/lib/import/use-import-pptx';
+ import { InteractiveModeButton } from '@/components/generation/interactive-mode-button';
++import { CourseScalePicker } from '@/components/generation/course-scale-picker';
++import type { CourseScale } from '@/lib/types/course-scale';
+ import { ProBadge } from '@/components/workbench/ProBadge';
+ import { arrivedByProSwap, startProSwap } from '@/lib/workbench/pro-swap';
+ import {
+@@ -100,6 +105,7 @@ const log = createLogger('Home');
+ 
+ const RECENT_OPEN_STORAGE_KEY = 'recentClassroomsOpen';
+ const INTERACTIVE_MODE_STORAGE_KEY = 'interactiveModeEnabled';
++const COURSE_SCALE_STORAGE_KEY = 'openmaic:courseScale';
+ 
+ // PPTX import is still scaffolding: `useImportPptx` has no `onImported` consumer
+ // yet, so the flow only logs the parsed slides. Hide the entry point behind a
+@@ -112,6 +118,7 @@ let workbenchRuntimeCache: boolean | null = null;
+ interface FormState {
+   courseMaterials: SelectedCourseMaterial[];
+   requirement: string;
++  courseScale: CourseScale;
+   interactiveMode: boolean;
+   vocationalTestMode: boolean;
+ }
+@@ -119,6 +126,7 @@ interface FormState {
+ const initialFormState: FormState = {
+   courseMaterials: [],
+   requirement: '',
++  courseScale: 'standard',
+   interactiveMode: false,
+   vocationalTestMode: false,
+ };
+@@ -201,6 +209,19 @@ function HomePage() {
+     } catch {
+       /* localStorage unavailable */
+     }
++    try {
++      const savedCourseScale = localStorage.getItem(COURSE_SCALE_STORAGE_KEY) as CourseScale;
++      if (
++        savedCourseScale &&
++        (savedCourseScale === 'micro' ||
++          savedCourseScale === 'standard' ||
++          savedCourseScale === 'thematic')
++      ) {
++        setForm((prev) => ({ ...prev, courseScale: savedCourseScale }));
++      }
++    } catch {
++      /* localStorage unavailable */
++    }
+   }, []);
+ 
+   // Restore requirement draft from localStorage on mount. The previous derived-state
+@@ -217,6 +238,7 @@ function HomePage() {
+ 
+   const [themeOpen, setThemeOpen] = useState(false);
+   const [error, setError] = useState<string | null>(null);
++  const isAdmin = useAuthStore((s) => s.user?.role === 'admin');
+   // True while the Generate click drains upload-time ingests and builds the
+   // generation session. Doubles as the guard flag that freezes the course
+   // material set for the duration of prep and as the switch that disables the
+@@ -504,6 +526,8 @@ function HomePage() {
+     try {
+       if (field === 'interactiveMode')
+         localStorage.setItem(INTERACTIVE_MODE_STORAGE_KEY, String(value));
++      if (field === 'courseScale')
++        localStorage.setItem(COURSE_SCALE_STORAGE_KEY, String(value));
+       if (field === 'requirement') updateRequirementCache(value as string);
+     } catch {
+       /* ignore */
+@@ -599,6 +623,7 @@ function HomePage() {
+       const userProfile = useUserProfileStore.getState();
+       const requirements: UserRequirements = {
+         requirement: form.requirement,
++        courseScale: form.courseScale,
+         userNickname: userProfile.nickname || undefined,
+         userBio: userProfile.bio || undefined,
+         // Course-level web search now lives in settings (课程模型配置 → 联网调研)
+@@ -783,26 +808,57 @@ function HomePage() {
+           )}
+         </div>
+ 
++        {/* Settings Button (Admin Only) */}
++        {isAdmin && (
++          <>
++            <div className="w-[1px] h-4 bg-gray-200 dark:bg-gray-700" />
++            <div className="relative">
++              <button
++                onClick={() => setSettingsOpen(true)}
++                className="p-2 rounded-full text-gray-400 dark:text-gray-500 hover:bg-white dark:hover:bg-gray-700 hover:text-gray-800 dark:hover:text-gray-200 hover:shadow-sm transition-all group cursor-pointer"
++                title="系统设置 (管理员专属)"
++              >
++                <Settings className="w-4 h-4 group-hover:rotate-90 transition-transform duration-500" />
++              </button>
++            </div>
++          </>
++        )}
++
+         <div className="w-[1px] h-4 bg-gray-200 dark:bg-gray-700" />
+ 
+-        {/* Settings Button */}
+-        <div className="relative">
+-          <button
+-            onClick={() => setSettingsOpen(true)}
+-            className="p-2 rounded-full text-gray-400 dark:text-gray-500 hover:bg-white dark:hover:bg-gray-700 hover:text-gray-800 dark:hover:text-gray-200 hover:shadow-sm transition-all group"
+-          >
+-            <Settings className="w-4 h-4 group-hover:rotate-90 transition-transform duration-500" />
+-          </button>
+-        </div>
++        {/* Batch Studio Button */}
++        <button
++          onClick={() => router.push('/batch-studio')}
++          className="flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium text-amber-600 dark:text-amber-400 bg-amber-500/10 hover:bg-amber-500/20 border border-amber-500/30 transition-all shadow-xs cursor-pointer"
++          title="批量快速制课工坊"
++        >
++          <Sparkles className="w-3.5 h-3.5 text-amber-500" />
++          <span>批量制课</span>
++        </button>
++
++        {/* My Courses Button */}
++        <button
++          onClick={() => router.push('/my-courses')}
++          className="flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium text-indigo-600 dark:text-indigo-400 bg-indigo-500/10 hover:bg-indigo-500/20 border border-indigo-500/30 transition-all shadow-xs cursor-pointer"
++          title="我的课程中心"
++        >
++          <BookOpen className="w-3.5 h-3.5 text-indigo-500" />
++          <span>我的课程</span>
++        </button>
++
++        {/* User Account Navigation */}
++        <UserNav onOpenSettings={() => setSettingsOpen(true)} />
+       </div>
+-      <SettingsDialog
+-        open={settingsOpen}
+-        onOpenChange={(open) => {
+-          setSettingsOpen(open);
+-          if (!open) setSettingsSection(undefined);
+-        }}
+-        initialSection={settingsSection}
+-      />
++      {isAdmin && (
++        <SettingsDialog
++          open={settingsOpen}
++          onOpenChange={(open) => {
++            setSettingsOpen(open);
++            if (!open) setSettingsSection(undefined);
++          }}
++          initialSection={settingsSection}
++        />
++      )}
+ 
+       {/* ═══ Background Decor ═══ */}
+       <div className="absolute inset-0 overflow-hidden pointer-events-none">
+@@ -904,6 +960,13 @@ function HomePage() {
+                 />
+               </div>
+ 
++              {/* Course scale selector */}
++              <CourseScalePicker
++                value={form.courseScale}
++                onChange={(scale) => updateForm('courseScale', scale)}
++                disabled={preparingGenerate}
++              />
++
+               {/* Interactive mode toggle */}
+               <Tooltip>
+                 <TooltipTrigger asChild>

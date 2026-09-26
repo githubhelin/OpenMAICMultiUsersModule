@@ -342,6 +342,15 @@ export default function BatchStudioPage() {
 
           <div className="flex items-center gap-2">
             <Button
+              variant="outline"
+              size="sm"
+              onClick={() => router.push('/my-courses')}
+              className="gap-1.5 border-indigo-200 dark:border-indigo-800 text-indigo-600 dark:text-indigo-400 hover:bg-indigo-50 dark:hover:bg-indigo-950/40"
+            >
+              <BookOpen className="w-4 h-4" />
+              我的课程
+            </Button>
+            <Button
               variant={activeTab === 'create' ? 'default' : 'ghost'}
               size="sm"
               onClick={() => setActiveTab('create')}

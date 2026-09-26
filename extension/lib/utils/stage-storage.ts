@@ -882,15 +882,8 @@ async function listOwnerStagesFromServer(): Promise<StageListItem[]> {
  */
 export async function listStages(): Promise<StageListItem[]> {
   try {
-    let serverStages: StageListItem[] = [];
-    try {
-      serverStages = await listOwnerStagesFromServer();
-    } catch {
-      // Server persistence unavailable or network unreachable
-    }
-
     if (isBrowserPersistenceEnabled()) {
-      return serverStages;
+      return await listOwnerStagesFromServer();
     }
 
     const summaries = await getDocumentStore().listDocuments();
@@ -908,7 +901,7 @@ export async function listStages(): Promise<StageListItem[]> {
     // not in the DocumentStore; join it in so callers can group courses.
     const memberships = await db.stageFolders.toArray();
     const folderByStage = new Map(memberships.map((m) => [m.stageId, m.folderId]));
-    const localStages = [
+    return [
       ...summaries,
       ...legacyOnly
         .filter((stage) => stage !== null)
@@ -922,19 +915,11 @@ export async function listStages(): Promise<StageListItem[]> {
           interactiveMode: stage.interactiveMode,
           taskEngineMode: stage.taskEngineMode,
         })),
-    ].map((item) =>
-      folderByStage.get(item.id) ? { ...item, folderId: folderByStage.get(item.id) } : item,
-    );
-
-    const localIds = new Set(localStages.map((s) => s.id));
-    const combined = [...localStages];
-    for (const serverStage of serverStages) {
-      if (!localIds.has(serverStage.id)) {
-        combined.push(serverStage);
-      }
-    }
-
-    return combined.sort((a, b) => b.updatedAt - a.updatedAt);
+    ]
+      .map((item) =>
+        folderByStage.get(item.id) ? { ...item, folderId: folderByStage.get(item.id) } : item,
+      )
+      .sort((a, b) => b.updatedAt - a.updatedAt);
   } catch (error) {
     log.error('Failed to list stages:', error);
     throw error;
@@ -1323,26 +1308,12 @@ async function listOwnerFoldersFromServer(): Promise<FolderRecord[]> {
  */
 export async function listFolders(): Promise<FolderRecord[]> {
   try {
-    let serverFolders: FolderRecord[] = [];
-    try {
-      serverFolders = await listOwnerFoldersFromServer();
-    } catch {
-      // offline or server unconfigured
-    }
-
     if (isBrowserPersistenceEnabled()) {
-      return serverFolders;
+      return await listOwnerFoldersFromServer();
     }
 
     const localFolders = await db.folders.toArray();
-    const localIds = new Set(localFolders.map((f) => f.id));
-    const combined = [...localFolders];
-    for (const sf of serverFolders) {
-      if (!localIds.has(sf.id)) {
-        combined.push(sf);
-      }
-    }
-    return combined.sort((a, b) => a.order - b.order);
+    return localFolders.sort((a, b) => a.order - b.order);
   } catch (error) {
     log.error('Failed to list folders:', error);
     throw error;
