@@ -278,6 +278,16 @@ export async function saveStageData(
       return 'stale-dropped';
     }
     log.info(`Saved stage: ${stageId}`);
+    const pendingTimer = syncDebounceTimers.get(stageId);
+    if (pendingTimer) {
+      clearTimeout(pendingTimer);
+      syncDebounceTimers.delete(stageId);
+    }
+    void syncStageToServer(stageId, {
+      stage: data.stage,
+      scenes: data.scenes,
+      outline: data.outline,
+    });
     return failedChanges.length > 0 ? { failedChanges } : undefined;
   } catch (error) {
     log.error('Failed to save stage:', error);
@@ -447,6 +457,11 @@ export async function saveStageDataIncremental(
   if (has('chats') && !(await saveStageChats(stageId, data))) {
     failedChanges.push({ kind: 'chats' });
   }
+  debouncedSyncStageToServer(stageId, {
+    stage: data.stage,
+    scenes: data.scenes,
+    outline: data.outline,
+  });
   return { failedChanges };
 }
 
@@ -483,6 +498,38 @@ async function fetchRemoteStageDocument(stageId: string): Promise<AppDocument | 
   return null;
 }
 
+async function syncStageToServer(
+  stageId: string,
+  doc: { stage: Stage; scenes: Scene[]; outline?: AppDocumentOutline },
+): Promise<void> {
+  try {
+    await fetch(`/api/stages/${encodeURIComponent(stageId)}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(doc),
+      credentials: 'include',
+    });
+  } catch {
+    // Offline or server unreachable; local Dexie persists
+  }
+}
+
+const syncDebounceTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+function debouncedSyncStageToServer(
+  stageId: string,
+  doc: { stage: Stage; scenes: Scene[]; outline?: AppDocumentOutline },
+  delayMs = 1500,
+): void {
+  const existing = syncDebounceTimers.get(stageId);
+  if (existing) clearTimeout(existing);
+  const timer = setTimeout(() => {
+    syncDebounceTimers.delete(stageId);
+    void syncStageToServer(stageId, doc);
+  }, delayMs);
+  syncDebounceTimers.set(stageId, timer);
+}
+
 /**
  * Load stage data from IndexedDB with server fallback
  */
@@ -494,6 +541,11 @@ export async function loadStageData(stageId: string): Promise<StageStoreData | n
       const remote = await fetchRemoteStageDocument(stageId);
       if (remote) {
         document = remote;
+        try {
+          await getDocumentStore().saveDocument(remote);
+        } catch (e) {
+          log.warn(`Failed to seed local document store with remote stage ${stageId}:`, e);
+        }
       }
     }
     if (!document) {
@@ -1270,11 +1322,31 @@ async function listOwnerFoldersFromServer(): Promise<FolderRecord[]> {
  * List all folders, ordered by their `order` field (ascending).
  */
 export async function listFolders(): Promise<FolderRecord[]> {
-  if (isBrowserPersistenceEnabled()) {
-    return await listOwnerFoldersFromServer();
+  try {
+    let serverFolders: FolderRecord[] = [];
+    try {
+      serverFolders = await listOwnerFoldersFromServer();
+    } catch {
+      // offline or server unconfigured
+    }
+
+    if (isBrowserPersistenceEnabled()) {
+      return serverFolders;
+    }
+
+    const localFolders = await db.folders.toArray();
+    const localIds = new Set(localFolders.map((f) => f.id));
+    const combined = [...localFolders];
+    for (const sf of serverFolders) {
+      if (!localIds.has(sf.id)) {
+        combined.push(sf);
+      }
+    }
+    return combined.sort((a, b) => a.order - b.order);
+  } catch (error) {
+    log.error('Failed to list folders:', error);
+    throw error;
   }
-  const folders = await db.folders.toArray();
-  return folders.sort((a, b) => a.order - b.order);
 }
 
 /** Validate a folder name against the width rule and (optionally) duplicates. */
@@ -1326,24 +1398,26 @@ export async function createFolder(name: string): Promise<FolderRecord> {
     return await createOwnerFolderFromServer(name);
   }
   const now = Date.now();
-  return db.transaction('rw', db.folders, async () => {
+  const folder = await db.transaction('rw', db.folders, async () => {
     const existing = await db.folders.toArray();
     if (existing.length >= FOLDER_COUNT_LIMIT) {
       throw new FolderNameError('Folder count limit reached', 'limit');
     }
     assertFolderName(name, existing);
     const order = existing.reduce((max, folder) => Math.max(max, folder.order), -1) + 1;
-    const folder: FolderRecord = {
+    const item: FolderRecord = {
       id: nanoid(),
       name: name.trim(),
       order,
       createdAt: now,
       updatedAt: now,
     };
-    await db.folders.put(folder);
-    log.info(`Created folder "${name}" (${folder.id})`);
-    return folder;
+    await db.folders.put(item);
+    log.info(`Created folder "${name}" (${item.id})`);
+    return item;
   });
+  createOwnerFolderFromServer(name).catch(() => {});
+  return folder;
 }
 
 /** PG mode: rename a folder through the owner-scoped route. */
@@ -1378,6 +1452,7 @@ export async function renameFolder(id: string, name: string): Promise<void> {
     await db.folders.put({ ...folder, name: name.trim(), updatedAt: now });
     log.info(`Renamed folder ${id} to "${name}"`);
   });
+  renameOwnerFolderFromServer(id, name).catch(() => {});
 }
 
 export type DeleteFolderMode = 'ungroup' | 'remove';
@@ -1418,6 +1493,7 @@ export async function deleteFolder(id: string, mode: DeleteFolderMode = 'ungroup
     await deleteOwnerFolderFromServer(id, mode);
     return;
   }
+  deleteOwnerFolderFromServer(id, mode).catch(() => {});
   // Atomically capture members, delete the folder row, and clear all membership
   // rows in ONE transaction BEFORE the course-deletion cascade. This makes the
   // folder invisible to `setStageFolder` (which checks folder existence in its
