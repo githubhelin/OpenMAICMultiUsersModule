@@ -1,0 +1,1495 @@
+diff --git a/app/api/batch-generate/[id]/route.ts b/app/api/batch-generate/[id]/route.ts
+new file mode 100644
+index 00000000..05d67dc0
+--- /dev/null
++++ b/app/api/batch-generate/[id]/route.ts
+@@ -0,0 +1,38 @@
++import { type NextRequest, NextResponse } from 'next/server';
++import { getSessionPayload } from '@/lib/server/auth/session';
++import { getBatchJob } from '@/lib/server/batch-generation/store';
++
++export const runtime = 'nodejs';
++
++export async function GET(
++  req: NextRequest,
++  { params }: { params: Promise<{ id: string }> },
++) {
++  try {
++    const { id } = await params;
++    const session = getSessionPayload(req);
++    const ownerId = session && session.userId ? `user:${session.userId}` : undefined;
++
++    const job = await getBatchJob(id, ownerId);
++
++    if (!job) {
++      return NextResponse.json(
++        { success: false, error: '未找到该批处理任务' },
++        { status: 404 },
++      );
++    }
++
++    return NextResponse.json({
++      success: true,
++      job,
++    });
++  } catch (error) {
++    return NextResponse.json(
++      {
++        success: false,
++        error: error instanceof Error ? error.message : '获取任务详情失败',
++      },
++      { status: 500 },
++    );
++  }
++}
+diff --git a/app/api/batch-generate/route.ts b/app/api/batch-generate/route.ts
+new file mode 100644
+index 00000000..9777c72f
+--- /dev/null
++++ b/app/api/batch-generate/route.ts
+@@ -0,0 +1,154 @@
++import { after, type NextRequest, NextResponse } from 'next/server';
++import { promises as fs } from 'fs';
++import path from 'path';
++import { nanoid } from 'nanoid';
++import { getSessionPayload } from '@/lib/server/auth/session';
++import { buildRequestOrigin } from '@/lib/server/classroom-storage';
++import { createLogger } from '@/lib/logger';
++import {
++  BATCH_TEMP_DIR,
++  ensureBatchDirs,
++  listBatchJobs,
++  saveBatchJob,
++} from '@/lib/server/batch-generation/store';
++import { runBatchJob } from '@/lib/server/batch-generation/runner';
++import type { BatchJob, BatchJobMode, BatchSubTask } from '@/lib/server/batch-generation/types';
++
++export const runtime = 'nodejs';
++export const maxDuration = 300;
++
++const log = createLogger('BatchGenerateAPI');
++
++export async function POST(req: NextRequest) {
++  try {
++    const session = getSessionPayload(req);
++    const ownerId = session && session.userId ? `user:${session.userId}` : 'anon:default';
++
++    await ensureBatchDirs();
++
++    const formData = await req.formData();
++    const files = formData.getAll('files') as File[];
++
++    if (!files || files.length === 0) {
++      return NextResponse.json(
++        { success: false, error: '请至少上传一个课件文件 (.pptx, .pdf, .docx, .txt)' },
++        { status: 400 },
++      );
++    }
++
++    const rawMode = formData.get('mode') as string;
++    const mode: BatchJobMode = rawMode === 'single_merged' ? 'single_merged' : 'batch_independent';
++    const requirement = (formData.get('prompt') as string) || '';
++    const enableTTS = formData.get('enableTTS') !== 'false';
++    const enableImageGeneration = formData.get('enableImageGeneration') !== 'false';
++
++    const jobId = `batch_${nanoid(10)}`;
++    const now = new Date().toISOString();
++    const baseUrl = buildRequestOrigin(req);
++
++    const tasks: BatchSubTask[] = [];
++
++    // 保存上传的各个文件到临时目录
++    for (let i = 0; i < files.length; i++) {
++      const file = files[i];
++      const taskId = `task_${nanoid(8)}`;
++      const safeName = file.name || `file_${i + 1}.pptx`;
++      const tempFileName = `${jobId}_${taskId}_${safeName}`;
++      const tempFilePath = path.join(BATCH_TEMP_DIR, tempFileName);
++
++      const buffer = Buffer.from(await file.arrayBuffer());
++      await fs.writeFile(tempFilePath, buffer);
++
++      tasks.push({
++        id: taskId,
++        fileName: safeName,
++        fileSize: file.size,
++        mimeType: file.type || 'application/octet-stream',
++        tempFilePath,
++        status: 'queued',
++        progress: 0,
++        stepMessage: '排队等待处理中...',
++      });
++    }
++
++    const defaultTitle =
++      mode === 'single_merged'
++        ? `多资料合成课件 (${files.length} 个资料)`
++        : `批量课程生成 (${files.length} 门课)`;
++
++    const batchJob: BatchJob = {
++      id: jobId,
++      ownerId,
++      mode,
++      status: 'queued',
++      title: defaultTitle,
++      requirement,
++      enableTTS,
++      enableImageGeneration,
++      totalTasks: tasks.length,
++      completedTasks: 0,
++      failedTasks: 0,
++      progress: 0,
++      createdAt: now,
++      updatedAt: now,
++      tasks,
++    };
++
++    await saveBatchJob(batchJob);
++    log.info(`Created batch job ${jobId} with ${tasks.length} tasks [mode=${mode}] for owner ${ownerId}`);
++
++    // 在后台异步启动执行流水线
++    after(() => runBatchJob(jobId, baseUrl));
++
++    return NextResponse.json(
++      {
++        success: true,
++        batchId: jobId,
++        status: 'queued',
++        totalTasks: tasks.length,
++        mode,
++      },
++      { status: 202 },
++    );
++  } catch (error) {
++    log.error('Batch generation initiation failed:', error);
++    return NextResponse.json(
++      {
++        success: false,
++        error: error instanceof Error ? error.message : '服务器内部处理失败',
++      },
++      { status: 500 },
++    );
++  }
++}
++
++export async function GET(req: NextRequest) {
++  try {
++    const session = getSessionPayload(req);
++    const ownerId = session && session.userId ? `user:${session.userId}` : 'anon:default';
++
++    const jobs = await listBatchJobs(ownerId);
++    return NextResponse.json({
++      success: true,
++      jobs: jobs.map((job) => ({
++        id: job.id,
++        title: job.title,
++        mode: job.mode,
++        status: job.status,
++        totalTasks: job.totalTasks,
++        completedTasks: job.completedTasks,
++        failedTasks: job.failedTasks,
++        progress: job.progress,
++        createdAt: job.createdAt,
++        updatedAt: job.updatedAt,
++        resultClassroomUrl: job.resultClassroomUrl,
++      })),
++    });
++  } catch (error) {
++    log.error('Failed to list batch jobs:', error);
++    return NextResponse.json(
++      { success: false, error: '获取批量任务列表失败' },
++      { status: 500 },
++    );
++  }
++}
+diff --git a/app/batch-studio/page.tsx b/app/batch-studio/page.tsx
+new file mode 100644
+index 00000000..ba533f26
+--- /dev/null
++++ b/app/batch-studio/page.tsx
+@@ -0,0 +1,608 @@
++'use client';
++
++import React, { useState, useEffect, useRef } from 'react';
++import { useRouter } from 'next/navigation';
++import {
++  UploadCloud,
++  FileText,
++  Layers,
++  Play,
++  CheckCircle2,
++  AlertCircle,
++  Clock,
++  ArrowLeft,
++  RefreshCw,
++  Sparkles,
++  ExternalLink,
++  Edit3,
++  Trash2,
++  Volume2,
++  Image as ImageIcon,
++  Check,
++} from 'lucide-react';
++import { Button } from '@/components/ui/button';
++import { Card } from '@/components/ui/card';
++import { Badge } from '@/components/ui/badge';
++import { Progress } from '@/components/ui/progress';
++import { Switch } from '@/components/ui/switch';
++import { toast } from 'sonner';
++import type { BatchJob, BatchJobMode, BatchSubTask } from '@/lib/server/batch-generation/types';
++
++export default function BatchStudioPage() {
++  const router = useRouter();
++
++  // 状态
++  const [activeTab, setActiveTab] = useState<'create' | 'board'>('create');
++  const [files, setFiles] = useState<File[]>([]);
++  const [mode, setMode] = useState<BatchJobMode>('batch_independent');
++  const [prompt, setPrompt] = useState<string>(
++    '提炼核心教学重难点，为每一页生成生动精彩的教师讲解台词与互动问答，制作富有沉浸感的互动微课堂。',
++  );
++  const [enableTTS, setEnableTTS] = useState<boolean>(true);
++  const [enableImageGeneration, setEnableImageGeneration] = useState<boolean>(true);
++
++  const [submitting, setSubmitting] = useState<boolean>(false);
++  const [activeJobId, setActiveJobId] = useState<string | null>(null);
++  const [currentJob, setCurrentJob] = useState<BatchJob | null>(null);
++  const [recentJobs, setRecentJobs] = useState<Array<{ id: string; title: string; status: string; progress: number; createdAt: string }>>([]);
++
++  const fileInputRef = useRef<HTMLInputElement>(null);
++
++  // 文件选择与拖拽
++  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
++    if (e.target.files) {
++      const selected = Array.from(e.target.files);
++      setFiles((prev) => [...prev, ...selected]);
++    }
++  };
++
++  const handleDrop = (e: React.DragEvent) => {
++    e.preventDefault();
++    if (e.dataTransfer.files) {
++      const dropped = Array.from(e.dataTransfer.files);
++      setFiles((prev) => [...prev, ...dropped]);
++    }
++  };
++
++  const removeFile = (index: number) => {
++    setFiles((prev) => prev.filter((_, i) => i !== index));
++  };
++
++  // 提交任务
++  const handleSubmit = async () => {
++    if (files.length === 0) {
++      toast.error('请至少上传一个课件文件！');
++      return;
++    }
++
++    setSubmitting(true);
++    const formData = new FormData();
++    files.forEach((file) => formData.append('files', file));
++    formData.append('mode', mode);
++    formData.append('prompt', prompt);
++    formData.append('enableTTS', enableTTS ? 'true' : 'false');
++    formData.append('enableImageGeneration', enableImageGeneration ? 'true' : 'false');
++
++    try {
++      const res = await fetch('/api/batch-generate', {
++        method: 'POST',
++        body: formData,
++      });
++      const data = await res.json();
++
++      if (!res.ok || !data.success) {
++        throw new Error(data.error || '创建批量制课任务失败');
++      }
++
++      toast.success('批量制课任务已成功提交，后台正在全力流水线生产中！');
++      setActiveJobId(data.batchId);
++      setActiveTab('board');
++      setFiles([]);
++      loadJobDetails(data.batchId);
++      loadRecentJobs();
++    } catch (err) {
++      toast.error(err instanceof Error ? err.message : '提交任务失败');
++    } finally {
++      setSubmitting(false);
++    }
++  };
++
++  // 查询当前作业详情
++  const loadJobDetails = async (jobId: string) => {
++    try {
++      const res = await fetch(`/api/batch-generate/${jobId}`);
++      if (res.ok) {
++        const data = await res.json();
++        if (data.success && data.job) {
++          setCurrentJob(data.job);
++        }
++      }
++    } catch {
++      // 忽略轻微轮询错误
++    }
++  };
++
++  // 查询历史作业列表
++  const loadRecentJobs = async () => {
++    try {
++      const res = await fetch('/api/batch-generate');
++      if (res.ok) {
++        const data = await res.json();
++        if (data.success && data.jobs) {
++          setRecentJobs(data.jobs);
++          if (!activeJobId && data.jobs.length > 0) {
++            setActiveJobId(data.jobs[0].id);
++          }
++        }
++      }
++    } catch {
++      // 忽略轻微错误
++    }
++  };
++
++  useEffect(() => {
++    loadRecentJobs();
++  }, []);
++
++  // 自动轮询进度
++  useEffect(() => {
++    if (!activeJobId) return;
++
++    loadJobDetails(activeJobId);
++
++    const isRunning =
++      !currentJob || currentJob.status === 'queued' || currentJob.status === 'processing';
++
++    if (isRunning) {
++      const timer = setInterval(() => {
++        loadJobDetails(activeJobId);
++      }, 3000);
++      return () => clearInterval(timer);
++    }
++  }, [activeJobId, currentJob?.status]);
++
++  const getStepBadge = (task: BatchSubTask) => {
++    switch (task.status) {
++      case 'extracting':
++        return <Badge className="bg-amber-500/15 text-amber-600 dark:text-amber-400 border-amber-500/30">MinerU 解析提取中</Badge>;
++      case 'planning_outline':
++        return <Badge className="bg-blue-500/15 text-blue-600 dark:text-blue-400 border-blue-500/30">大纲规划中</Badge>;
++      case 'building_scenes':
++        return <Badge className="bg-purple-500/15 text-purple-600 dark:text-purple-400 border-purple-500/30">场景与互动构建</Badge>;
++      case 'generating_tts':
++        return <Badge className="bg-indigo-500/15 text-indigo-600 dark:text-indigo-400 border-indigo-500/30">TTS 语音合成中</Badge>;
++      case 'completed':
++        return <Badge className="bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 border-emerald-500/30">已完成</Badge>;
++      case 'failed':
++        return <Badge variant="destructive">生成失败</Badge>;
++      default:
++        return <Badge variant="outline">队列排队中</Badge>;
++    }
++  };
++
++  return (
++    <div className="min-h-screen bg-slate-50 dark:bg-slate-950 text-slate-900 dark:text-slate-100 flex flex-col">
++      {/* 顶部导航 */}
++      <header className="border-b border-slate-200 dark:border-slate-800 bg-white/80 dark:bg-slate-900/80 backdrop-blur sticky top-0 z-40">
++        <div className="max-w-6xl mx-auto px-4 h-16 flex items-center justify-between">
++          <div className="flex items-center gap-3">
++            <Button
++              variant="ghost"
++              size="sm"
++              onClick={() => router.push('/')}
++              className="gap-1.5 text-slate-600 dark:text-slate-300"
++            >
++              <ArrowLeft className="w-4 h-4" />
++              返回首页
++            </Button>
++            <div className="h-4 w-px bg-slate-200 dark:border-slate-700" />
++            <div className="flex items-center gap-2">
++              <div className="w-8 h-8 rounded-lg bg-gradient-to-tr from-amber-500 to-orange-400 flex items-center justify-center text-white shadow-sm shadow-orange-500/20">
++                <Sparkles className="w-4 h-4" />
++              </div>
++              <div>
++                <h1 className="font-semibold text-base leading-tight">批量快速制课工坊</h1>
++                <p className="text-xs text-slate-500 dark:text-slate-400">
++                  免交互对话 · 批量课件导入 · 全自动生成
++                </p>
++              </div>
++            </div>
++          </div>
++
++          <div className="flex items-center gap-2">
++            <Button
++              variant={activeTab === 'create' ? 'default' : 'ghost'}
++              size="sm"
++              onClick={() => setActiveTab('create')}
++              className="gap-1.5"
++            >
++              <UploadCloud className="w-4 h-4" />
++              新建任务
++            </Button>
++            <Button
++              variant={activeTab === 'board' ? 'default' : 'ghost'}
++              size="sm"
++              onClick={() => {
++                setActiveTab('board');
++                if (!activeJobId && recentJobs.length > 0) {
++                  setActiveJobId(recentJobs[0].id);
++                }
++              }}
++              className="gap-1.5 relative"
++            >
++              <Layers className="w-4 h-4" />
++              任务看板
++              {currentJob && currentJob.status === 'processing' && (
++                <span className="w-2 h-2 rounded-full bg-amber-500 animate-pulse absolute -top-0.5 -right-0.5" />
++              )}
++            </Button>
++          </div>
++        </div>
++      </header>
++
++      {/* 主体区域 */}
++      <main className="flex-1 max-w-6xl w-full mx-auto px-4 py-8">
++        {activeTab === 'create' ? (
++          <div className="max-w-3xl mx-auto space-y-6">
++            {/* 上传卡片 */}
++            <Card className="p-6 border-dashed border-2 border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900/60 shadow-sm">
++              <div
++                onDragOver={(e) => e.preventDefault()}
++                onDrop={handleDrop}
++                onClick={() => fileInputRef.current?.click()}
++                className="flex flex-col items-center justify-center py-8 cursor-pointer text-center group"
++              >
++                <div className="w-14 h-14 rounded-2xl bg-amber-50 dark:bg-amber-950/40 text-amber-500 flex items-center justify-center mb-3 group-hover:scale-105 transition-transform">
++                  <UploadCloud className="w-7 h-7" />
++                </div>
++                <h3 className="font-medium text-base mb-1">
++                  拖拽课件文件到此处，或 <span className="text-amber-500 underline underline-offset-4">点击浏览文件</span>
++                </h3>
++                <p className="text-xs text-slate-500 dark:text-slate-400 max-w-md">
++                  支持多选上传 PPTX、PDF、DOCX、Markdown、TXT 等格式文档。系统将自动调用已配置的 MinerU 进行高精度排版与知识提取。
++                </p>
++                <input
++                  type="file"
++                  multiple
++                  ref={fileInputRef}
++                  onChange={handleFileChange}
++                  accept=".pptx,.pdf,.docx,.doc,.txt,.md"
++                  className="hidden"
++                />
++              </div>
++
++              {files.length > 0 && (
++                <div className="mt-4 pt-4 border-t border-slate-100 dark:border-slate-800 space-y-2">
++                  <div className="flex items-center justify-between text-xs text-slate-500 px-1 mb-2">
++                    <span>已选文件 ({files.length} 个)</span>
++                    <button
++                      type="button"
++                      onClick={() => setFiles([])}
++                      className="text-red-500 hover:underline"
++                    >
++                      清空全部
++                    </button>
++                  </div>
++                  <div className="max-h-48 overflow-y-auto space-y-1.5 pr-1">
++                    {files.map((file, idx) => (
++                      <div
++                        key={idx}
++                        className="flex items-center justify-between px-3 py-2 rounded-lg bg-slate-50 dark:bg-slate-800/60 text-xs border border-slate-200/60 dark:border-slate-700/60"
++                      >
++                        <div className="flex items-center gap-2 truncate pr-2">
++                          <FileText className="w-4 h-4 text-amber-500 shrink-0" />
++                          <span className="font-medium truncate">{file.name}</span>
++                        </div>
++                        <div className="flex items-center gap-3 shrink-0">
++                          <span className="text-slate-400">
++                            {(file.size / 1024).toFixed(1)} KB
++                          </span>
++                          <button
++                            type="button"
++                            onClick={(e) => {
++                              e.stopPropagation();
++                              removeFile(idx);
++                            }}
++                            className="text-slate-400 hover:text-red-500 transition-colors"
++                          >
++                            <Trash2 className="w-3.5 h-3.5" />
++                          </button>
++                        </div>
++                      </div>
++                    ))}
++                  </div>
++                </div>
++              )}
++            </Card>
++
++            {/* 模式选择 */}
++            <div className="space-y-3">
++              <label className="text-sm font-medium text-slate-700 dark:text-slate-300">
++                生成模式选择
++              </label>
++              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
++                <div
++                  onClick={() => setMode('batch_independent')}
++                  className={`p-4 rounded-xl border-2 cursor-pointer transition-all ${
++                    mode === 'batch_independent'
++                      ? 'border-amber-500 bg-amber-50/40 dark:bg-amber-950/20 shadow-sm'
++                      : 'border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/40 hover:border-slate-300'
++                  }`}
++                >
++                  <div className="flex items-center justify-between mb-2">
++                    <span className="font-semibold text-sm flex items-center gap-2">
++                      <Layers className="w-4 h-4 text-amber-500" />
++                      批量独立生成 (一对一)
++                    </span>
++                    {mode === 'batch_independent' && (
++                      <div className="w-4 h-4 rounded-full bg-amber-500 text-white flex items-center justify-center">
++                        <Check className="w-2.5 h-2.5" />
++                      </div>
++                    )}
++                  </div>
++                  <p className="text-xs text-slate-500 dark:text-slate-400 leading-relaxed">
++                    每个文件生成一门独立的微课堂。后台自动化队列排队依次生产（上传 10 个课件即生成 10 门课）。
++                  </p>
++                </div>
++
++                <div
++                  onClick={() => setMode('single_merged')}
++                  className={`p-4 rounded-xl border-2 cursor-pointer transition-all ${
++                    mode === 'single_merged'
++                      ? 'border-amber-500 bg-amber-50/40 dark:bg-amber-950/20 shadow-sm'
++                      : 'border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/40 hover:border-slate-300'
++                  }`}
++                >
++                  <div className="flex items-center justify-between mb-2">
++                    <span className="font-semibold text-sm flex items-center gap-2">
++                      <Sparkles className="w-4 h-4 text-amber-500" />
++                      多资料融合为一课 (多合一)
++                    </span>
++                    {mode === 'single_merged' && (
++                      <div className="w-4 h-4 rounded-full bg-amber-500 text-white flex items-center justify-center">
++                        <Check className="w-2.5 h-2.5" />
++                      </div>
++                    )}
++                  </div>
++                  <p className="text-xs text-slate-500 dark:text-slate-400 leading-relaxed">
++                    将上传的所有资料内容深度融合、萃取关键考点，制作一门章节知识全面的综合互动微课。
++                  </p>
++                </div>
++              </div>
++            </div>
++
++            {/* 指导要求配置 */}
++            <div className="space-y-2">
++              <label className="text-sm font-medium text-slate-700 dark:text-slate-300">
++                教学总要求 / 提示词指导 (Prompt)
++              </label>
++              <textarea
++                value={prompt}
++                onChange={(e) => setPrompt(e.target.value)}
++                rows={3}
++                className="w-full text-xs p-3 rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 focus:outline-none focus:ring-2 focus:ring-amber-500/20 focus:border-amber-500"
++                placeholder="输入指导生成的总要求，例如：语气亲切幽默，增加针对性测验..."
++              />
++            </div>
++
++            {/* 附加功能开关 */}
++            <div className="flex flex-wrap items-center justify-between p-4 rounded-lg bg-slate-100/70 dark:bg-slate-900/80 gap-4 text-xs">
++              <div className="flex items-center gap-6">
++                <label className="flex items-center gap-2 cursor-pointer">
++                  <Switch checked={enableTTS} onCheckedChange={setEnableTTS} />
++                  <span className="flex items-center gap-1 font-medium">
++                    <Volume2 className="w-3.5 h-3.5 text-slate-500" />
++                    生成教师讲解语音 (TTS)
++                  </span>
++                </label>
++
++                <label className="flex items-center gap-2 cursor-pointer">
++                  <Switch checked={enableImageGeneration} onCheckedChange={setEnableImageGeneration} />
++                  <span className="flex items-center gap-1 font-medium">
++                    <ImageIcon className="w-3.5 h-3.5 text-slate-500" />
++                    AI 智能多媒体配图
++                  </span>
++                </label>
++              </div>
++
++              <div className="text-slate-400 text-right">
++                自动继承系统已配置的默认大模型与 MinerU 工具
++              </div>
++            </div>
++
++            {/* 提交按钮 */}
++            <Button
++              onClick={handleSubmit}
++              disabled={submitting || files.length === 0}
++              className="w-full h-11 bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-600 hover:to-orange-600 text-white font-medium text-sm gap-2 shadow-md shadow-orange-500/20"
++            >
++              {submitting ? (
++                <>
++                  <RefreshCw className="w-4 h-4 animate-spin" />
++                  正在分发上传与解析...
++                </>
++              ) : (
++                <>
++                  <Play className="w-4 h-4 fill-current" />
++                  提交批量制课任务 {files.length > 0 && `(共 ${files.length} 个课件)`}
++                </>
++              )}
++            </Button>
++          </div>
++        ) : (
++          /* 任务看板 */
++          <div className="space-y-6">
++            {/* 顶部作业总览 */}
++            {currentJob ? (
++              <Card className="p-6 bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-800 shadow-sm space-y-4">
++                <div className="flex flex-wrap items-center justify-between gap-4">
++                  <div>
++                    <div className="flex items-center gap-2 mb-1">
++                      <h2 className="text-lg font-semibold">{currentJob.title}</h2>
++                      <Badge
++                        variant={
++                          currentJob.status === 'completed'
++                            ? 'default'
++                            : currentJob.status === 'failed'
++                            ? 'destructive'
++                            : 'secondary'
++                        }
++                      >
++                        {currentJob.status === 'completed'
++                          ? '全部生产完成'
++                          : currentJob.status === 'processing'
++                          ? '正在流水线生产'
++                          : currentJob.status === 'queued'
++                          ? '排队等待执行'
++                          : '处理异常'}
++                      </Badge>
++                      <Badge variant="outline">
++                        {currentJob.mode === 'single_merged' ? '多资料合一' : '一对多批量'}
++                      </Badge>
++                    </div>
++                    <p className="text-xs text-slate-400 flex items-center gap-2">
++                      <Clock className="w-3.5 h-3.5" />
++                      创建时间: {new Date(currentJob.createdAt).toLocaleString()}
++                    </p>
++                  </div>
++
++                  {currentJob.resultClassroomUrl && (
++                    <div className="flex items-center gap-2">
++                      <Button
++                        size="sm"
++                        className="bg-emerald-600 hover:bg-emerald-700 text-white gap-1.5"
++                        onClick={() => window.open(currentJob.resultClassroomUrl, '_blank')}
++                      >
++                        <ExternalLink className="w-3.5 h-3.5" />
++                        立即体验完整课堂
++                      </Button>
++                      {currentJob.resultStageId && (
++                        <Button
++                          size="sm"
++                          variant="outline"
++                          onClick={() => router.push(`/workspace?course=${currentJob.resultStageId}`)}
++                          className="gap-1.5"
++                        >
++                          <Edit3 className="w-3.5 h-3.5" />
++                          进入工作台编辑
++                        </Button>
++                      )}
++                    </div>
++                  )}
++                </div>
++
++                {/* 总进度条 */}
++                <div className="space-y-2">
++                  <div className="flex items-center justify-between text-xs font-medium">
++                    <span>
++                      生产总进度: {currentJob.completedTasks} / {currentJob.totalTasks} 门课完成
++                      {currentJob.failedTasks > 0 && ` (${currentJob.failedTasks} 门失败)`}
++                    </span>
++                    <span className="text-amber-500 font-semibold">{currentJob.progress}%</span>
++                  </div>
++                  <Progress value={currentJob.progress} className="h-2.5" />
++                </div>
++              </Card>
++            ) : (
++              <div className="p-8 text-center text-slate-400 bg-slate-100/50 dark:bg-slate-900/50 rounded-xl">
++                暂未选中任何批处理任务，请点击“新建任务”发起课件生产。
++              </div>
++            )}
++
++            {/* 子任务明细列表 */}
++            {currentJob && (
++              <div className="space-y-3">
++                <h3 className="text-sm font-semibold text-slate-700 dark:text-slate-300">
++                  课件流水线生产详情列表
++                </h3>
++                <div className="grid grid-cols-1 gap-3">
++                  {currentJob.tasks.map((task, idx) => (
++                    <Card
++                      key={task.id}
++                      className="p-4 bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-800 flex flex-col md:flex-row md:items-center justify-between gap-4"
++                    >
++                      <div className="space-y-1.5 min-w-0 flex-1">
++                        <div className="flex items-center gap-2">
++                          <span className="text-xs font-mono text-slate-400">#{idx + 1}</span>
++                          <span className="font-medium text-sm truncate">{task.fileName}</span>
++                          {getStepBadge(task)}
++                        </div>
++                        <p className="text-xs text-slate-500 dark:text-slate-400">
++                          {task.stepMessage || '等待调度中...'}
++                        </p>
++                        {task.status !== 'completed' && task.status !== 'failed' && (
++                          <div className="w-full max-w-md pt-1">
++                            <Progress value={task.progress} className="h-1.5" />
++                          </div>
++                        )}
++                      </div>
++
++                      <div className="flex items-center gap-2 shrink-0">
++                        {task.classroomUrl && (
++                          <>
++                            <Button
++                              size="sm"
++                              variant="default"
++                              className="h-8 text-xs gap-1 bg-emerald-600 hover:bg-emerald-700"
++                              onClick={() => window.open(task.classroomUrl, '_blank')}
++                            >
++                              <ExternalLink className="w-3 h-3" />
++                              体验课堂
++                            </Button>
++                            {task.stageId && (
++                              <Button
++                                size="sm"
++                                variant="outline"
++                                className="h-8 text-xs gap-1"
++                                onClick={() => router.push(`/workspace?course=${task.stageId}`)}
++                              >
++                                <Edit3 className="w-3 h-3" />
++                                工作区精修
++                              </Button>
++                            )}
++                          </>
++                        )}
++                        {task.status === 'failed' && (
++                          <span className="text-xs text-red-500 font-medium flex items-center gap-1">
++                            <AlertCircle className="w-3.5 h-3.5" />
++                            {task.error || '生成失败'}
++                          </span>
++                        )}
++                      </div>
++                    </Card>
++                  ))}
++                </div>
++              </div>
++            )}
++
++            {/* 历史批次切换 */}
++            {recentJobs.length > 1 && (
++              <div className="pt-6 border-t border-slate-200 dark:border-slate-800">
++                <h4 className="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-3">
++                  历史生产批次
++                </h4>
++                <div className="flex flex-wrap gap-2">
++                  {recentJobs.map((j) => (
++                    <Button
++                      key={j.id}
++                      size="sm"
++                      variant={activeJobId === j.id ? 'secondary' : 'outline'}
++                      onClick={() => {
++                        setActiveJobId(j.id);
++                        loadJobDetails(j.id);
++                      }}
++                      className="text-xs gap-2"
++                    >
++                      <span>{j.title}</span>
++                      <span className="text-slate-400 font-mono">({j.progress}%)</span>
++                    </Button>
++                  ))}
++                </div>
++              </div>
++            )}
++          </div>
++        )}
++      </main>
++    </div>
++  );
++}
+diff --git a/app/page.tsx b/app/page.tsx
+index dd329425..24d1d6e5 100644
+--- a/app/page.tsx
++++ b/app/page.tsx
+@@ -804,6 +804,16 @@ function HomePage() {
+ 
+         <div className="w-[1px] h-4 bg-gray-200 dark:bg-gray-700" />
+ 
++        {/* Batch Studio Button */}
++        <button
++          onClick={() => router.push('/batch-studio')}
++          className="flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium text-amber-600 dark:text-amber-400 bg-amber-500/10 hover:bg-amber-500/20 border border-amber-500/30 transition-all shadow-sm cursor-pointer"
++          title="批量快速制课工坊"
++        >
++          <Sparkles className="w-3.5 h-3.5 text-amber-500" />
++          <span>批量制课</span>
++        </button>
++
+         {/* User Account Navigation */}
+         <UserNav onOpenSettings={() => setSettingsOpen(true)} />
+       </div>
+diff --git a/lib/server/batch-generation/extractor.ts b/lib/server/batch-generation/extractor.ts
+new file mode 100644
+index 00000000..502e0168
+--- /dev/null
++++ b/lib/server/batch-generation/extractor.ts
+@@ -0,0 +1,144 @@
++import { promises as fs } from 'fs';
++import { parsePptxIsolated } from '@/lib/server/agent-runtime/import-pptx';
++import { extractDocument, documentArtifactToParsedPdfContent } from '@/lib/document';
++import { normalizeDocumentMimeType } from '@/lib/document/mime';
++import { createLogger } from '@/lib/logger';
++import type { Slide } from '@openmaic/dsl';
++
++const log = createLogger('BatchExtractor');
++
++export interface ExtractedContent {
++  text: string;
++  images: string[];
++  title?: string;
++  slideCount?: number;
++}
++
++function stripHtml(html: string): string {
++  return html.replace(/<[^>]*>/g, '').replace(/&nbsp;/g, ' ').trim();
++}
++
++function extractFromPptxSlides(slides: Slide[]): ExtractedContent {
++  const textParts: string[] = [];
++  const images: string[] = [];
++  let firstTitle = '';
++
++  slides.forEach((slide, index) => {
++    const slideNumber = index + 1;
++    let slideTitle = `第 ${slideNumber} 页`;
++    const bodyTexts: string[] = [];
++
++    for (const elem of slide.elements ?? []) {
++      const rec = elem as {
++        type?: string;
++        content?: string;
++        text?: { content?: string };
++        src?: string;
++      };
++
++      if (rec.type === 'text' && rec.content) {
++        const clean = stripHtml(rec.content);
++        if (clean) {
++          if (!firstTitle) firstTitle = clean;
++          bodyTexts.push(clean);
++        }
++      } else if (rec.type === 'shape' && rec.text?.content) {
++        const clean = stripHtml(rec.text.content);
++        if (clean) bodyTexts.push(clean);
++      } else if (rec.type === 'image' && rec.src && typeof rec.src === 'string') {
++        if (rec.src.startsWith('data:image/') || rec.src.startsWith('http')) {
++          images.push(rec.src);
++        }
++      }
++    }
++
++    if (bodyTexts.length > 0) {
++      slideTitle = bodyTexts[0].slice(0, 50);
++    }
++
++    let slideBlock = `### 幻灯片 ${slideNumber}: ${slideTitle}\n${bodyTexts.join('\n')}`;
++    if (slide.script) {
++      slideBlock += `\n**讲师旁白与讲解脚本**：\n${slide.script.trim()}`;
++    }
++    textParts.push(slideBlock);
++  });
++
++  return {
++    text: textParts.join('\n\n---\n\n'),
++    images: images.slice(0, 15),
++    title: firstTitle || undefined,
++    slideCount: slides.length,
++  };
++}
++
++export async function extractFileContent(
++  filePath: string,
++  fileName: string,
++  declaredMime?: string,
++): Promise<ExtractedContent> {
++  const buffer = await fs.readFile(filePath);
++  const ext = fileName.toLowerCase().split('.').pop() || '';
++  const mimeType = normalizeDocumentMimeType({ fileName, mimeType: declaredMime });
++
++  log.info(`Extracting content for ${fileName} [ext=${ext}, mime=${mimeType}, size=${buffer.length} bytes]`);
++
++  // 1. PPTX 文件处理（原汁原味抽取每一页与批注讲解）
++  if (ext === 'pptx' || mimeType.includes('presentationml')) {
++    try {
++      const slides = await parsePptxIsolated(buffer.buffer);
++      if (slides && slides.length > 0) {
++        log.info(`Parsed ${slides.length} slides from PPTX: ${fileName}`);
++        return extractFromPptxSlides(slides);
++      }
++    } catch (err) {
++      log.warn(`Isolated PPTX parse failed for ${fileName}, attempting fallback document extractor:`, err);
++    }
++  }
++
++  // 2. 纯文本 / Markdown
++  if (ext === 'txt' || ext === 'md' || mimeType.startsWith('text/')) {
++    const text = buffer.toString('utf-8');
++    return {
++      text,
++      images: [],
++      title: fileName.replace(/\.[^/.]+$/, ''),
++    };
++  }
++
++  // 3. PDF / DOCX 等利用 OpenMAIC 的底层提取器（自动使用 MinerU / AliDocMind）
++  try {
++    const artifact = await extractDocument({
++      buffer,
++      fileName,
++      mimeType,
++      config: {
++        providerId: '',
++        allowEnvFallback: true,
++      },
++    });
++
++    const parsed = documentArtifactToParsedPdfContent(artifact);
++    const text = parsed.text || '';
++    const images = (parsed.images || []).slice(0, 15);
++
++    log.info(`Document extracted successfully: ${fileName} (${text.length} chars, ${images.length} images)`);
++
++    return {
++      text,
++      images,
++      title: fileName.replace(/\.[^/.]+$/, ''),
++    };
++  } catch (err) {
++    log.error(`Document extraction failed for ${fileName}:`, err);
++    // 即使高级解析失败，若含有可读文本，做兜底容灾
++    const rawText = buffer.toString('utf-8').replace(/[^\x20-\x7E\u4e00-\u9fa5\n\r\t]/g, '');
++    if (rawText.length > 100) {
++      return {
++        text: rawText.slice(0, 20000),
++        images: [],
++        title: fileName.replace(/\.[^/.]+$/, ''),
++      };
++    }
++    throw new Error(`无法解析课件文件 "${fileName}": ${err instanceof Error ? err.message : String(err)}`);
++  }
++}
+diff --git a/lib/server/batch-generation/runner.ts b/lib/server/batch-generation/runner.ts
+new file mode 100644
+index 00000000..5f5c023f
+--- /dev/null
++++ b/lib/server/batch-generation/runner.ts
+@@ -0,0 +1,328 @@
++import { promises as fs } from 'fs';
++import { createLogger } from '@/lib/logger';
++import { generateClassroom } from '@/lib/server/classroom-generation';
++import { getOwnerScopedDocumentStore } from '@/lib/server/agent-runtime/owner-scoped-documents';
++import { extractFileContent } from './extractor';
++import { getBatchJob, updateBatchJob } from './store';
++import type { BatchJob, SubTaskStep } from './types';
++
++const log = createLogger('BatchJobRunner');
++const runningBatchJobs = new Map<string, Promise<void>>();
++
++async function safeUnlink(path?: string): Promise<void> {
++  if (!path) return;
++  try {
++    await fs.unlink(path);
++  } catch {
++    // Ignore cleanup errors
++  }
++}
++
++export function runBatchJob(jobId: string, baseUrl: string): Promise<void> {
++  const existing = runningBatchJobs.get(jobId);
++  if (existing) return existing;
++
++  const jobPromise = (async () => {
++    try {
++      const initialJob = await getBatchJob(jobId);
++      if (!initialJob) {
++        log.error(`Batch job ${jobId} not found`);
++        return;
++      }
++
++      await updateBatchJob(jobId, (job) => {
++        job.status = 'processing';
++        job.startedAt = new Date().toISOString();
++        job.progress = 5;
++      });
++
++      if (initialJob.mode === 'single_merged') {
++        await executeSingleMergedJob(jobId, baseUrl);
++      } else {
++        await executeBatchIndependentJob(jobId, baseUrl);
++      }
++    } catch (error) {
++      log.error(`Batch job ${jobId} encountered unexpected error:`, error);
++      const message = error instanceof Error ? error.message : String(error);
++      await updateBatchJob(jobId, (job) => {
++        job.status = 'failed';
++        job.error = message;
++        job.completedAt = new Date().toISOString();
++      });
++    } finally {
++      runningBatchJobs.delete(jobId);
++    }
++  })();
++
++  runningBatchJobs.set(jobId, jobPromise);
++  return jobPromise;
++}
++
++/** 模式 A：多文件合为一门精品课程 */
++async function executeSingleMergedJob(jobId: string, baseUrl: string): Promise<void> {
++  const job = await getBatchJob(jobId);
++  if (!job) return;
++
++  log.info(`Executing single merged job ${jobId} with ${job.tasks.length} source files`);
++
++  const extractedTexts: string[] = [];
++  const extractedImages: string[] = [];
++
++  // 1. 依次解析全部上传文件
++  for (let i = 0; i < job.tasks.length; i++) {
++    const task = job.tasks[i];
++    const progress = Math.round(5 + (i / job.tasks.length) * 20);
++
++    await updateBatchJob(jobId, (j) => {
++      j.progress = progress;
++      const target = j.tasks.find((t) => t.id === task.id);
++      if (target) {
++        target.status = 'extracting';
++        target.progress = 50;
++        target.stepMessage = `正在使用 MinerU / 课件解析器提取内容...`;
++      }
++    });
++
++    try {
++      if (task.tempFilePath) {
++        const extracted = await extractFileContent(task.tempFilePath, task.fileName, task.mimeType);
++        extractedTexts.push(`### 教学参考资料 [${i + 1}]: ${task.fileName}\n${extracted.text}`);
++        extractedImages.push(...extracted.images);
++
++        await updateBatchJob(jobId, (j) => {
++          const target = j.tasks.find((t) => t.id === task.id);
++          if (target) {
++            target.status = 'completed';
++            target.progress = 100;
++            target.stepMessage = `提取完成 (${extracted.text.length} 字)`;
++          }
++        });
++      }
++    } catch (err) {
++      const errMsg = err instanceof Error ? err.message : String(err);
++      log.warn(`Extraction error on ${task.fileName}:`, err);
++      await updateBatchJob(jobId, (j) => {
++        const target = j.tasks.find((t) => t.id === task.id);
++        if (target) {
++          target.status = 'failed';
++          target.error = errMsg;
++          target.stepMessage = `提取失败: ${errMsg}`;
++        }
++      });
++    } finally {
++      await safeUnlink(task.tempFilePath);
++    }
++  }
++
++  // 2. 检查是否有有效提取内容
++  const combinedText = extractedTexts.join('\n\n---\n\n').trim();
++  if (!combinedText) {
++    throw new Error('未能从上传的任何文件中提取出有效文本或大纲内容');
++  }
++
++  // 3. 构建综合生成指令
++  const requirement = `${job.requirement ? job.requirement + '\n\n' : ''}【教学素材与知识点内容】：\n${combinedText.slice(0, 30000)}`;
++
++  await updateBatchJob(jobId, (j) => {
++    j.progress = 30;
++  });
++
++  // 4. 执行全自动课程生成管线
++  const result = await generateClassroom(
++    {
++      requirement,
++      pdfContent: {
++        text: combinedText.slice(0, 30000),
++        images: extractedImages.slice(0, 20),
++      },
++      enableTTS: job.enableTTS,
++      enableImageGeneration: job.enableImageGeneration,
++    },
++    {
++      baseUrl,
++      onProgress: async (p) => {
++        // Map 0-100% of generateClassroom to 30% - 95% of batch job
++        const mappedProgress = Math.round(30 + (p.progress * 0.65));
++        await updateBatchJob(jobId, (j) => {
++          j.progress = mappedProgress;
++        });
++      },
++    },
++  );
++
++  // 5. 写入当前用户的专属 PostgreSQL 存储
++  try {
++    const store = await getOwnerScopedDocumentStore(job.ownerId);
++    await store.saveDocument({
++      stage: result.stage,
++      scenes: result.scenes,
++    });
++    log.info(`Merged course ${result.id} successfully saved to owner store (${job.ownerId})`);
++  } catch (dbError) {
++    log.warn(`Failed to sync merged course ${result.id} to owner store:`, dbError);
++  }
++
++  // 6. 标记批次完成
++  await updateBatchJob(jobId, (j) => {
++    j.status = 'completed';
++    j.progress = 100;
++    j.completedTasks = j.tasks.length;
++    j.resultClassroomId = result.id;
++    j.resultClassroomUrl = result.url;
++    j.resultStageId = result.stage.id;
++    j.scenesCount = result.scenesCount;
++    j.completedAt = new Date().toISOString();
++  });
++
++  log.info(`Single merged batch job ${jobId} completed successfully: ${result.url}`);
++}
++
++/** 模式 B：多文件分别独立生成课程 (一对一批量流水线) */
++async function executeBatchIndependentJob(jobId: string, baseUrl: string): Promise<void> {
++  const job = await getBatchJob(jobId);
++  if (!job) return;
++
++  const totalTasks = job.tasks.length;
++  log.info(`Executing batch independent job ${jobId} with ${totalTasks} sequential tasks`);
++
++  let completedCount = 0;
++  let failedCount = 0;
++
++  for (let i = 0; i < totalTasks; i++) {
++    const task = job.tasks[i];
++    const taskIndex = i;
++
++    log.info(`[${i + 1}/${totalTasks}] Starting task: ${task.fileName}`);
++
++    await updateBatchJob(jobId, (j) => {
++      const target = j.tasks[taskIndex];
++      if (target) {
++        target.status = 'extracting';
++        target.startedAt = new Date().toISOString();
++        target.progress = 10;
++        target.stepMessage = '正在提取课件与知识点...';
++      }
++    });
++
++    try {
++      if (!task.tempFilePath) {
++        throw new Error('课件临时存储路径丢失');
++      }
++
++      // 1. 提取当前文件内容
++      const extracted = await extractFileContent(task.tempFilePath, task.fileName, task.mimeType);
++
++      await updateBatchJob(jobId, (j) => {
++        const target = j.tasks[taskIndex];
++        if (target) {
++          target.status = 'planning_outline';
++          target.progress = 25;
++          target.stepMessage = '正在规划课程大纲与交互流程...';
++        }
++      });
++
++      // 2. 组装当前课程的个性化提示词
++      const courseTitle = extracted.title || task.fileName.replace(/\.[^/.]+$/, '');
++      const requirement = `【课程主题】：《${courseTitle}》\n${job.requirement ? '【教学总要求】：' + job.requirement + '\n' : ''}【课件核心内容】：\n${extracted.text.slice(0, 25000)}`;
++
++      // 3. 执行生成
++      const result = await generateClassroom(
++        {
++          requirement,
++          pdfContent: {
++            text: extracted.text.slice(0, 25000),
++            images: extracted.images.slice(0, 15),
++          },
++          enableTTS: job.enableTTS,
++          enableImageGeneration: job.enableImageGeneration,
++        },
++        {
++          baseUrl,
++          onProgress: async (p) => {
++            const stepMapping: Record<string, SubTaskStep> = {
++              queued: 'planning_outline',
++              generating_outlines: 'planning_outline',
++              generating_scenes: 'building_scenes',
++              generating_media: 'building_scenes',
++              generating_tts: 'generating_tts',
++              persisting: 'persisting',
++              completed: 'completed',
++              failed: 'failed',
++            };
++            const currentSubStep = stepMapping[p.step] || 'building_scenes';
++
++            await updateBatchJob(jobId, (j) => {
++              const target = j.tasks[taskIndex];
++              if (target) {
++                target.status = currentSubStep;
++                target.progress = p.progress;
++                target.stepMessage = p.message;
++              }
++              // Compute overall batch progress
++              const currentTaskContribution = (p.progress / 100);
++              j.progress = Math.min(99, Math.round(((completedCount + currentTaskContribution) / totalTasks) * 100));
++            });
++          },
++        },
++      );
++
++      // 4. 同步至当前用户的 PostgreSQL 存储
++      try {
++        const store = await getOwnerScopedDocumentStore(job.ownerId);
++        await store.saveDocument({
++          stage: result.stage,
++          scenes: result.scenes,
++        });
++        log.info(`Course ${result.id} successfully saved to owner store (${job.ownerId})`);
++      } catch (dbError) {
++        log.warn(`Failed to sync course ${result.id} to owner store:`, dbError);
++      }
++
++      // 5. 标记子任务成功
++      completedCount++;
++      await updateBatchJob(jobId, (j) => {
++        j.completedTasks = completedCount;
++        j.progress = Math.round((completedCount / totalTasks) * 100);
++        const target = j.tasks[taskIndex];
++        if (target) {
++          target.status = 'completed';
++          target.progress = 100;
++          target.classroomId = result.id;
++          target.classroomUrl = result.url;
++          target.stageId = result.stage.id;
++          target.scenesCount = result.scenesCount;
++          target.stepMessage = `课程生成完成 (共 ${result.scenesCount} 页)`;
++          target.completedAt = new Date().toISOString();
++        }
++      });
++
++      log.info(`[${i + 1}/${totalTasks}] Finished: ${task.fileName} -> ${result.url}`);
++    } catch (err) {
++      failedCount++;
++      const errMsg = err instanceof Error ? err.message : String(err);
++      log.error(`[${i + 1}/${totalTasks}] Failed: ${task.fileName}`, err);
++
++      await updateBatchJob(jobId, (j) => {
++        j.failedTasks = failedCount;
++        const target = j.tasks[taskIndex];
++        if (target) {
++          target.status = 'failed';
++          target.error = errMsg;
++          target.stepMessage = `生成失败: ${errMsg}`;
++          target.completedAt = new Date().toISOString();
++        }
++      });
++    } finally {
++      await safeUnlink(task.tempFilePath);
++    }
++  }
++
++  // 6. 最终更新批次总体状态
++  await updateBatchJob(jobId, (j) => {
++    j.progress = 100;
++    j.status = failedCount === 0 ? 'completed' : completedCount > 0 ? 'partially_failed' : 'failed';
++    j.completedAt = new Date().toISOString();
++  });
++
++  log.info(`Batch independent job ${jobId} finished: ${completedCount} succeeded, ${failedCount} failed`);
++}
+diff --git a/lib/server/batch-generation/store.ts b/lib/server/batch-generation/store.ts
+new file mode 100644
+index 00000000..493b29f6
+--- /dev/null
++++ b/lib/server/batch-generation/store.ts
+@@ -0,0 +1,98 @@
++import { promises as fs } from 'fs';
++import path from 'path';
++import type { BatchJob } from './types';
++import { createLogger } from '@/lib/logger';
++
++const log = createLogger('BatchJobStore');
++
++export const BATCH_JOBS_DIR = path.join(process.cwd(), 'data', 'batch-jobs');
++export const BATCH_TEMP_DIR = path.join(process.cwd(), 'data', 'batch-temp');
++
++export async function ensureBatchDirs(): Promise<void> {
++  await fs.mkdir(BATCH_JOBS_DIR, { recursive: true });
++  await fs.mkdir(BATCH_TEMP_DIR, { recursive: true });
++}
++
++function jobFilePath(jobId: string): string {
++  return path.join(BATCH_JOBS_DIR, `${jobId}.json`);
++}
++
++const jobMutex = new Map<string, Promise<void>>();
++
++export async function saveBatchJob(job: BatchJob): Promise<void> {
++  await ensureBatchDirs();
++  const filePath = jobFilePath(job.id);
++  const tempPath = `${filePath}.${process.pid}.${Date.now()}.tmp`;
++  job.updatedAt = new Date().toISOString();
++  await fs.writeFile(tempPath, JSON.stringify(job, null, 2), 'utf-8');
++  await fs.rename(tempPath, filePath);
++}
++
++export async function getBatchJob(jobId: string, ownerId?: string): Promise<BatchJob | null> {
++  try {
++    const filePath = jobFilePath(jobId);
++    const content = await fs.readFile(filePath, 'utf-8');
++    const job = JSON.parse(content) as BatchJob;
++    if (ownerId && job.ownerId !== ownerId) {
++      return null;
++    }
++    return job;
++  } catch (error) {
++    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
++      return null;
++    }
++    log.error(`Failed to read batch job ${jobId}:`, error);
++    return null;
++  }
++}
++
++export async function updateBatchJob(
++  jobId: string,
++  updater: (job: BatchJob) => void,
++): Promise<BatchJob | null> {
++  const previous = jobMutex.get(jobId) ?? Promise.resolve();
++  let result: BatchJob | null = null;
++
++  const current = previous
++    .catch(() => undefined)
++    .then(async () => {
++      const job = await getBatchJob(jobId);
++      if (!job) return;
++      updater(job);
++      await saveBatchJob(job);
++      result = job;
++    });
++
++  jobMutex.set(jobId, current);
++  await current;
++  return result;
++}
++
++export async function listBatchJobs(ownerId: string): Promise<BatchJob[]> {
++  await ensureBatchDirs();
++  try {
++    const files = await fs.readdir(BATCH_JOBS_DIR);
++    const jobs: BatchJob[] = [];
++
++    for (const file of files) {
++      if (!file.endsWith('.json')) continue;
++      try {
++        const filePath = path.join(BATCH_JOBS_DIR, file);
++        const content = await fs.readFile(filePath, 'utf-8');
++        const job = JSON.parse(content) as BatchJob;
++        if (!ownerId || job.ownerId === ownerId) {
++          jobs.push(job);
++        }
++      } catch {
++        // Skip corrupted or unreadable files
++      }
++    }
++
++    return jobs.sort(
++      (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime(),
++    );
++  } catch (error) {
++    log.error('Failed to list batch jobs:', error);
++    return [];
++  }
++}
+diff --git a/lib/server/batch-generation/types.ts b/lib/server/batch-generation/types.ts
+new file mode 100644
+index 00000000..5d105eb3
+--- /dev/null
++++ b/lib/server/batch-generation/types.ts
+@@ -0,0 +1,62 @@
++export type BatchJobMode = 'single_merged' | 'batch_independent';
++
++export type BatchJobStatus =
++  | 'queued'
++  | 'processing'
++  | 'completed'
++  | 'failed'
++  | 'partially_failed';
++
++export type SubTaskStep =
++  | 'queued'
++  | 'extracting'
++  | 'planning_outline'
++  | 'building_scenes'
++  | 'generating_tts'
++  | 'persisting'
++  | 'completed'
++  | 'failed';
++
++export interface BatchSubTask {
++  id: string;
++  fileName: string;
++  fileSize: number;
++  mimeType: string;
++  tempFilePath?: string;
++  status: SubTaskStep;
++  progress: number; // 0 - 100
++  stepMessage: string;
++  classroomId?: string;
++  classroomUrl?: string;
++  stageId?: string;
++  scenesCount?: number;
++  error?: string;
++  startedAt?: string;
++  completedAt?: string;
++}
++
++export interface BatchJob {
++  id: string;
++  ownerId: string;
++  mode: BatchJobMode;
++  status: BatchJobStatus;
++  title: string;
++  requirement: string;
++  enableTTS: boolean;
++  enableImageGeneration: boolean;
++  totalTasks: number;
++  completedTasks: number;
++  failedTasks: number;
++  progress: number; // 0 - 100
++  createdAt: string;
++  updatedAt: string;
++  startedAt?: string;
++  completedAt?: string;
++  tasks: BatchSubTask[];
++  // If mode === 'single_merged':
++  resultClassroomId?: string;
++  resultClassroomUrl?: string;
++  resultStageId?: string;
++  scenesCount?: number;
++  error?: string;
++}

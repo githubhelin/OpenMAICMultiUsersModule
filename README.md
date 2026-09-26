@@ -173,11 +173,37 @@ OpenMAIC 原生包含 **Pro Workbench（智能体工作台）** 与 **MAIC Edito
 
 ---
 
+## ⚡ 批量制课工坊扩展 (Batch Course Studio)
+
+跳过繁琐的交互式人机对话，纯粹专注于文档课件批量自动化制作的专用补丁模块：
+
+- **详细指南文档**：👉 [batch-course-studio/README.md](./batch-course-studio/README.md)
+- **核心特点**：
+  - **多格式文件提取**：支持 PPTX（工作线程隔离解析）、PDF / DOCX（自动调用 MinerU）、TXT、Markdown 等。
+  - **继承系统全局配置**：自动继承管理员配置的默认大模型（DeepSeek、Claude、OpenAI 等）、语音合成（TTS）、视觉生图。
+  - **双重制课模式**：
+    - **多课件融合为一门课**：提炼多文件核心要点，融合生成一门长篇连贯交互大课。
+    - **独立课件批量生成**：多文件独立并发批量制作，一键处理整学期课程。
+  - **全后台异步生成 + 实时进度大屏 (`/batch-studio`)**。
+  - **多用户云端漫游无缝集成**：课程自动落库至所属用户的多用户存储中，多端自动同步。
+  - **标准 REST API 接口**：支持使用 `curl` 或自动化脚本批量排课与投递任务。
+- **一键安装**：在 OpenMAIC 项目根目录下运行：
+  ```bash
+  bash batch-course-studio/apply-batch-studio.sh
+  ```
+
+---
+
 ## 📂 仓库结构说明
 
 ```
-├── openmaic-multi-user.patch    # 针对官方 OpenMAIC 的完整统一补丁文件
+├── openmaic-multi-user.patch    # 针对官方 OpenMAIC 的完整多用户统一补丁文件
 ├── apply.sh                     # 一键打补丁自动化脚本 (含预检、原生DB装配、诊断与回滚)
+├── batch-course-studio/         # 批量制课工坊扩展模块 (纯后台批量制课、实时看板与API)
+│   ├── openmaic-batch-studio.patch  # 针对批量制课工坊的独立补丁文件
+│   ├── apply-batch-studio.sh    # 一键打入批量制课补丁脚本
+│   ├── README.md                # 批量制课工坊架构与使用说明
+│   └── extension/               # 批量制课独立源码副本
 ├── pro-workbench-guide/         # 方案 B（Pro 工作台 + 专业编辑模式）完整配置指南与脚本
 │   ├── README.md                # 规范化配置说明 (专供 AI Agent 与手动配置参考)
 │   └── setup-pro-workbench.sh   # 一键自动化配置与验证脚本
