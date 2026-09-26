@@ -2776,6 +2776,194 @@ index 00000000..d429cd58
 +    }
 +  )
 +);
+diff --git a/lib/utils/stage-storage.ts b/lib/utils/stage-storage.ts
+index e7b54322..67008f5f 100644
+--- a/lib/utils/stage-storage.ts
++++ b/lib/utils/stage-storage.ts
+@@ -29,6 +29,7 @@ import {
+   loadCurrentScene,
+   mutateDocument,
+   saveCurrentScene,
++  type AppDocument,
+   type AppDocumentOutline,
+ } from '@/lib/document-store';
+ import { clearAllForScene } from '@/lib/quiz/persistence';
+@@ -449,13 +450,52 @@ export async function saveStageDataIncremental(
+   return { failedChanges };
+ }
+ 
++async function fetchRemoteStageDocument(stageId: string): Promise<AppDocument | null> {
++  try {
++    const res = await fetch(`/api/stages/${encodeURIComponent(stageId)}`, {
++      credentials: 'include',
++    });
++    if (res.ok) {
++      const data = await res.json();
++      if (data && data.stage) {
++        return {
++          stage: data.stage as Stage,
++          scenes: (data.scenes || []) as Scene[],
++          outline: data.outline as AppDocumentOutline | undefined,
++        };
++      }
++    }
++    const classRes = await fetch(`/api/classroom?id=${encodeURIComponent(stageId)}`, {
++      credentials: 'include',
++    });
++    if (classRes.ok) {
++      const classData = await classRes.json();
++      if (classData && classData.classroom && classData.classroom.stage) {
++        return {
++          stage: classData.classroom.stage as Stage,
++          scenes: (classData.classroom.scenes || []) as Scene[],
++        };
++      }
++    }
++  } catch {
++    // network or server error
++  }
++  return null;
++}
++
+ /**
+- * Load stage data from IndexedDB
++ * Load stage data from IndexedDB with server fallback
+  */
+ export async function loadStageData(stageId: string): Promise<StageStoreData | null> {
+   try {
+     const access = await accessDocument(stageId);
+-    const document = access.document;
++    let document = access.document;
++    if (!document) {
++      const remote = await fetchRemoteStageDocument(stageId);
++      if (remote) {
++        document = remote;
++      }
++    }
+     if (!document) {
+       log.info(`Stage not found: ${stageId}`);
+       return null;
+@@ -684,6 +724,10 @@ async function performStageDeletion(stageId: string): Promise<void> {
+             }
+ 
+             log.info(`Deleted stage: ${stageId}`);
++            fetch(`/api/stages/${encodeURIComponent(stageId)}`, {
++              method: 'DELETE',
++              credentials: 'include',
++            }).catch(() => {});
+             releaseCaller(undefined);
+             // The public deletion remains bounded, but this callback deliberately
+             // retains the exclusive lock until a late runtime cascade can no longer
+@@ -786,12 +830,17 @@ async function listOwnerStagesFromServer(): Promise<StageListItem[]> {
+  */
+ export async function listStages(): Promise<StageListItem[]> {
+   try {
++    let serverStages: StageListItem[] = [];
++    try {
++      serverStages = await listOwnerStagesFromServer();
++    } catch {
++      // Server persistence unavailable or network unreachable
++    }
++
+     if (isBrowserPersistenceEnabled()) {
+-      // Server persistence is on: the generic document listing answers 403 by
+-      // design, so the home/workspace library lists through the owner-scoped
+-      // workbench surface instead.
+-      return await listOwnerStagesFromServer();
++      return serverStages;
+     }
++
+     const summaries = await getDocumentStore().listDocuments();
+     const ids = new Set(summaries.map((summary) => summary.id));
+     const legacy = await getLegacyDocumentStore().listStages();
+@@ -807,7 +856,7 @@ export async function listStages(): Promise<StageListItem[]> {
+     // not in the DocumentStore; join it in so callers can group courses.
+     const memberships = await db.stageFolders.toArray();
+     const folderByStage = new Map(memberships.map((m) => [m.stageId, m.folderId]));
+-    return [
++    const localStages = [
+       ...summaries,
+       ...legacyOnly
+         .filter((stage) => stage !== null)
+@@ -821,11 +870,19 @@ export async function listStages(): Promise<StageListItem[]> {
+           interactiveMode: stage.interactiveMode,
+           taskEngineMode: stage.taskEngineMode,
+         })),
+-    ]
+-      .map((item) =>
+-        folderByStage.get(item.id) ? { ...item, folderId: folderByStage.get(item.id) } : item,
+-      )
+-      .sort((a, b) => b.updatedAt - a.updatedAt);
++    ].map((item) =>
++      folderByStage.get(item.id) ? { ...item, folderId: folderByStage.get(item.id) } : item,
++    );
++
++    const localIds = new Set(localStages.map((s) => s.id));
++    const combined = [...localStages];
++    for (const serverStage of serverStages) {
++      if (!localIds.has(serverStage.id)) {
++        combined.push(serverStage);
++      }
++    }
++
++    return combined.sort((a, b) => b.updatedAt - a.updatedAt);
+   } catch (error) {
+     log.error('Failed to list stages:', error);
+     throw error;
+@@ -926,7 +983,13 @@ export async function getFirstSlideByStages(
+   try {
+     await Promise.all(
+       stageIds.map(async (stageId) => {
+-        const document = (await accessDocument(stageId)).document;
++        let document = (await accessDocument(stageId)).document;
++        if (!document) {
++          const remote = await fetchRemoteStageDocument(stageId);
++          if (remote) {
++            document = remote;
++          }
++        }
+         const firstSlide = document?.scenes.find((s) => s.content?.type === 'slide');
+         if (firstSlide && firstSlide.content.type === 'slide') {
+           const slide = structuredClone(firstSlide.content.canvas);
+@@ -1090,10 +1153,20 @@ export async function getFirstSlideByStages(
+  */
+ export async function renameStage(stageId: string, newName: string): Promise<void> {
+   try {
+-    await mutateDocument(stageId, async (document, store) => {
+-      if (!document) throw new Error(`Stage not found: ${stageId}`);
+-      await store.putStage(stageId, { ...document.stage, name: newName, updatedAt: Date.now() });
+-    });
++    try {
++      await mutateDocument(stageId, async (document, store) => {
++        if (!document) throw new Error(`Stage not found: ${stageId}`);
++        await store.putStage(stageId, { ...document.stage, name: newName, updatedAt: Date.now() });
++      });
++    } catch {
++      // Local Dexie record not found (e.g. cloud stage)
++    }
++    fetch(`/api/stages/${encodeURIComponent(stageId)}`, {
++      method: 'PATCH',
++      headers: { 'Content-Type': 'application/json' },
++      body: JSON.stringify({ name: newName }),
++      credentials: 'include',
++    }).catch(() => {});
+     log.info(`Renamed stage ${stageId} to "${newName}"`);
+   } catch (error) {
+     log.error('Failed to rename stage:', error);
+@@ -1108,7 +1181,12 @@ export async function stageExists(stageId: string): Promise<boolean> {
+   try {
+     const summaries = await getDocumentStore().listDocuments();
+     if (summaries.some((stage) => stage.id === stageId)) return true;
+-    return (await getLegacyDocumentStore().read(stageId)) !== null;
++    if ((await getLegacyDocumentStore().read(stageId)) !== null) return true;
++    try {
++      const res = await fetch(`/api/stages/${encodeURIComponent(stageId)}`, { credentials: 'include' });
++      if (res.ok) return true;
++    } catch {}
++    return false;
+   } catch (error) {
+     log.error('Failed to check stage existence:', error);
+     return false;
 diff --git a/scripts/reset-admin-password.mjs b/scripts/reset-admin-password.mjs
 new file mode 100755
 index 00000000..104eb0c7
