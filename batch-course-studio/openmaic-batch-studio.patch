@@ -363,10 +363,10 @@ index df488ecf..f2aab28c 100644
          researchContext: researchContext || 'None',
 diff --git a/app/batch-studio/page.tsx b/app/batch-studio/page.tsx
 new file mode 100644
-index 00000000..d7499cd7
+index 00000000..d2c504c8
 --- /dev/null
 +++ b/app/batch-studio/page.tsx
-@@ -0,0 +1,957 @@
+@@ -0,0 +1,967 @@
 +'use client';
 +
 +import React, { useState, useEffect, useRef } from 'react';
@@ -393,6 +393,7 @@ index 00000000..d7499cd7
 +  Zap,
 +  Target,
 +  BookOpen,
++  Gamepad2,
 +} from 'lucide-react';
 +import { Button } from '@/components/ui/button';
 +import { Card } from '@/components/ui/card';
@@ -710,6 +711,15 @@ index 00000000..d7499cd7
 +          </div>
 +
 +          <div className="flex items-center gap-2">
++            <Button
++              variant="outline"
++              size="sm"
++              onClick={() => router.push('/interactive-hub')}
++              className="gap-1.5 border-purple-200 dark:border-purple-800 text-purple-600 dark:text-purple-400 hover:bg-purple-50 dark:hover:bg-purple-950/40"
++            >
++              <Gamepad2 className="w-4 h-4" />
++              互动展厅
++            </Button>
 +            <Button
 +              variant="outline"
 +              size="sm"
@@ -1325,18 +1335,19 @@ index 00000000..d7499cd7
 +  );
 +}
 diff --git a/app/page.tsx b/app/page.tsx
-index 31059149..910cbd69 100644
+index 31059149..dc9a8e7d 100644
 --- a/app/page.tsx
 +++ b/app/page.tsx
-@@ -27,6 +27,7 @@ import {
+@@ -27,6 +27,8 @@ import {
    X,
    Presentation,
    Loader2,
 +  BookOpen,
++  Gamepad2,
  } from 'lucide-react';
  import { useI18n } from '@/lib/hooks/use-i18n';
  import { LanguageSwitcher } from '@/components/language-switcher';
-@@ -36,6 +37,8 @@ import { InputGroup, InputGroupInput, InputGroupButton } from '@/components/ui/i
+@@ -36,6 +38,8 @@ import { InputGroup, InputGroupInput, InputGroupButton } from '@/components/ui/i
  import { Textarea as UITextarea } from '@/components/ui/textarea';
  import { cn } from '@/lib/utils';
  import { SettingsDialog } from '@/components/settings';
@@ -1345,7 +1356,7 @@ index 31059149..910cbd69 100644
  import { GenerationToolbar } from '@/components/generation/generation-toolbar';
  import { AgentBar } from '@/components/agent/agent-bar';
  import { useTheme } from '@/lib/hooks/use-theme';
-@@ -89,6 +92,8 @@ import {
+@@ -89,6 +93,8 @@ import {
  } from '@/lib/config/feature-flags';
  import { useImportPptx } from '@/lib/import/use-import-pptx';
  import { InteractiveModeButton } from '@/components/generation/interactive-mode-button';
@@ -1354,7 +1365,7 @@ index 31059149..910cbd69 100644
  import { ProBadge } from '@/components/workbench/ProBadge';
  import { arrivedByProSwap, startProSwap } from '@/lib/workbench/pro-swap';
  import {
-@@ -100,6 +105,7 @@ const log = createLogger('Home');
+@@ -100,6 +106,7 @@ const log = createLogger('Home');
  
  const RECENT_OPEN_STORAGE_KEY = 'recentClassroomsOpen';
  const INTERACTIVE_MODE_STORAGE_KEY = 'interactiveModeEnabled';
@@ -1362,7 +1373,7 @@ index 31059149..910cbd69 100644
  
  // PPTX import is still scaffolding: `useImportPptx` has no `onImported` consumer
  // yet, so the flow only logs the parsed slides. Hide the entry point behind a
-@@ -112,6 +118,7 @@ let workbenchRuntimeCache: boolean | null = null;
+@@ -112,6 +119,7 @@ let workbenchRuntimeCache: boolean | null = null;
  interface FormState {
    courseMaterials: SelectedCourseMaterial[];
    requirement: string;
@@ -1370,7 +1381,7 @@ index 31059149..910cbd69 100644
    interactiveMode: boolean;
    vocationalTestMode: boolean;
  }
-@@ -119,6 +126,7 @@ interface FormState {
+@@ -119,6 +127,7 @@ interface FormState {
  const initialFormState: FormState = {
    courseMaterials: [],
    requirement: '',
@@ -1378,7 +1389,7 @@ index 31059149..910cbd69 100644
    interactiveMode: false,
    vocationalTestMode: false,
  };
-@@ -201,6 +209,19 @@ function HomePage() {
+@@ -201,6 +210,19 @@ function HomePage() {
      } catch {
        /* localStorage unavailable */
      }
@@ -1398,7 +1409,7 @@ index 31059149..910cbd69 100644
    }, []);
  
    // Restore requirement draft from localStorage on mount. The previous derived-state
-@@ -217,6 +238,7 @@ function HomePage() {
+@@ -217,6 +239,7 @@ function HomePage() {
  
    const [themeOpen, setThemeOpen] = useState(false);
    const [error, setError] = useState<string | null>(null);
@@ -1406,7 +1417,7 @@ index 31059149..910cbd69 100644
    // True while the Generate click drains upload-time ingests and builds the
    // generation session. Doubles as the guard flag that freezes the course
    // material set for the duration of prep and as the switch that disables the
-@@ -504,6 +526,8 @@ function HomePage() {
+@@ -504,6 +527,8 @@ function HomePage() {
      try {
        if (field === 'interactiveMode')
          localStorage.setItem(INTERACTIVE_MODE_STORAGE_KEY, String(value));
@@ -1415,7 +1426,7 @@ index 31059149..910cbd69 100644
        if (field === 'requirement') updateRequirementCache(value as string);
      } catch {
        /* ignore */
-@@ -599,6 +623,7 @@ function HomePage() {
+@@ -599,6 +624,7 @@ function HomePage() {
        const userProfile = useUserProfileStore.getState();
        const requirements: UserRequirements = {
          requirement: form.requirement,
@@ -1423,7 +1434,7 @@ index 31059149..910cbd69 100644
          userNickname: userProfile.nickname || undefined,
          userBio: userProfile.bio || undefined,
          // Course-level web search now lives in settings (课程模型配置 → 联网调研)
-@@ -783,26 +808,57 @@ function HomePage() {
+@@ -783,26 +809,67 @@ function HomePage() {
            )}
          </div>
  
@@ -1464,6 +1475,16 @@ index 31059149..910cbd69 100644
 +          <span>批量制课</span>
 +        </button>
 +
++        {/* Interactive Hub Button */}
++        <button
++          onClick={() => router.push('/interactive-hub')}
++          className="flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium text-purple-600 dark:text-purple-400 bg-purple-500/10 hover:bg-purple-500/20 border border-purple-500/30 transition-all shadow-xs cursor-pointer"
++          title="互动实验与游戏展厅"
++        >
++          <Gamepad2 className="w-3.5 h-3.5 text-purple-500" />
++          <span>互动展厅</span>
++        </button>
++
 +        {/* My Courses Button */}
 +        <button
 +          onClick={() => router.push('/my-courses')}
@@ -1498,7 +1519,7 @@ index 31059149..910cbd69 100644
  
        {/* ═══ Background Decor ═══ */}
        <div className="absolute inset-0 overflow-hidden pointer-events-none">
-@@ -904,6 +960,13 @@ function HomePage() {
+@@ -904,6 +971,13 @@ function HomePage() {
                  />
                </div>
  
@@ -1779,10 +1800,10 @@ index 00000000..502e0168
 +}
 diff --git a/lib/server/batch-generation/runner.ts b/lib/server/batch-generation/runner.ts
 new file mode 100644
-index 00000000..29caef9d
+index 00000000..b87a83dd
 --- /dev/null
 +++ b/lib/server/batch-generation/runner.ts
-@@ -0,0 +1,510 @@
+@@ -0,0 +1,535 @@
 +import { promises as fs } from 'fs';
 +import { createLogger } from '@/lib/logger';
 +import { generateClassroom } from '@/lib/server/classroom-generation';
@@ -1791,6 +1812,9 @@ index 00000000..29caef9d
 +import { getBatchJob, updateBatchJob } from './store';
 +import type { BatchJob, SubTaskStep } from './types';
 +import { buildCourseScaleInstruction } from '@/lib/types/course-scale';
++import { syncInteractiveLibraryForStage } from '@/lib/server/interactive-library';
++import { getStageAccessDb } from '@/lib/server/stage-access';
++import { markStageGenerationComplete } from '@/lib/persistence/stage-meta';
 +
 +const log = createLogger('BatchJobRunner');
 +const runningBatchJobs = new Map<string, Promise<void>>();
@@ -2050,10 +2074,21 @@ index 00000000..29caef9d
 +      stage: result.stage,
 +      scenes: result.scenes,
 +    });
++    try {
++      const db = await getStageAccessDb();
++      await markStageGenerationComplete(db, result.id);
++    } catch (completeErr) {
++      log.warn(`Failed to mark generation complete for ${result.id}:`, completeErr);
++    }
 +    log.info(`Merged course ${result.id} successfully saved to owner store (${job.ownerId})`);
 +  } catch (dbError) {
 +    log.warn(`Failed to sync merged course ${result.id} to owner store:`, dbError);
 +  }
++
++  // 5.5 自动打包并导出互动内容至互动展厅
++  void syncInteractiveLibraryForStage(result.stage, result.scenes).catch((err) => {
++    log.warn(`Failed to sync interactive library for merged course ${result.id}:`, err);
++  });
 +
 +  // 6. 标记批次完成
 +  await updateBatchJob(jobId, (j) => {
@@ -2198,10 +2233,21 @@ index 00000000..29caef9d
 +          stage: result.stage,
 +          scenes: result.scenes,
 +        });
++        try {
++          const db = await getStageAccessDb();
++          await markStageGenerationComplete(db, result.id);
++        } catch (completeErr) {
++          log.warn(`Failed to mark generation complete for ${result.id}:`, completeErr);
++        }
 +        log.info(`Course ${result.id} successfully saved to owner store (${initialJob.ownerId})`);
 +      } catch (dbError) {
 +        log.warn(`Failed to sync course ${result.id} to owner store:`, dbError);
 +      }
++
++      // 4.5 自动打包并导出互动内容至互动展厅
++      void syncInteractiveLibraryForStage(result.stage, result.scenes).catch((err) => {
++        log.warn(`Failed to sync interactive library for course ${result.id}:`, err);
++      });
 +
 +      // 5. 标记子任务成功
 +      completedCount++;
@@ -2498,7 +2544,7 @@ index 00000000..60eeda9b
 +  error?: string;
 +}
 diff --git a/lib/server/classroom-generation.ts b/lib/server/classroom-generation.ts
-index c2768590..29e05d18 100644
+index c2768590..bb6fbefc 100644
 --- a/lib/server/classroom-generation.ts
 +++ b/lib/server/classroom-generation.ts
 @@ -1,6 +1,9 @@
@@ -2558,7 +2604,7 @@ index c2768590..29e05d18 100644
    };
    const vocationalActive = resolveVocationalActive(requirements);
    const pdfText = pdfContent?.text || undefined;
-@@ -547,18 +564,138 @@ export async function generateClassroom(
+@@ -547,18 +564,149 @@ export async function generateClassroom(
      scenesGenerated: 0,
    });
  
@@ -2653,17 +2699,28 @@ index c2768590..29e05d18 100644
 +          );
 +        } else {
 +          const enriched = rawOutlines.map((outline, index) => {
-+            const widgetType =
-+              outline.widgetType || (outline.type === 'interactive' ? 'simulation' : undefined);
-+            const widgetOutline =
-+              outline.widgetOutline ||
-+              (widgetType ? { concept: outline.title || 'Interactive Exploration' } : undefined);
++            const isInteractive = outline.type === 'interactive';
++            const isQuiz = outline.type === 'quiz';
++            const widgetType = isInteractive
++              ? outline.widgetType || 'simulation'
++              : undefined;
++            const widgetOutline = isInteractive
++              ? outline.widgetOutline || { concept: outline.title || 'Interactive Exploration' }
++              : undefined;
++            const quizConfig = isQuiz
++              ? outline.quizConfig || {
++                  questionCount: 2,
++                  difficulty: 'medium',
++                  questionTypes: ['single', 'multiple'],
++                }
++              : undefined;
++
 +            return {
 +              ...outline,
 +              id: outline.id || nanoid(),
 +              order: index + 1,
-+              widgetType,
-+              widgetOutline,
++              ...(isInteractive ? { widgetType, widgetOutline } : { widgetType: undefined, widgetOutline: undefined }),
++              ...(isQuiz ? { quizConfig } : {}),
 +              ...(Array.isArray(outline.mediaGenerations) ? null : { mediaGenerations: undefined }),
 +            };
 +          });
@@ -2709,7 +2766,7 @@ index c2768590..29e05d18 100644
  
    if (!outlinesResult.success || !outlinesResult.data) {
      log.error('Failed to generate outlines:', outlinesResult.error);
-@@ -566,8 +703,11 @@ export async function generateClassroom(
+@@ -566,8 +714,11 @@ export async function generateClassroom(
    }
  
    const { languageDirective, courseTitle, outlines } = outlinesResult.data;
@@ -2722,7 +2779,7 @@ index c2768590..29e05d18 100644
    );
  
    await options.onProgress?.({
-@@ -602,6 +742,7 @@ export async function generateClassroom(
+@@ -602,6 +753,7 @@ export async function generateClassroom(
      languageDirective,
      videoManifest: buildVideoManifestFromOutlines(outlines),
      style: 'interactive',
@@ -2730,7 +2787,7 @@ index c2768590..29e05d18 100644
      createdAt: Date.now(),
      updatedAt: Date.now(),
      // For LLM-generated agents, embed full configs so the client can
-@@ -637,6 +778,12 @@ export async function generateClassroom(
+@@ -637,6 +789,12 @@ export async function generateClassroom(
      let generatedScenes = 0;
  
      for (const [index, outline] of outlines.entries()) {
@@ -2743,7 +2800,7 @@ index c2768590..29e05d18 100644
        const safeOutline = applyOutlineFallbacks(outline, true, {
          allowProceduralSkill: vocationalActive,
        });
-@@ -746,6 +893,12 @@ export async function generateClassroom(
+@@ -746,6 +904,12 @@ export async function generateClassroom(
  
      // Phase: Media generation (after all scenes generated)
      if (input.enableImageGeneration || input.enableVideoGeneration) {
@@ -2758,10 +2815,10 @@ index c2768590..29e05d18 100644
          progress: 90,
 diff --git a/lib/types/course-scale.ts b/lib/types/course-scale.ts
 new file mode 100644
-index 00000000..fc195587
+index 00000000..084ad86c
 --- /dev/null
 +++ b/lib/types/course-scale.ts
-@@ -0,0 +1,48 @@
+@@ -0,0 +1,80 @@
 +export type CourseScale = 'micro' | 'standard' | 'thematic';
 +
 +export interface CourseScaleConfig {
@@ -2777,38 +2834,70 @@ index 00000000..fc195587
 +  micro: {
 +    id: 'micro',
 +    label: '微课精讲',
-+    badge: '4~5页',
-+    slides: '4~5 页',
-+    description: '单点突破，速战速决',
-+    structure: '1页导入 + 1页精讲 + 1~2个交互/小测 + 1页速记总结',
++    badge: '6~8页',
++    slides: '6~8 页',
++    description: '单点精讲，完整闭环',
++    structure: '1页导入 + 2页精讲 + 1~2个交互探究 + 1次小测 + 1页速记总结',
 +  },
 +  standard: {
 +    id: 'standard',
 +    label: '标准课时',
-+    badge: '7~9页',
-+    slides: '7~9 页',
++    badge: '10~13页',
++    slides: '10~13 页',
 +    description: '经典闭环，均衡深入',
-+    structure: '1页导入 + 2页讲解 + 2~3个交互探究 + 1~2次小测 + 1页拓展',
++    structure: '1页导入 + 3~4页精讲 + 2~3个交互探究 + 2次随堂小测 + 1~2页拓展总结',
 +  },
 +  thematic: {
 +    id: 'thematic',
 +    label: '专题大课',
-+    badge: '12~15页',
-+    slides: '12~15 页',
++    badge: '16~20页',
++    slides: '16~20 页',
 +    description: '多阶递进，深度实战',
-+    structure: '多阶段认知闭环 + 3~4个深度实验/挑战 + 分段小测 + 系统考核',
++    structure: '多阶段认知进阶 + 5~6页理论精讲 + 4~5个深度实验 + 2~3次分段小测 + 终极认证总结',
 +  },
 +};
 +
 +export function buildCourseScaleInstruction(scale?: CourseScale): string {
 +  if (scale === 'micro') {
-+    return '\n\n【课程篇幅与教学结构规范 - 微课精讲模式】\n- 目标页数：总场景数严格控制在 4~5 页（包含导入与总结）。\n- 教学节奏：聚焦单一核心知识点/公式/技能，直奔主题，避免冗长铺垫。\n- 结构配比：1页核心问题导入 -> 1页关键原理/参数精讲 -> 1~2个针对性互动实验/练习小测 -> 1页速记卡与要点小结。\n- 纪律要求：严禁冗长背景介绍，开门见山，高密度探究。';
++    return `
++
++【课程篇幅与教学结构规范 - 微课精讲模式 (6~8页)】
++- 遵循 OpenMAIC 标准教学范式，绝不随意精简或压缩教学逻辑，保持知识呈现的完整度与深度。
++- 目标页数：总场景数严格控制在 6~8 页。
++- 教学结构必须严格按照以下场景类型与逻辑链路展开：
++  1. [第1页] type: "slide" — 核心情境驱动、痛点问题导入与本课学习目标。
++  2. [第2~3页] type: "slide" — 核心概念、关键原理、数学公式或算法机制层层深入精讲（提供清晰的知识结构与图表说明）。
++  3. [第4~5页] type: "interactive" — 1~2个针对性互动实验/科学仿真/探究游戏（必须提供 widgetType 与 widgetOutline，让学生动手操控变量探究规律）。
++  4. [倒数第2页] type: "quiz" — 随堂过关小测验，检测关键概念掌握程度（必须提供 quizConfig: { "questionCount": 2, "difficulty": "medium", "questionTypes": ["single", "multiple"] }）。
++  5. [末页/最后一页] type: "slide" — 要点速记卡、关键结论梳理与全课总结展望（最后一页必须是 slide，严禁以 interactive 或 quiz 结尾）。`;
 +  }
 +  if (scale === 'thematic') {
-+    return '\n\n【课程篇幅与教学结构规范 - 专题大课模式】\n- 目标页数：总场景数展开为 12~15 页深度篇幅。\n- 教学节奏：适合专题复习或复杂工程/系统仿真项目，分层次阶梯式推进。\n- 结构配比：采用多阶段认知闭环（基础原理认知 -> 进阶规律探究 -> 综合实战/排障游戏），包含至少 3~4 个互动模拟/挑战部件，并在每个知识小节后插入 1 次阶段性小测，最后进行系统思维导图梳理与课后考核。\n- 纪律要求：避免连续堆砌纯理论文本，各阶段之间用过渡幻灯片平滑承接。';
++    return `
++
++【课程篇幅与教学结构规范 - 专题大课模式 (16~20页)】
++- 遵循 OpenMAIC 标准教学范式，体系化展开复杂专题，绝不省略推导过程与分层认知建构，保障大体量课程的严谨与充实。
++- 目标页数：总场景数展开为 16~20 页深度篇幅。
++- 教学结构必须采用多阶段认知进阶体系（基础认知 -> 进阶规律 -> 综合应用与工程实战）：
++  1. 宏观导引（第1页）：type: "slide" — 专题大背景、工程/学术挑战与全课学习路线图。
++  2. 理论框架精讲（共5~6页）：type: "slide" — 概念体系剖析、核心机制推导、系统流程与典型案例深度解析。
++  3. 深度交互实验（共4~5页）：type: "interactive" — 覆盖各知识小节的深度科学仿真、算法可视化沙箱或决策挑战（必须提供 widgetType 与 widgetOutline）。
++  4. 阶段性闯关检测（共2~3页）：type: "quiz" — 穿插在各个知识模块探究之后，检测阶段性掌握并给予即时反馈（必须提供 quizConfig: { "questionCount": 2, "difficulty": "medium", "questionTypes": ["single", "multiple"] }）。
++  5. 经验迁移与避坑（1~2页）：type: "slide" — 常见误区辨析、工程最佳实践与前沿拓展。
++  6. 终极收官（最后一页）：type: "slide" — 全课知识图谱梳理、思维导图总结、能力进阶勋章与课后实战探究（最后一页必须是 slide，严禁以 interactive 或 quiz 结尾）。`;
 +  }
 +  // 'standard' or default
-+  return '\n\n【课程篇幅与教学结构规范 - 标准课时模式】\n- 目标页数：总场景数保持在 7~9 页的标准微课堂体量。\n- 教学节奏：经典认知闭环，由浅入深。\n- 结构配比：1页情境导入 -> 2页核心概念讲解 -> 2~3个互动探究实验/练习 -> 1~2次随堂小测 -> 1页总结反思与迁移应用。';
++  return `
++
++【课程篇幅与教学结构规范 - 标准课时模式 (10~13页)】
++- 遵循 OpenMAIC 经典标准课堂教学范式，扎实推进认知闭环，绝不随意精简理论讲解、实验探索与测验复盘任何一个核心环节。
++- 目标页数：总场景数保持在 10~13 页的标准完整课堂体量。
++- 教学结构必须严格按照以下场景类型与教学链路递进：
++  1. 情境导入（第1页）：type: "slide" — 贴近现实的情境启发、核心悬念与学习目标铺垫。
++  2. 核心精讲（共3~4页）：type: "slide" — 由浅入深、梯度递进的概念定义、原理机制与结构化图表精讲。
++  3. 互动探究（共2~3页）：type: "interactive" — 科学仿真、交互图解、动态沙盒或探究游戏（必须提供 widgetType 与 widgetOutline，引导学生动手验证）。
++  4. 随堂小测（共2页）：type: "quiz" — 包含知识点巩固测验与综合应用测验，检验实战掌握度（必须提供 quizConfig: { "questionCount": 2, "difficulty": "medium", "questionTypes": ["single", "multiple"] }）。
++  5. 拓展辨析（1页）：type: "slide" — 易错点剖析、知识延伸与现实生活/行业应用。
++  6. 总结复盘（最后一页）：type: "slide" — 核心要点回顾卡、思维升华与课后思考（最后一页必须是 slide，严禁以 interactive 或 quiz 结尾）。`;
 +}
 diff --git a/lib/types/generation.ts b/lib/types/generation.ts
 index f3e99e6b..4c6e0e6a 100644
