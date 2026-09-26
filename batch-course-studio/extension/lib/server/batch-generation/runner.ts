@@ -222,7 +222,9 @@ async function executeSingleMergedJob(
   }
 
   // 3. 构建综合生成指令
-  const requirement = `${job.requirement ? job.requirement + '\n\n' : ''}【教学素材与知识点内容】：\n${combinedText.slice(0, 30000)}`;
+  const requirement = job.enableInteractiveMode
+    ? `【课程教学主题】：${job.title || '多课件融合互动微课堂'}\n${job.requirement ? '【教学总要求】：' + job.requirement + '\n' : ''}【核心模式】：必须采用深度交互模式，全课70%以上场景为交互场景（物理/科学过程仿真、动手探究实验、游戏化闯关、交互测验），极少篇幅为过渡与总结。`
+    : `${job.requirement ? job.requirement + '\n\n' : ''}`;
 
   await updateBatchJob(jobId, (j) => {
     j.progress = 30;
@@ -349,7 +351,9 @@ async function executeBatchIndependentJob(
 
       // 2. 组装当前课程的个性化提示词
       const courseTitle = extracted.title || task.fileName.replace(/\.[^/.]+$/, '');
-      const requirement = `【课程主题】：《${courseTitle}》\n${initialJob.requirement ? '【教学总要求】：' + initialJob.requirement + '\n' : ''}【课件核心内容】：\n${extracted.text.slice(0, 25000)}`;
+      const requirement = initialJob.enableInteractiveMode
+        ? `【课程主题】：《${courseTitle}》\n${initialJob.requirement ? '【教学总要求】：' + initialJob.requirement + '\n' : ''}【核心模式】：必须采用深度交互模式，全课70%以上场景为交互场景（交互模拟器、动手探索、趣味闯关游戏及互动测验），极少篇幅为过渡与总结。`
+        : `【课程主题】：《${courseTitle}》\n${initialJob.requirement ? '【教学总要求】：' + initialJob.requirement + '\n' : ''}`;
 
       // 3. 执行生成
       const result = await generateClassroom(

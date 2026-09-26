@@ -1376,10 +1376,10 @@ index 00000000..502e0168
 +}
 diff --git a/lib/server/batch-generation/runner.ts b/lib/server/batch-generation/runner.ts
 new file mode 100644
-index 00000000..fe857f57
+index 00000000..17bba330
 --- /dev/null
 +++ b/lib/server/batch-generation/runner.ts
-@@ -0,0 +1,501 @@
+@@ -0,0 +1,505 @@
 +import { promises as fs } from 'fs';
 +import { createLogger } from '@/lib/logger';
 +import { generateClassroom } from '@/lib/server/classroom-generation';
@@ -1604,7 +1604,9 @@ index 00000000..fe857f57
 +  }
 +
 +  // 3. 构建综合生成指令
-+  const requirement = `${job.requirement ? job.requirement + '\n\n' : ''}【教学素材与知识点内容】：\n${combinedText.slice(0, 30000)}`;
++  const requirement = job.enableInteractiveMode
++    ? `【课程教学主题】：${job.title || '多课件融合互动微课堂'}\n${job.requirement ? '【教学总要求】：' + job.requirement + '\n' : ''}【核心模式】：必须采用深度交互模式，全课70%以上场景为交互场景（物理/科学过程仿真、动手探究实验、游戏化闯关、交互测验），极少篇幅为过渡与总结。`
++    : `${job.requirement ? job.requirement + '\n\n' : ''}`;
 +
 +  await updateBatchJob(jobId, (j) => {
 +    j.progress = 30;
@@ -1731,7 +1733,9 @@ index 00000000..fe857f57
 +
 +      // 2. 组装当前课程的个性化提示词
 +      const courseTitle = extracted.title || task.fileName.replace(/\.[^/.]+$/, '');
-+      const requirement = `【课程主题】：《${courseTitle}》\n${initialJob.requirement ? '【教学总要求】：' + initialJob.requirement + '\n' : ''}【课件核心内容】：\n${extracted.text.slice(0, 25000)}`;
++      const requirement = initialJob.enableInteractiveMode
++        ? `【课程主题】：《${courseTitle}》\n${initialJob.requirement ? '【教学总要求】：' + initialJob.requirement + '\n' : ''}【核心模式】：必须采用深度交互模式，全课70%以上场景为交互场景（交互模拟器、动手探索、趣味闯关游戏及互动测验），极少篇幅为过渡与总结。`
++        : `【课程主题】：《${courseTitle}》\n${initialJob.requirement ? '【教学总要求】：' + initialJob.requirement + '\n' : ''}`;
 +
 +      // 3. 执行生成
 +      const result = await generateClassroom(
@@ -2083,10 +2087,33 @@ index 00000000..441e6dac
 +  error?: string;
 +}
 diff --git a/lib/server/classroom-generation.ts b/lib/server/classroom-generation.ts
-index c2768590..e1a91026 100644
+index c2768590..8e397a2b 100644
 --- a/lib/server/classroom-generation.ts
 +++ b/lib/server/classroom-generation.ts
-@@ -67,6 +67,7 @@ export interface GenerateClassroomInput {
+@@ -1,6 +1,9 @@
+ import { callLLM } from '@/lib/ai/llm';
+ import { createStageAPI } from '@/lib/api/stage-api';
+ import type { StageStore } from '@/lib/api/stage-api-types';
++import { nanoid } from 'nanoid';
++import { buildPrompt, PROMPT_IDS } from '@/lib/prompts';
++import { MAX_PDF_CONTENT_CHARS } from '@/lib/constants/generation';
+ import {
+   applyOutlineFallbacks,
+   generateSceneOutlinesFromRequirements,
+@@ -9,8 +12,12 @@ import {
+   isAbortError,
+   PBLGenerationError,
+   withGenerationRetry,
++  DEFAULT_LANGUAGE_DIRECTIVE,
++  parseJsonResponse,
++  uniquifyMediaElementIds,
+   type AICallFn,
+   type AgentInfo,
++  type SceneOutline,
+ } from '@openmaic/generation';
+ import { createSceneWithActions } from '@/lib/server/scene-generation';
+ import { generatePBLV2Project } from '@/lib/pbl/v2/agents/planner';
+@@ -67,6 +74,7 @@ export interface GenerateClassroomInput {
    enableVideoGeneration?: boolean;
    enableTTS?: boolean;
    agentMode?: 'default' | 'generate';
@@ -2094,7 +2121,7 @@ index c2768590..e1a91026 100644
  }
  
  export type ClassroomGenerationStep =
-@@ -476,6 +477,7 @@ export async function generateClassroom(
+@@ -476,6 +484,7 @@ export async function generateClassroom(
  
    const requirements: UserRequirements = {
      requirement,
@@ -2102,20 +2129,171 @@ index c2768590..e1a91026 100644
    };
    const vocationalActive = resolveVocationalActive(requirements);
    const pdfText = pdfContent?.text || undefined;
-@@ -547,6 +549,12 @@ export async function generateClassroom(
+@@ -547,18 +556,138 @@ export async function generateClassroom(
      scenesGenerated: 0,
    });
  
+-  const outlinesResult = await generateSceneOutlinesFromRequirements(
+-    requirements,
+-    pdfText,
+-    undefined,
+-    aiCall,
+-    {
+-      imageGenerationEnabled: input.enableImageGeneration,
+-      videoGenerationEnabled: input.enableVideoGeneration,
+-      researchContext,
+-      // NO teacherContext — agents haven't been generated yet
+-    },
+-  );
 +  if (options.signal?.aborted) {
 +    const err = new Error('Classroom generation was aborted');
 +    err.name = 'AbortError';
 +    throw err;
 +  }
 +
-   const outlinesResult = await generateSceneOutlinesFromRequirements(
-     requirements,
-     pdfText,
-@@ -602,6 +610,7 @@ export async function generateClassroom(
++  let outlinesResult: {
++    success: boolean;
++    data?: { languageDirective: string; courseTitle?: string; outlines: SceneOutline[] };
++    error?: string;
++  };
++
++  if (input.interactiveMode) {
++    log.info('🌟 Interactive mode is ENABLED: Generating outline with PROMPT_IDS.INTERACTIVE_OUTLINES (70% interactive widgets, simulation, game, etc.)');
++    const prompts = buildPrompt(PROMPT_IDS.INTERACTIVE_OUTLINES, {
++      requirement: requirements.requirement,
++      pdfContent: pdfText ? pdfText.substring(0, MAX_PDF_CONTENT_CHARS) : 'None',
++      availableImages: 'No images available',
++      researchContext: researchContext || 'None',
++      hasSourceImages: false,
++      imageEnabled: input.enableImageGeneration ?? false,
++      videoEnabled: input.enableVideoGeneration ?? false,
++      mediaEnabled: !!(input.enableImageGeneration || input.enableVideoGeneration),
++      teacherContext: '',
++      userProfile: '',
++    });
++
++    if (!prompts) {
++      log.warn('Prompt template for INTERACTIVE_OUTLINES not found, falling back to standard generator');
++      outlinesResult = await generateSceneOutlinesFromRequirements(
++        requirements,
++        pdfText,
++        undefined,
++        aiCall,
++        {
++          imageGenerationEnabled: input.enableImageGeneration,
++          videoGenerationEnabled: input.enableVideoGeneration,
++          researchContext,
++        },
++      );
++    } else {
++      try {
++        const response = await aiCall(prompts.system, prompts.user);
++        const parsed = parseJsonResponse<{
++          languageDirective?: string;
++          courseTitle?: string;
++          outlines?: SceneOutline[];
++        } | SceneOutline[]>(response);
++
++        let languageDirective = DEFAULT_LANGUAGE_DIRECTIVE;
++        let courseTitle: string | undefined;
++        let rawOutlines: SceneOutline[] = [];
++
++        if (Array.isArray(parsed)) {
++          rawOutlines = parsed;
++        } else if (parsed && parsed.outlines) {
++          languageDirective = parsed.languageDirective || DEFAULT_LANGUAGE_DIRECTIVE;
++          courseTitle =
++            typeof parsed.courseTitle === 'string' && parsed.courseTitle.trim()
++              ? parsed.courseTitle.trim().slice(0, 120)
++              : undefined;
++          rawOutlines = parsed.outlines;
++        }
++
++        if (!Array.isArray(rawOutlines) || rawOutlines.length === 0) {
++          log.warn('Empty outlines parsed from INTERACTIVE_OUTLINES, falling back to standard generator');
++          outlinesResult = await generateSceneOutlinesFromRequirements(
++            requirements,
++            pdfText,
++            undefined,
++            aiCall,
++            {
++              imageGenerationEnabled: input.enableImageGeneration,
++              videoGenerationEnabled: input.enableVideoGeneration,
++              researchContext,
++            },
++          );
++        } else {
++          const enriched = rawOutlines.map((outline, index) => {
++            const widgetType =
++              outline.widgetType || (outline.type === 'interactive' ? 'simulation' : undefined);
++            const widgetOutline =
++              outline.widgetOutline ||
++              (widgetType ? { concept: outline.title || 'Interactive Exploration' } : undefined);
++            return {
++              ...outline,
++              id: outline.id || nanoid(),
++              order: index + 1,
++              widgetType,
++              widgetOutline,
++              ...(Array.isArray(outline.mediaGenerations) ? null : { mediaGenerations: undefined }),
++            };
++          });
++
++          const finalOutlines = uniquifyMediaElementIds(enriched);
++          outlinesResult = {
++            success: true,
++            data: {
++              languageDirective,
++              courseTitle,
++              outlines: finalOutlines,
++            },
++          };
++        }
++      } catch (err) {
++        log.warn('Interactive outline generation encountered error, falling back to standard generator:', err);
++        outlinesResult = await generateSceneOutlinesFromRequirements(
++          requirements,
++          pdfText,
++          undefined,
++          aiCall,
++          {
++            imageGenerationEnabled: input.enableImageGeneration,
++            videoGenerationEnabled: input.enableVideoGeneration,
++            researchContext,
++          },
++        );
++      }
++    }
++  } else {
++    outlinesResult = await generateSceneOutlinesFromRequirements(
++      requirements,
++      pdfText,
++      undefined,
++      aiCall,
++      {
++        imageGenerationEnabled: input.enableImageGeneration,
++        videoGenerationEnabled: input.enableVideoGeneration,
++        researchContext,
++      },
++    );
++  }
+ 
+   if (!outlinesResult.success || !outlinesResult.data) {
+     log.error('Failed to generate outlines:', outlinesResult.error);
+@@ -566,8 +695,11 @@ export async function generateClassroom(
+   }
+ 
+   const { languageDirective, courseTitle, outlines } = outlinesResult.data;
++  const outlineBreakdown = outlines
++    .map((o) => `[${o.order}] ${o.type}${o.widgetType ? `(${o.widgetType})` : ''}: "${o.title}"`)
++    .join(' | ');
+   log.info(
+-    `Generated ${outlines.length} scene outlines (languageDirective: ${languageDirective}, courseTitle: ${courseTitle ?? 'n/a'})`,
++    `Generated ${outlines.length} scene outlines (interactiveMode=${!!input.interactiveMode}): ${outlineBreakdown}`,
+   );
+ 
+   await options.onProgress?.({
+@@ -602,6 +734,7 @@ export async function generateClassroom(
      languageDirective,
      videoManifest: buildVideoManifestFromOutlines(outlines),
      style: 'interactive',
@@ -2123,7 +2301,7 @@ index c2768590..e1a91026 100644
      createdAt: Date.now(),
      updatedAt: Date.now(),
      // For LLM-generated agents, embed full configs so the client can
-@@ -637,6 +646,12 @@ export async function generateClassroom(
+@@ -637,6 +770,12 @@ export async function generateClassroom(
      let generatedScenes = 0;
  
      for (const [index, outline] of outlines.entries()) {
@@ -2136,7 +2314,7 @@ index c2768590..e1a91026 100644
        const safeOutline = applyOutlineFallbacks(outline, true, {
          allowProceduralSkill: vocationalActive,
        });
-@@ -746,6 +761,12 @@ export async function generateClassroom(
+@@ -746,6 +885,12 @@ export async function generateClassroom(
  
      // Phase: Media generation (after all scenes generated)
      if (input.enableImageGeneration || input.enableVideoGeneration) {
