@@ -22,6 +22,8 @@ import {
   Ban,
   XCircle,
   Zap,
+  Target,
+  BookOpen,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
@@ -30,6 +32,7 @@ import { Progress } from '@/components/ui/progress';
 import { Switch } from '@/components/ui/switch';
 import { toast } from 'sonner';
 import type { BatchJob, BatchJobMode, BatchSubTask } from '@/lib/server/batch-generation/types';
+import { type CourseScale, COURSE_SCALES } from '@/lib/types/course-scale';
 
 export default function BatchStudioPage() {
   const router = useRouter();
@@ -44,6 +47,7 @@ export default function BatchStudioPage() {
   const [enableTTS, setEnableTTS] = useState<boolean>(true);
   const [enableImageGeneration, setEnableImageGeneration] = useState<boolean>(true);
   const [enableInteractiveMode, setEnableInteractiveMode] = useState<boolean>(false);
+  const [courseScale, setCourseScale] = useState<CourseScale>('standard');
 
   const [submitting, setSubmitting] = useState<boolean>(false);
   const [cancellingJob, setCancellingJob] = useState<boolean>(false);
@@ -99,6 +103,7 @@ export default function BatchStudioPage() {
     formData.append('enableTTS', enableTTS ? 'true' : 'false');
     formData.append('enableImageGeneration', enableImageGeneration ? 'true' : 'false');
     formData.append('enableInteractiveMode', enableInteractiveMode ? 'true' : 'false');
+    formData.append('courseScale', courseScale);
 
     try {
       const res = await fetch('/api/batch-generate', {
@@ -511,6 +516,54 @@ export default function BatchStudioPage() {
               />
             </div>
 
+            {/* 课程篇幅与形态规格选择 */}
+            <div className="space-y-2">
+              <label className="text-sm font-medium text-slate-700 dark:text-slate-300 flex items-center justify-between">
+                <span className="flex items-center gap-1.5">
+                  <Layers className="w-4 h-4 text-amber-500" />
+                  课程篇幅与教学形态
+                </span>
+                <span className="text-xs font-normal text-slate-500 dark:text-slate-400">
+                  针对不同教学场景控制课件总页数与互动结构
+                </span>
+              </label>
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                {(Object.keys(COURSE_SCALES) as CourseScale[]).map((scaleKey) => {
+                  const item = COURSE_SCALES[scaleKey];
+                  const isSelected = courseScale === scaleKey;
+                  return (
+                    <div
+                      key={scaleKey}
+                      onClick={() => setCourseScale(scaleKey)}
+                      className={`cursor-pointer p-3 rounded-xl border text-left transition-all ${
+                        isSelected
+                          ? 'border-amber-500 bg-amber-500/10 shadow-xs ring-1 ring-amber-500/40'
+                          : 'border-slate-200 dark:border-slate-800 bg-white/70 dark:bg-slate-900/60 hover:border-slate-300 dark:hover:border-slate-700'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between gap-1 mb-1">
+                        <span className="font-semibold text-xs flex items-center gap-1.5 text-slate-800 dark:text-slate-200">
+                          {scaleKey === 'micro' && <Zap className="w-3.5 h-3.5 text-amber-500" />}
+                          {scaleKey === 'standard' && <Target className="w-3.5 h-3.5 text-cyan-500" />}
+                          {scaleKey === 'thematic' && <BookOpen className="w-3.5 h-3.5 text-violet-500" />}
+                          {item.label}
+                        </span>
+                        <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 border border-slate-200/60 dark:border-slate-700/60">
+                          {item.badge}
+                        </span>
+                      </div>
+                      <p className="text-[11px] text-slate-500 dark:text-slate-400 leading-snug">
+                        {item.description}
+                      </p>
+                      <p className="text-[10px] text-slate-400 dark:text-slate-500 mt-1 line-clamp-1">
+                        {item.structure}
+                      </p>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+
             {/* 附加功能开关（包含深度交互、TTS、配图） */}
             <div className="p-4 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-100/70 dark:bg-slate-900/80 space-y-3">
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 text-xs">
@@ -638,6 +691,15 @@ export default function BatchStudioPage() {
                           className="border-amber-500/40 text-amber-600 dark:text-amber-400 bg-amber-500/10"
                         >
                           深度交互模式
+                        </Badge>
+                      )}
+                      {currentJob.courseScale && (
+                        <Badge
+                          variant="outline"
+                          className="border-cyan-500/40 text-cyan-600 dark:text-cyan-400 bg-cyan-500/10"
+                        >
+                          {COURSE_SCALES[currentJob.courseScale]?.label || currentJob.courseScale} (
+                          {COURSE_SCALES[currentJob.courseScale]?.badge || ''})
                         </Badge>
                       )}
                     </div>

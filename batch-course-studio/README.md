@@ -28,7 +28,22 @@
   - 与官方生成主页能力完全对齐。深度打通官方 `PROMPT_IDS.INTERACTIVE_OUTLINES` 模版，硬性规约**全课 70% 以上必须为互动场景**（物理/科学过程仿真模拟器 `simulation`、趣味闯关小游戏 `game`、动态结构分析图解 `diagram` 等），仅保留 30% 用于导读与总结。
   - 内置**防降级保护机制（Fallback Protection）**，严格补全 `widgetType` 与 `widgetOutline`，杜绝大模型输出缺失配置导致误降级为普通幻灯片（Slide）。
 
-### 3. 任务中断、队列删除与 Token 资源保护
+### 3. 三档课程规格与教学形态 (3-Tier Course Scale & Pedagogical Profiles)
+- **⚡ 微课精讲 (`micro` / 4~5 页)**：
+  - 聚焦单一难点、公式或关键技能，直奔主题，避免冗长铺垫。
+  - 结构配比：1页导入 -> 1页关键精讲 -> 1~2个交互模拟/小测 -> 1页速记总结。
+- **🎯 标准课时 (`standard` / 7~9 页，默认)**：
+  - 经典认知闭环微课堂，平衡概念解析与探索练习。
+  - 结构配比：1页情境导入 -> 2页概念讲解 -> 2~3个互动探究实验/练习 -> 1~2次随堂小测 -> 1页总结反思。
+- **📚 专题大课 (`thematic` / 12~15 页)**：
+  - 单元综合复习、系统工程仿真与跨知识点深度实战，分阶段阶梯推进。
+  - 结构配比：多阶段递进闭环（基础原理 -> 进阶探究 -> 综合挑战/排障），至少 3~4 个互动实验部件 + 多轮阶段小测 + 系统考核。
+- **全平台协同支持**：
+  - **官方常规主页**：在输入框工具栏提供精致的胶囊下拉菜单，记住用户偏好；
+  - **批量制课工作台**：提供可视化单选卡片，支持一次性批量应用到所有文件；
+  - **底层标准化注入**：无论是否开启深度交互模式，均能自动按对应的结构与比例指导大模型规划大纲。
+
+### 4. 任务中断、队列删除与 Token 资源保护
 - **一键中断任务 (`Cancel Job`)**：
   - 在生成过程中若发现提示词不理想或需临时终止，可点击看板上的 **「中断任务 (停止消耗 Token)」** 按钮；
   - 后台立即触发 `AbortController` 终止进行中的网络与大模型请求，并将所有待处理课件状态设置为 `cancelled`，**即刻停止后续 Token 消耗**。
@@ -38,11 +53,11 @@
 - **历史记录安全删除 (`Delete Record`)**：
   - 已完成、已取消或失败的批处理记录支持一键清理，并自动销毁服务器上的临时解析缓存文件。
 
-### 4. 深度打通多用户与云端漫游
+### 5. 深度打通多用户与云端漫游
 - 批量生成的课程直接通过多用户底层数据接口（`getOwnerScopedDocumentStore`）持久化写入所属账号的存储中。
 - 任务生成完毕后，用户无论在办公室电脑、家用电脑还是移动端平板上登录，均可在首页的“我的课程库”中无缝查看并继续演播所有课程。
 
-### 5. 标准 REST API 接口（支持脚本与外部系统集成）
+### 6. 标准 REST API 接口（支持脚本与外部系统集成）
 - 提供标准 HTTP Multipart 接口，可在命令行中使用 `curl`、Python 脚本或外部排课系统直接投递批量制课任务、中断任务或移除队列项。
 
 ---
@@ -125,6 +140,7 @@ pm2 restart openmaic --update-env
 | `files` | `File[]` | 上传的课件文件（可多个） | 必填 |
 | `mode` | `string` | 模式：`single_merged` 或 `batch_independent` | `batch_independent` |
 | `prompt` | `string` | 自定义生成提示词/教学诉求 | 空 |
+| `courseScale` | `string` | 课程规格篇幅：`micro` (4-5页微课) / `standard` (7-9页标准) / `thematic` (12-15页专题大课) | `"standard"` |
 | `enableInteractiveMode` | `boolean` | 是否开启深度交互模式 (`"true"`/`"false"`) | `"false"` |
 | `enableTTS` | `boolean` | 是否开启语音旁白合成 (`"true"`/`"false"`) | `"true"` |
 | `enableImageGeneration` | `boolean` | 是否开启场景插图生成 (`"true"`/`"false"`) | `"true"` |
@@ -132,10 +148,11 @@ pm2 restart openmaic --update-env
 #### 示例请求 (cURL)：
 
 ```bash
-# 示例：将 2 个 PPT 批量分别生成 2 门独立课程，并开启深度交互
+# 示例：将 2 个 PPT 批量分别生成 2 门独立课程，指定为微课精讲模式并开启深度交互
 curl -X POST "http://localhost:3000/api/batch-generate" \
   -H "Cookie: token=YOUR_AUTH_COOKIE" \
   -F "mode=batch_independent" \
+  -F "courseScale=micro" \
   -F "prompt=注重知识要点梳理与深度互动讲解" \
   -F "enableInteractiveMode=true" \
   -F "enableTTS=true" \

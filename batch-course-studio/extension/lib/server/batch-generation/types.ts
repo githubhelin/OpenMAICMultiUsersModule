@@ -1,3 +1,5 @@
+import type { CourseScale } from '@/lib/types/course-scale';
+
 export type BatchJobMode = 'single_merged' | 'batch_independent';
 
 export type BatchJobStatus =
@@ -47,6 +49,7 @@ export interface BatchJob {
   enableTTS: boolean;
   enableImageGeneration: boolean;
   enableInteractiveMode?: boolean;
+  courseScale?: CourseScale;
   totalTasks: number;
   completedTasks: number;
   failedTasks: number;

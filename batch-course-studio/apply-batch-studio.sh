@@ -121,10 +121,12 @@ if [ "$APPLIED" = false ]; then
   EXT_DIR="${SCRIPT_DIR}/extension"
   if [ -d "$EXT_DIR" ]; then
     echo "📦 正在从 extension 目录同步最新文件..."
-    mkdir -p app/api/batch-generate lib/server/batch-generation app/batch-studio
+    mkdir -p app/api/batch-generate lib/server/batch-generation app/batch-studio lib/types components/generation
     cp -r "${EXT_DIR}/app/api/batch-generate" app/api/
     cp -r "${EXT_DIR}/app/batch-studio" app/
     cp -r "${EXT_DIR}/lib/server/batch-generation" lib/server/
+    [ -d "${EXT_DIR}/lib/types" ] && cp -r "${EXT_DIR}/lib/types/"* lib/types/
+    [ -d "${EXT_DIR}/components/generation" ] && cp -r "${EXT_DIR}/components/generation/"* components/generation/
     APPLIED=true
   else
     echo "❌ 无法直接应用补丁，且未找到 extension 源码目录！"

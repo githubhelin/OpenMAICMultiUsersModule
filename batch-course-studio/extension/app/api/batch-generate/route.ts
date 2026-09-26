@@ -13,6 +13,7 @@ import {
 } from '@/lib/server/batch-generation/store';
 import { runBatchJob } from '@/lib/server/batch-generation/runner';
 import type { BatchJob, BatchJobMode, BatchSubTask } from '@/lib/server/batch-generation/types';
+import type { CourseScale } from '@/lib/types/course-scale';
 
 export const runtime = 'nodejs';
 export const maxDuration = 300;
@@ -44,6 +45,9 @@ export async function POST(req: NextRequest) {
     const enableInteractiveMode =
       formData.get('enableInteractiveMode') === 'true' ||
       formData.get('interactiveMode') === 'true';
+    const rawCourseScale = formData.get('courseScale') as string;
+    const courseScale: CourseScale =
+      rawCourseScale === 'micro' || rawCourseScale === 'thematic' ? rawCourseScale : 'standard';
 
     const jobId = `batch_${nanoid(10)}`;
     const now = new Date().toISOString();
@@ -89,6 +93,7 @@ export async function POST(req: NextRequest) {
       enableTTS,
       enableImageGeneration,
       enableInteractiveMode,
+      courseScale,
       totalTasks: tasks.length,
       completedTasks: 0,
       failedTasks: 0,
