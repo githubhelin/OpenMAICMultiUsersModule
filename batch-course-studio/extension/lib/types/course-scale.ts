@@ -38,11 +38,36 @@ export const COURSE_SCALES: Record<CourseScale, CourseScaleConfig> = {
 
 export function buildCourseScaleInstruction(scale?: CourseScale): string {
   if (scale === 'micro') {
-    return '\n\n【课程篇幅与教学结构规范 - 微课精讲模式】\n- 目标页数：总场景数严格控制在 4~5 页（包含导入与总结）。\n- 教学节奏：聚焦单一核心知识点/公式/技能，直奔主题，避免冗长铺垫。\n- 结构配比：1页核心问题导入 -> 1页关键原理/参数精讲 -> 1~2个针对性互动实验/练习小测 -> 1页速记卡与要点小结。\n- 纪律要求：严禁冗长背景介绍，开门见山，高密度探究。';
+    return `
+
+【课程篇幅与教学结构规范 - 微课精讲模式】
+- 目标页数：总场景数严格控制在 4~5 页。
+- 场景结构配比（必须严格遵守以下场景类型组合）：
+  1. [第1页] type: "slide" — 核心情境与关键问题导入。
+  2. [第2页] type: "slide" — 关键原理与核心公式/参数精讲。
+  3. [第3页] type: "interactive" — 针对性互动仿真/探究游戏（必须提供 widgetType 与 widgetOutline）。
+  4. [第4页] type: "quiz" — 随堂过关小测验（必须提供 quizConfig: { "questionCount": 2, "difficulty": "medium", "questionTypes": ["single", "multiple"] }）。
+  5. [第5页/末页] type: "slide" — 要点速记卡与全课总结展望（最后一页必须是 slide，严禁以 interactive 结尾）。`;
   }
   if (scale === 'thematic') {
-    return '\n\n【课程篇幅与教学结构规范 - 专题大课模式】\n- 目标页数：总场景数展开为 12~15 页深度篇幅。\n- 教学节奏：适合专题复习或复杂工程/系统仿真项目，分层次阶梯式推进。\n- 结构配比：采用多阶段认知闭环（基础原理认知 -> 进阶规律探究 -> 综合实战/排障游戏），包含至少 3~4 个互动模拟/挑战部件，并在每个知识小节后插入 1 次阶段性小测，最后进行系统思维导图梳理与课后考核。\n- 纪律要求：避免连续堆砌纯理论文本，各阶段之间用过渡幻灯片平滑承接。';
+    return `
+
+【课程篇幅与教学结构规范 - 专题大课模式】
+- 目标页数：总场景数展开为 12~15 页深度篇幅。
+- 场景结构配比（必须严格遵守以下场景类型组合）：
+  1. 理论与框架：2~3页 type: "slide"（情境导入、多层次知识精讲）。
+  2. 深度互动：3~4页 type: "interactive"（仿真实验、探究游戏、算法可视化等，必须提供 widgetType 与 widgetOutline）。
+  3. 阶段小测：2~3次 type: "quiz"（分别穿插在各个知识模块探究之后，必须提供 quizConfig: { "questionCount": 2, "difficulty": "medium", "questionTypes": ["single", "multiple"] }）。
+  4. 最终收官：倒数第一页必须是 type: "slide"（全课知识图谱梳理、思维导图总结与课后拓展，最后一页必须是 slide，严禁以 interactive 结尾）。`;
   }
   // 'standard' or default
-  return '\n\n【课程篇幅与教学结构规范 - 标准课时模式】\n- 目标页数：总场景数保持在 7~9 页的标准微课堂体量。\n- 教学节奏：经典认知闭环，由浅入深。\n- 结构配比：1页情境导入 -> 2页核心概念讲解 -> 2~3个互动探究实验/练习 -> 1~2次随堂小测 -> 1页总结反思与迁移应用。';
+  return `
+
+【课程篇幅与教学结构规范 - 标准课时模式】
+- 目标页数：总场景数保持在 7~9 页的标准课堂体量。
+- 场景结构配比（必须严格遵守以下场景类型组合）：
+  1. 导入与精讲：2~3页 type: "slide"（情境导入、核心概念精讲）。
+  2. 互动探究：2~3页 type: "interactive"（科学仿真/探究游戏/动态图解，必须提供 widgetType 与 widgetOutline）。
+  3. 随堂小测：1~2次 type: "quiz"（穿插在互动探究之后巩固所学，必须提供 quizConfig: { "questionCount": 2, "difficulty": "medium", "questionTypes": ["single", "multiple"] }）。
+  4. 总结收尾：最后一页必须是 type: "slide"（课程核心要点总结、认知升华与拓展，最后一页必须是 slide，严禁以 interactive 结尾）。`;
 }

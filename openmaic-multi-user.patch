@@ -1000,10 +1000,10 @@ index 00000000..bab59967
 +  }
 +}
 diff --git a/app/api/classroom/route.ts b/app/api/classroom/route.ts
-index 3cbf7790..c14f7f68 100644
+index 3cbf7790..ac0d52c0 100644
 --- a/app/api/classroom/route.ts
 +++ b/app/api/classroom/route.ts
-@@ -9,9 +9,18 @@ import {
+@@ -9,9 +9,19 @@ import {
    isValidClassroomId,
    persistClassroom,
    readClassroom,
@@ -1012,8 +1012,9 @@ index 3cbf7790..c14f7f68 100644
  import { sanitizeSceneContent } from '@/lib/server/sanitize-scene-content';
  import { createLogger } from '@/lib/logger';
 +import { isServerPersistenceConfigured } from '@/lib/config/feature-flags';
-+import { resolveStageAccess } from '@/lib/server/stage-access';
++import { resolveStageAccess, getStageAccessDb } from '@/lib/server/stage-access';
 +import { getServerPersistenceProvider } from '@/lib/persistence/server-provider';
++import { markStageGenerationComplete } from '@/lib/persistence/stage-meta';
 +import { getSessionPayload } from '@/lib/server/auth/session';
 +import { resolveRequestOwnerId } from '@/lib/server/agent-runtime/owner';
 +import { getOwnerScopedDocumentStore } from '@/lib/server/agent-runtime/owner-scoped-documents';
@@ -1022,7 +1023,7 @@ index 3cbf7790..c14f7f68 100644
  
  const log = createLogger('Classroom API');
  
-@@ -113,6 +122,32 @@ export async function POST(request: NextRequest) {
+@@ -113,6 +123,38 @@ export async function POST(request: NextRequest) {
        return apiError(API_ERROR_CODES.INVALID_REQUEST, 409, 'Classroom id collision');
      }
  
@@ -1038,6 +1039,12 @@ index 3cbf7790..c14f7f68 100644
 +          stage: { ...safeStage, id: persisted.id },
 +          scenes: safeScenes.map((scene) => ({ ...scene, stageId: persisted.id })),
 +        });
++        try {
++          const db = await getStageAccessDb();
++          await markStageGenerationComplete(db, persisted.id);
++        } catch (completeErr) {
++          log.warn(`Classroom ${persisted.id} failed to mark generation complete:`, completeErr);
++        }
 +        log.info(`Classroom ${persisted.id} also synced to owner store (${ownerId})`);
 +      } catch (dbError) {
 +        log.warn(`Classroom ${persisted.id} failed to sync to owner store:`, dbError);
@@ -1055,7 +1062,7 @@ index 3cbf7790..c14f7f68 100644
      return apiSuccess({ id: persisted.id, url: persisted.url }, 201);
    } catch (error) {
      log.error(
-@@ -144,7 +179,28 @@ export async function GET(request: NextRequest) {
+@@ -144,7 +186,28 @@ export async function GET(request: NextRequest) {
        return apiError(API_ERROR_CODES.INVALID_REQUEST, 400, 'Invalid classroom id');
      }
  
@@ -5537,6 +5544,20 @@ index 00000000..5239f696
 +    </Dialog>
 +  );
 +}
+diff --git a/components/edit/PlaybackChromeRoot.tsx b/components/edit/PlaybackChromeRoot.tsx
+index 30e84939..271c012d 100644
+--- a/components/edit/PlaybackChromeRoot.tsx
++++ b/components/edit/PlaybackChromeRoot.tsx
+@@ -1212,7 +1212,8 @@ export const PlaybackChromeRoot = forwardRef<PlaybackChromeRootHandle, PlaybackC
+     // still reads as complete.
+     const isCourseComplete =
+       generationComplete ||
+-      (outlines.length > 0 && scenes.length === outlines.length && generatingOutlines.length === 0);
++      (outlines.length > 0 && scenes.length === outlines.length && generatingOutlines.length === 0) ||
++      (scenes.length > 0 && outlines.length === 0 && generatingOutlines.length === 0);
+     const canAdvanceToPendingSlot = hasNextPending || isCourseComplete;
+ 
+     // previous scene (gated)
 diff --git a/components/generation/course-scale-picker.tsx b/components/generation/course-scale-picker.tsx
 new file mode 100644
 index 00000000..109853c8
@@ -5903,6 +5924,217 @@ index 2e4122e4..c4a7ca31 100644
    return MODEL_ID_ALIASES.get(`${providerId}:${modelId}`) ?? modelId;
  }
  
+diff --git a/lib/classroom/load-classroom.ts b/lib/classroom/load-classroom.ts
+index 6d88151a..40e0fd66 100644
+--- a/lib/classroom/load-classroom.ts
++++ b/lib/classroom/load-classroom.ts
+@@ -352,7 +352,7 @@ export function applyClassroomStageAndScenes(
+     currentSceneId: nextScenes[0]?.id ?? null,
+     chats: options.chats ?? [],
+     chatSnapshot: options.chatSnapshot ?? { sessions: [], restoreMarker: null },
+-    generationComplete: false,
++    generationComplete: nextScenes.length > 0,
+     isOwner: access.isOwner,
+     readOnly: !access.isOwner,
+     generationEpoch: state.generationEpoch + 1,
+diff --git a/lib/prompts/templates/interactive-outlines/system.md b/lib/prompts/templates/interactive-outlines/system.md
+index ae2091d4..89cb4d9f 100644
+--- a/lib/prompts/templates/interactive-outlines/system.md
++++ b/lib/prompts/templates/interactive-outlines/system.md
+@@ -2,12 +2,13 @@
+ 
+ You are a professional course designer specializing in interactive, hands-on learning experiences.
+ 
+-## Core Task
++## Core Task & Pedagogical Progression
+ 
+-Transform user requirements into an **interactive-first** course structure:
+-- **Prefer interactive scenes** (widgets) over slides for hands-on learning
+-- Use **slides for introductions, summaries, and conceptual frameworks**
+-- Adjust the balance based on course length and subject matter
++Transform user requirements into an engaging **interactive-first** course structure that forms a complete, closed-loop learning journey:
++1. **Introduction & Concepts (`type: "slide"`)**: Hook the student with an engaging real-world scenario, then explain core principles.
++2. **Interactive Hands-On Exploration (`type: "interactive"`)**: Let students experiment, simulate, or play directly via interactive widgets (`simulation`, `game`, `diagram`, `code`, `visualization3d`).
++3. **Comprehension Checkpoint (`type: "quiz"`)**: Insert checkpoint quizzes to test understanding, provide instant feedback, and reinforce learned concepts.
++4. **Conclusion & Summary (`type: "slide"`)**: The VERY LAST scene of every course MUST ALWAYS be a `slide` scene summarizing core takeaways and celebrating course completion.
+ 
+ ---
+ 
+@@ -107,23 +108,22 @@ Live code editor with execution and test cases.
+ - `challengeType`: Type of coding challenge
+ 
+ ### 4. Game Widget (`game`)
+-**IMPORTANT: Create FUN games, NOT boring quizzes!**
++**Action, Physics & Puzzle Gameplay for Experiential Learning**
+ 
+ **Best for:**
+-- Physics/action games: Control thrust, aim, timing to achieve goals
+-- Drag-and-drop puzzles: Sort, arrange, build
+-- Strategy games: Decision-based challenges
+-- Interactive simulations as games: Player controls parameters
++- Physics/action games: Control thrust, aim, velocity, or timing to achieve goals
++- Drag-and-drop puzzles: Sort, arrange, assemble structures
++- Strategy games: Resource allocation and decision-based challenges
++- Interactive simulations as games: Players directly control parameters to overcome obstacles
+ 
+-**AVOID:**
+-- Plain multiple-choice quizzes (boring!)
+-- Quiz disguised as games
+-- Non-interactive simulations
++**Important Note on Games vs Quizzes:**
++- Use `game` widgets inside `type: "interactive"` scenes when the player interacts with game controls (sliders, keys, drags).
++- For evaluating knowledge and testing comprehension with multiple-choice questions, DO NOT use game widgets — use a dedicated **`type: "quiz"`** scene instead!
+ 
+ **Output in widgetOutline:**
+-- `gameType`: "action" | "puzzle" | "strategy" | "card" (prefer "action" over "quiz")
+-- `challenge`: Description of what player DOES (not just answers)
+-- `playerControls`: What the player controls (e.g., ["thrust", "angle"])
++- `gameType`: "action" | "puzzle" | "strategy" | "card"
++- `challenge`: Description of what the player controls and achieves
++- `playerControls`: Controllable parameters (e.g., ["thrust", "angle", "speed"])
+ 
+ **Design Principles:**
+ - Player MUST control something meaningful
+@@ -295,6 +295,27 @@ Rules:
+         "concept": "projectile_motion",
+         "keyVariables": ["angle", "initial_velocity"]
+       }
++    },
++    {
++      "id": "scene_3",
++      "type": "quiz",
++      "title": "Knowledge Check: Trajectory & Angles",
++      "description": "Test student understanding of launch angles and flight range",
++      "keyPoints": ["Optimal angle for distance", "Gravity effect on vertical motion"],
++      "order": 3,
++      "quizConfig": {
++        "questionCount": 2,
++        "difficulty": "medium",
++        "questionTypes": ["single", "multiple"]
++      }
++    },
++    {
++      "id": "scene_4",
++      "type": "slide",
++      "title": "Summary & Key Takeaways",
++      "description": "Consolidate learning and review key formulas",
++      "keyPoints": ["45-degree optimal angle", "Independence of horizontal and vertical motions", "Key takeaways"],
++      "order": 4
+     }
+   ]
+ }
+@@ -310,10 +331,10 @@ Rules:
+ 
+ **Scene-level rules:**
+ 
+-4. **Interactive focus**: Prefer interactive widgets for hands-on learning.
+-5. **Widget variety**: Use different widget types throughout the course when appropriate.
+-6. **Flow**: Slides should introduce concepts, widgets should let students explore.
+-7. **Language**: Apply the Language Inference decision rules above when producing `languageDirective`, and author all scene content in the inferred language.
+-8. **REQUIRED for interactive scenes**: Every scene with `type: "interactive"` MUST include both `widgetType` AND `widgetOutline` fields.
+-9. **Game quality**: Game widgets should be INTERACTIVE and FUN, not boring quizzes.
++4. **Scene Types**: `type` must be one of `"slide"`, `"interactive"`, or `"quiz"`.
++5. **Interactive focus**: Use interactive widgets for experiential hands-on exploration.
++6. **REQUIRED for interactive scenes**: Every scene with `type: "interactive"` MUST include both `widgetType` AND `widgetOutline` fields.
++7. **REQUIRED for quiz scenes**: Every scene with `type: "quiz"` MUST include `quizConfig: { "questionCount": 2, "difficulty": "medium", "questionTypes": ["single", "multiple"] }` to assess learning. Insert 1~2 checkpoint quizzes into the course.
++8. **MANDATORY Final Summary Scene**: The very last scene (`order === outlines.length`) MUST ALWAYS be a `type: "slide"` scene summarizing core takeaways and celebrating course completion. NEVER end the course on an interactive widget or quiz.
++9. **Language**: Apply the Language Inference decision rules above when producing `languageDirective`, and author all scene content in the inferred language.
+ 10. **Mobile-first**: All widgets should work well on mobile devices.
+diff --git a/lib/prompts/templates/interactive-outlines/user.md b/lib/prompts/templates/interactive-outlines/user.md
+index e14a534c..80d51c69 100644
+--- a/lib/prompts/templates/interactive-outlines/user.md
++++ b/lib/prompts/templates/interactive-outlines/user.md
+@@ -37,37 +37,30 @@ Infer the course language directive by applying the decision rules from the syst
+ 
+ ---
+ 
+-## Distribution Target
++## Pedagogical Structure & Scene Distribution Target
+ 
+-- **70% interactive scenes** (widgets: simulation, diagram, code, game)
+-- **30% slide scenes** (introductions, summaries, transitions)
++Every lesson must follow an engaging, structured learning loop:
++1. **Introduction & Theory (`type: "slide"`)**: 1 opening scenario slide + core concept presentation.
++2. **Interactive Hands-On Exploration (`type: "interactive"`)**: Interactive widgets (`simulation`, `game`, `diagram`, `code`, `visualization3d`) where students manipulate variables or engage in gameplay.
++3. **Comprehension Checkpoint (`type: "quiz"`)**: 1~2 checkpoint quizzes (`type: "quiz"`) with `quizConfig` (multiple choice / single choice) to assess and consolidate learning.
++4. **Final Summary (`type: "slide"`)**: The VERY LAST scene (`order === outlines.length`) MUST ALWAYS be a `type: "slide"` scene summarizing key takeaways and celebrating learning completion.
+ 
+-## Widget Type Constraints (MANDATORY)
++## Scene Type Requirements
+ 
+-| Widget Type | Constraint |
+-|------------|-----------|
+-| simulation | **Minimum 2 scenes** |
+-| game | **Minimum 1 scene** |
+-| diagram | **Maximum 1 scene** |
+-
+-## CRITICAL: Required Fields for Interactive Scenes
+-
+-Every interactive scene MUST include:
+-- `widgetType`: One of "simulation", "diagram", "code", or "game"
+-- `widgetOutline`: Object with widget-specific configuration
+-
+-Interactive scenes without these fields are INVALID.
++- **`slide`**: Core knowledge presentations and the mandatory final summary slide.
++- **`interactive`**: Hands-on exploration. MUST include `widgetType` ("simulation", "game", "diagram", "code", "visualization3d") and `widgetOutline`.
++- **`quiz`**: Checkpoint assessments. MUST include `quizConfig: { "questionCount": 2, "difficulty": "medium", "questionTypes": ["single", "multiple"] }`.
+ 
+ ## Widget Selection Guide
+ 
+-Choose widgets based on the content:
++Choose interactive widgets based on the content:
+ 
+ | Content Type | Recommended Widget |
+ |--------------|-------------------|
+ | Physics/Chemistry/Biology processes | simulation |
+ | Systems, processes, hierarchies | diagram |
+ | Programming, algorithms | code |
+-| Practice, challenge, application | game (action preferred) |
++| Practice, challenge, application | game |
+ 
+ ## Widget Design Principles (IMPORTANT)
+ 
+@@ -82,37 +75,8 @@ Choose widgets based on the content:
+ - Add ICONS to nodes
+ - Color-code node types
+ 
+-### Game Widget (CRITICAL - NO BORING QUIZZES!)
+-- **PREFER action/puzzle games over quizzes**
+-- Player MUST control something (not just click answers)
+-- If using simulation, make it INTERACTIVE gameplay
+-- Example GOOD game: "Control thrust to land safely"
+-- Example BAD game: "Click the correct answer"
+-- `gameType` should be "action", "puzzle", or "strategy", NOT just "quiz"
+-
+-### Example: Good vs Bad Game Outline
+-
+-❌ **BAD (boring quiz):**
+-```json
+-{
+-  "widgetType": "game",
+-  "widgetOutline": {
+-    "gameType": "quiz",
+-    "questionCount": 5
+-  }
+-}
+-```
+-
+-✅ **GOOD (interactive game):**
+-```json
+-{
+-  "widgetType": "game",
+-  "widgetOutline": {
+-    "gameType": "action",
+-    "challenge": "控制推力使飞船安全着陆",
+-    "playerControls": ["thrust_slider"]
+-  }
+-}
+-```
++### Game Widget vs Quiz Scenes
++- **Game widgets (`type: "interactive"`, `widgetType: "game"`)**: Action, puzzle, or physics challenges where the player controls parameters (thrust, angles, sorting).
++- **Quiz scenes (`type: "quiz"`)**: Knowledge assessments with multiple choice questions and instant scoring feedback. Every course must include checkpoint quizzes.
+ 
+ **Final reminder**: your entire response must be a JSON **object** with exactly three top-level keys — `languageDirective` (string, inferred via the Language Inference rules in the system prompt), `courseTitle` (string, ≤30 chars, in the teaching language), and `outlines` (array of scene objects). Do not return a bare array. Do not wrap in prose or code fences.
 diff --git a/lib/server/agent-runtime/owner.ts b/lib/server/agent-runtime/owner.ts
 index f582ec1e..2d96848c 100644
 --- a/lib/server/agent-runtime/owner.ts
@@ -6512,10 +6744,10 @@ index 00000000..502e0168
 +}
 diff --git a/lib/server/batch-generation/runner.ts b/lib/server/batch-generation/runner.ts
 new file mode 100644
-index 00000000..606be77b
+index 00000000..b87a83dd
 --- /dev/null
 +++ b/lib/server/batch-generation/runner.ts
-@@ -0,0 +1,521 @@
+@@ -0,0 +1,535 @@
 +import { promises as fs } from 'fs';
 +import { createLogger } from '@/lib/logger';
 +import { generateClassroom } from '@/lib/server/classroom-generation';
@@ -6525,6 +6757,8 @@ index 00000000..606be77b
 +import type { BatchJob, SubTaskStep } from './types';
 +import { buildCourseScaleInstruction } from '@/lib/types/course-scale';
 +import { syncInteractiveLibraryForStage } from '@/lib/server/interactive-library';
++import { getStageAccessDb } from '@/lib/server/stage-access';
++import { markStageGenerationComplete } from '@/lib/persistence/stage-meta';
 +
 +const log = createLogger('BatchJobRunner');
 +const runningBatchJobs = new Map<string, Promise<void>>();
@@ -6784,6 +7018,12 @@ index 00000000..606be77b
 +      stage: result.stage,
 +      scenes: result.scenes,
 +    });
++    try {
++      const db = await getStageAccessDb();
++      await markStageGenerationComplete(db, result.id);
++    } catch (completeErr) {
++      log.warn(`Failed to mark generation complete for ${result.id}:`, completeErr);
++    }
 +    log.info(`Merged course ${result.id} successfully saved to owner store (${job.ownerId})`);
 +  } catch (dbError) {
 +    log.warn(`Failed to sync merged course ${result.id} to owner store:`, dbError);
@@ -6937,6 +7177,12 @@ index 00000000..606be77b
 +          stage: result.stage,
 +          scenes: result.scenes,
 +        });
++        try {
++          const db = await getStageAccessDb();
++          await markStageGenerationComplete(db, result.id);
++        } catch (completeErr) {
++          log.warn(`Failed to mark generation complete for ${result.id}:`, completeErr);
++        }
 +        log.info(`Course ${result.id} successfully saved to owner store (${initialJob.ownerId})`);
 +      } catch (dbError) {
 +        log.warn(`Failed to sync course ${result.id} to owner store:`, dbError);
@@ -7242,7 +7488,7 @@ index 00000000..60eeda9b
 +  error?: string;
 +}
 diff --git a/lib/server/classroom-generation.ts b/lib/server/classroom-generation.ts
-index c2768590..29e05d18 100644
+index c2768590..bb6fbefc 100644
 --- a/lib/server/classroom-generation.ts
 +++ b/lib/server/classroom-generation.ts
 @@ -1,6 +1,9 @@
@@ -7302,7 +7548,7 @@ index c2768590..29e05d18 100644
    };
    const vocationalActive = resolveVocationalActive(requirements);
    const pdfText = pdfContent?.text || undefined;
-@@ -547,18 +564,138 @@ export async function generateClassroom(
+@@ -547,18 +564,149 @@ export async function generateClassroom(
      scenesGenerated: 0,
    });
  
@@ -7397,17 +7643,28 @@ index c2768590..29e05d18 100644
 +          );
 +        } else {
 +          const enriched = rawOutlines.map((outline, index) => {
-+            const widgetType =
-+              outline.widgetType || (outline.type === 'interactive' ? 'simulation' : undefined);
-+            const widgetOutline =
-+              outline.widgetOutline ||
-+              (widgetType ? { concept: outline.title || 'Interactive Exploration' } : undefined);
++            const isInteractive = outline.type === 'interactive';
++            const isQuiz = outline.type === 'quiz';
++            const widgetType = isInteractive
++              ? outline.widgetType || 'simulation'
++              : undefined;
++            const widgetOutline = isInteractive
++              ? outline.widgetOutline || { concept: outline.title || 'Interactive Exploration' }
++              : undefined;
++            const quizConfig = isQuiz
++              ? outline.quizConfig || {
++                  questionCount: 2,
++                  difficulty: 'medium',
++                  questionTypes: ['single', 'multiple'],
++                }
++              : undefined;
++
 +            return {
 +              ...outline,
 +              id: outline.id || nanoid(),
 +              order: index + 1,
-+              widgetType,
-+              widgetOutline,
++              ...(isInteractive ? { widgetType, widgetOutline } : { widgetType: undefined, widgetOutline: undefined }),
++              ...(isQuiz ? { quizConfig } : {}),
 +              ...(Array.isArray(outline.mediaGenerations) ? null : { mediaGenerations: undefined }),
 +            };
 +          });
@@ -7453,7 +7710,7 @@ index c2768590..29e05d18 100644
  
    if (!outlinesResult.success || !outlinesResult.data) {
      log.error('Failed to generate outlines:', outlinesResult.error);
-@@ -566,8 +703,11 @@ export async function generateClassroom(
+@@ -566,8 +714,11 @@ export async function generateClassroom(
    }
  
    const { languageDirective, courseTitle, outlines } = outlinesResult.data;
@@ -7466,7 +7723,7 @@ index c2768590..29e05d18 100644
    );
  
    await options.onProgress?.({
-@@ -602,6 +742,7 @@ export async function generateClassroom(
+@@ -602,6 +753,7 @@ export async function generateClassroom(
      languageDirective,
      videoManifest: buildVideoManifestFromOutlines(outlines),
      style: 'interactive',
@@ -7474,7 +7731,7 @@ index c2768590..29e05d18 100644
      createdAt: Date.now(),
      updatedAt: Date.now(),
      // For LLM-generated agents, embed full configs so the client can
-@@ -637,6 +778,12 @@ export async function generateClassroom(
+@@ -637,6 +789,12 @@ export async function generateClassroom(
      let generatedScenes = 0;
  
      for (const [index, outline] of outlines.entries()) {
@@ -7487,7 +7744,7 @@ index c2768590..29e05d18 100644
        const safeOutline = applyOutlineFallbacks(outline, true, {
          allowProceduralSkill: vocationalActive,
        });
-@@ -746,6 +893,12 @@ export async function generateClassroom(
+@@ -746,6 +904,12 @@ export async function generateClassroom(
  
      // Phase: Media generation (after all scenes generated)
      if (input.enableImageGeneration || input.enableVideoGeneration) {
@@ -8468,12 +8725,26 @@ index d26e71e4..87e4efc5 100644
          return merged as SettingsState;
        },
      },
+diff --git a/lib/store/stage.ts b/lib/store/stage.ts
+index 552e168c..df70fd79 100644
+--- a/lib/store/stage.ts
++++ b/lib/store/stage.ts
+@@ -1054,7 +1054,8 @@ const useStageStoreBase = create<StageState>()((set, get) => ({
+             outlines,
+             scenes: migrated,
+             failedOutlines,
+-          });
++          }) ||
++          (migrated.length > 0 && outlines.length === 0);
+         set({
+           stage: data.stage,
+           scenes: migrated,
 diff --git a/lib/types/course-scale.ts b/lib/types/course-scale.ts
 new file mode 100644
-index 00000000..fc195587
+index 00000000..f0f9651d
 --- /dev/null
 +++ b/lib/types/course-scale.ts
-@@ -0,0 +1,48 @@
+@@ -0,0 +1,73 @@
 +export type CourseScale = 'micro' | 'standard' | 'thematic';
 +
 +export interface CourseScaleConfig {
@@ -8514,13 +8785,38 @@ index 00000000..fc195587
 +
 +export function buildCourseScaleInstruction(scale?: CourseScale): string {
 +  if (scale === 'micro') {
-+    return '\n\n【课程篇幅与教学结构规范 - 微课精讲模式】\n- 目标页数：总场景数严格控制在 4~5 页（包含导入与总结）。\n- 教学节奏：聚焦单一核心知识点/公式/技能，直奔主题，避免冗长铺垫。\n- 结构配比：1页核心问题导入 -> 1页关键原理/参数精讲 -> 1~2个针对性互动实验/练习小测 -> 1页速记卡与要点小结。\n- 纪律要求：严禁冗长背景介绍，开门见山，高密度探究。';
++    return `
++
++【课程篇幅与教学结构规范 - 微课精讲模式】
++- 目标页数：总场景数严格控制在 4~5 页。
++- 场景结构配比（必须严格遵守以下场景类型组合）：
++  1. [第1页] type: "slide" — 核心情境与关键问题导入。
++  2. [第2页] type: "slide" — 关键原理与核心公式/参数精讲。
++  3. [第3页] type: "interactive" — 针对性互动仿真/探究游戏（必须提供 widgetType 与 widgetOutline）。
++  4. [第4页] type: "quiz" — 随堂过关小测验（必须提供 quizConfig: { "questionCount": 2, "difficulty": "medium", "questionTypes": ["single", "multiple"] }）。
++  5. [第5页/末页] type: "slide" — 要点速记卡与全课总结展望（最后一页必须是 slide，严禁以 interactive 结尾）。`;
 +  }
 +  if (scale === 'thematic') {
-+    return '\n\n【课程篇幅与教学结构规范 - 专题大课模式】\n- 目标页数：总场景数展开为 12~15 页深度篇幅。\n- 教学节奏：适合专题复习或复杂工程/系统仿真项目，分层次阶梯式推进。\n- 结构配比：采用多阶段认知闭环（基础原理认知 -> 进阶规律探究 -> 综合实战/排障游戏），包含至少 3~4 个互动模拟/挑战部件，并在每个知识小节后插入 1 次阶段性小测，最后进行系统思维导图梳理与课后考核。\n- 纪律要求：避免连续堆砌纯理论文本，各阶段之间用过渡幻灯片平滑承接。';
++    return `
++
++【课程篇幅与教学结构规范 - 专题大课模式】
++- 目标页数：总场景数展开为 12~15 页深度篇幅。
++- 场景结构配比（必须严格遵守以下场景类型组合）：
++  1. 理论与框架：2~3页 type: "slide"（情境导入、多层次知识精讲）。
++  2. 深度互动：3~4页 type: "interactive"（仿真实验、探究游戏、算法可视化等，必须提供 widgetType 与 widgetOutline）。
++  3. 阶段小测：2~3次 type: "quiz"（分别穿插在各个知识模块探究之后，必须提供 quizConfig: { "questionCount": 2, "difficulty": "medium", "questionTypes": ["single", "multiple"] }）。
++  4. 最终收官：倒数第一页必须是 type: "slide"（全课知识图谱梳理、思维导图总结与课后拓展，最后一页必须是 slide，严禁以 interactive 结尾）。`;
 +  }
 +  // 'standard' or default
-+  return '\n\n【课程篇幅与教学结构规范 - 标准课时模式】\n- 目标页数：总场景数保持在 7~9 页的标准微课堂体量。\n- 教学节奏：经典认知闭环，由浅入深。\n- 结构配比：1页情境导入 -> 2页核心概念讲解 -> 2~3个互动探究实验/练习 -> 1~2次随堂小测 -> 1页总结反思与迁移应用。';
++  return `
++
++【课程篇幅与教学结构规范 - 标准课时模式】
++- 目标页数：总场景数保持在 7~9 页的标准课堂体量。
++- 场景结构配比（必须严格遵守以下场景类型组合）：
++  1. 导入与精讲：2~3页 type: "slide"（情境导入、核心概念精讲）。
++  2. 互动探究：2~3页 type: "interactive"（科学仿真/探究游戏/动态图解，必须提供 widgetType 与 widgetOutline）。
++  3. 随堂小测：1~2次 type: "quiz"（穿插在互动探究之后巩固所学，必须提供 quizConfig: { "questionCount": 2, "difficulty": "medium", "questionTypes": ["single", "multiple"] }）。
++  4. 总结收尾：最后一页必须是 type: "slide"（课程核心要点总结、认知升华与拓展，最后一页必须是 slide，严禁以 interactive 结尾）。`;
 +}
 diff --git a/lib/types/generation.ts b/lib/types/generation.ts
 index f3e99e6b..4c6e0e6a 100644

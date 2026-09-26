@@ -14,8 +14,9 @@ import {
 import { sanitizeSceneContent } from '@/lib/server/sanitize-scene-content';
 import { createLogger } from '@/lib/logger';
 import { isServerPersistenceConfigured } from '@/lib/config/feature-flags';
-import { resolveStageAccess } from '@/lib/server/stage-access';
+import { resolveStageAccess, getStageAccessDb } from '@/lib/server/stage-access';
 import { getServerPersistenceProvider } from '@/lib/persistence/server-provider';
+import { markStageGenerationComplete } from '@/lib/persistence/stage-meta';
 import { getSessionPayload } from '@/lib/server/auth/session';
 import { resolveRequestOwnerId } from '@/lib/server/agent-runtime/owner';
 import { getOwnerScopedDocumentStore } from '@/lib/server/agent-runtime/owner-scoped-documents';
@@ -134,6 +135,12 @@ export async function POST(request: NextRequest) {
           stage: { ...safeStage, id: persisted.id },
           scenes: safeScenes.map((scene) => ({ ...scene, stageId: persisted.id })),
         });
+        try {
+          const db = await getStageAccessDb();
+          await markStageGenerationComplete(db, persisted.id);
+        } catch (completeErr) {
+          log.warn(`Classroom ${persisted.id} failed to mark generation complete:`, completeErr);
+        }
         log.info(`Classroom ${persisted.id} also synced to owner store (${ownerId})`);
       } catch (dbError) {
         log.warn(`Classroom ${persisted.id} failed to sync to owner store:`, dbError);

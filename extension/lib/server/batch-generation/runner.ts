@@ -7,6 +7,8 @@ import { getBatchJob, updateBatchJob } from './store';
 import type { BatchJob, SubTaskStep } from './types';
 import { buildCourseScaleInstruction } from '@/lib/types/course-scale';
 import { syncInteractiveLibraryForStage } from '@/lib/server/interactive-library';
+import { getStageAccessDb } from '@/lib/server/stage-access';
+import { markStageGenerationComplete } from '@/lib/persistence/stage-meta';
 
 const log = createLogger('BatchJobRunner');
 const runningBatchJobs = new Map<string, Promise<void>>();
@@ -266,6 +268,12 @@ async function executeSingleMergedJob(
       stage: result.stage,
       scenes: result.scenes,
     });
+    try {
+      const db = await getStageAccessDb();
+      await markStageGenerationComplete(db, result.id);
+    } catch (completeErr) {
+      log.warn(`Failed to mark generation complete for ${result.id}:`, completeErr);
+    }
     log.info(`Merged course ${result.id} successfully saved to owner store (${job.ownerId})`);
   } catch (dbError) {
     log.warn(`Failed to sync merged course ${result.id} to owner store:`, dbError);
@@ -419,6 +427,12 @@ async function executeBatchIndependentJob(
           stage: result.stage,
           scenes: result.scenes,
         });
+        try {
+          const db = await getStageAccessDb();
+          await markStageGenerationComplete(db, result.id);
+        } catch (completeErr) {
+          log.warn(`Failed to mark generation complete for ${result.id}:`, completeErr);
+        }
         log.info(`Course ${result.id} successfully saved to owner store (${initialJob.ownerId})`);
       } catch (dbError) {
         log.warn(`Failed to sync course ${result.id} to owner store:`, dbError);
