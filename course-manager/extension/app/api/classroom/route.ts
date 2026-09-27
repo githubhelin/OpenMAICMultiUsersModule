@@ -200,8 +200,9 @@ export async function GET(request: NextRequest) {
       return apiError(API_ERROR_CODES.INVALID_REQUEST, 400, 'Invalid classroom id');
     }
 
-    let classroom: PersistedClassroomData | null = await readClassroom(id);
-    if (!classroom && isServerPersistenceConfigured()) {
+    let classroom: PersistedClassroomData | null = null;
+
+    if (isServerPersistenceConfigured()) {
       try {
         const access = await resolveStageAccess(id);
         if (access?.deletedAt) {
@@ -218,8 +219,12 @@ export async function GET(request: NextRequest) {
           };
         }
       } catch (dbError) {
-        log.warn(`Database fallback for classroom [id=${id}] failed:`, dbError);
+        log.warn(`Database lookup for classroom [id=${id}] failed:`, dbError);
       }
+    }
+
+    if (!classroom) {
+      classroom = await readClassroom(id);
     }
 
     if (!classroom) {

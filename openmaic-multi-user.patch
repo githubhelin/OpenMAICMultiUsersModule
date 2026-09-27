@@ -1000,7 +1000,7 @@ index 00000000..bab59967
 +  }
 +}
 diff --git a/app/api/classroom/route.ts b/app/api/classroom/route.ts
-index 3cbf7790..484a65c5 100644
+index 3cbf7790..14a5ef4b 100644
 --- a/app/api/classroom/route.ts
 +++ b/app/api/classroom/route.ts
 @@ -9,9 +9,19 @@ import {
@@ -1145,13 +1145,14 @@ index 3cbf7790..484a65c5 100644
      return apiSuccess({ id: persisted.id, url: persisted.url }, 201);
    } catch (error) {
      log.error(
-@@ -144,7 +200,28 @@ export async function GET(request: NextRequest) {
+@@ -144,7 +200,33 @@ export async function GET(request: NextRequest) {
        return apiError(API_ERROR_CODES.INVALID_REQUEST, 400, 'Invalid classroom id');
      }
  
 -    const classroom = await readClassroom(id);
-+    let classroom: PersistedClassroomData | null = await readClassroom(id);
-+    if (!classroom && isServerPersistenceConfigured()) {
++    let classroom: PersistedClassroomData | null = null;
++
++    if (isServerPersistenceConfigured()) {
 +      try {
 +        const access = await resolveStageAccess(id);
 +        if (access?.deletedAt) {
@@ -1168,8 +1169,12 @@ index 3cbf7790..484a65c5 100644
 +          };
 +        }
 +      } catch (dbError) {
-+        log.warn(`Database fallback for classroom [id=${id}] failed:`, dbError);
++        log.warn(`Database lookup for classroom [id=${id}] failed:`, dbError);
 +      }
++    }
++
++    if (!classroom) {
++      classroom = await readClassroom(id);
 +    }
 +
      if (!classroom) {
