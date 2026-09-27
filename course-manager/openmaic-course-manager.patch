@@ -1,8 +1,8 @@
 diff --git a/app/api/classroom/route.ts b/app/api/classroom/route.ts
-index 3cbf7790..29940834 100644
+index 3cbf7790..484a65c5 100644
 --- a/app/api/classroom/route.ts
 +++ b/app/api/classroom/route.ts
-@@ -9,9 +9,17 @@ import {
+@@ -9,9 +9,19 @@ import {
    isValidClassroomId,
    persistClassroom,
    readClassroom,
@@ -11,16 +11,101 @@ index 3cbf7790..29940834 100644
  import { sanitizeSceneContent } from '@/lib/server/sanitize-scene-content';
  import { createLogger } from '@/lib/logger';
 +import { isServerPersistenceConfigured } from '@/lib/config/feature-flags';
-+import { resolveStageAccess } from '@/lib/server/stage-access';
++import { resolveStageAccess, getStageAccessDb } from '@/lib/server/stage-access';
 +import { getServerPersistenceProvider } from '@/lib/persistence/server-provider';
++import { markStageGenerationComplete } from '@/lib/persistence/stage-meta';
 +import { getSessionPayload } from '@/lib/server/auth/session';
 +import { resolveRequestOwnerId } from '@/lib/server/agent-runtime/owner';
 +import { getOwnerScopedDocumentStore } from '@/lib/server/agent-runtime/owner-scoped-documents';
++import { syncInteractiveLibraryForStage } from '@/lib/server/interactive-library';
 +import type { Stage, Scene } from '@/lib/types/stage';
  
  const log = createLogger('Classroom API');
  
-@@ -113,6 +121,24 @@ export async function POST(request: NextRequest) {
+@@ -73,39 +83,53 @@ export async function POST(request: NextRequest) {
+     const safeStage = sanitizeSceneContent(stage);
+     const safeScenes = sanitizeSceneContent(scenes);
+ 
+-    // The storage id is ALWAYS server-generated. A caller-supplied stage.id is
+-    // ignored: ids are public share-URL segments, so accepting one would let
+-    // any visitor name — and therefore attempt to replace — an existing
+-    // classroom. The generated id becomes the stage id and every scene's
+-    // stageId so the persisted document is internally consistent.
++    // If caller supplied a valid stage.id, preserve it so client, cloud DB and filesystem stay 100% consistent.
++    const callerStageId =
++      stage?.id && typeof stage.id === 'string' && isValidClassroomId(stage.id)
++        ? stage.id
++        : undefined;
++
+     let persisted: Awaited<ReturnType<typeof persistClassroom>> | undefined;
+-    for (let attempt = 0; attempt < CLASSROOM_ID_MAX_ATTEMPTS; attempt += 1) {
+-      const id = generateClassroomId();
+ 
+-      // Defence in depth: the generator only emits allowlisted characters, but
+-      // an id must never be joined into a filesystem path unasserted.
+-      if (!isValidClassroomId(id)) {
+-        return apiError(API_ERROR_CODES.INVALID_REQUEST, 400, 'Invalid classroom id');
+-      }
++    if (callerStageId) {
++      persisted = await persistClassroom(
++        {
++          id: callerStageId,
++          stage: { ...safeStage, id: callerStageId },
++          scenes: safeScenes.map((scene) => ({ ...scene, stageId: callerStageId })),
++        },
++        baseUrl,
++        { exclusive: false },
++      );
++    } else {
++      for (let attempt = 0; attempt < CLASSROOM_ID_MAX_ATTEMPTS; attempt += 1) {
++        const id = generateClassroomId();
++
++        // Defence in depth: the generator only emits allowlisted characters, but
++        // an id must never be joined into a filesystem path unasserted.
++        if (!isValidClassroomId(id)) {
++          return apiError(API_ERROR_CODES.INVALID_REQUEST, 400, 'Invalid classroom id');
++        }
+ 
+-      try {
+-        persisted = await persistClassroom(
+-          {
+-            id,
+-            stage: { ...safeStage, id },
+-            scenes: safeScenes.map((scene) => ({ ...scene, stageId: id })),
+-          },
+-          baseUrl,
+-          { exclusive: true },
+-        );
+-        break;
+-      } catch (error) {
+-        if (!(error instanceof ClassroomAlreadyExistsError)) {
+-          throw error;
++        try {
++          persisted = await persistClassroom(
++            {
++              id,
++              stage: { ...safeStage, id },
++              scenes: safeScenes.map((scene) => ({ ...scene, stageId: id })),
++            },
++            baseUrl,
++            { exclusive: true },
++          );
++          break;
++        } catch (error) {
++          if (!(error instanceof ClassroomAlreadyExistsError)) {
++            throw error;
++          }
++          // Astronomically unlikely with a 10-character id: pick a fresh id and
++          // retry a bounded number of times rather than clobbering the
++          // incumbent classroom.
+         }
+-        // Astronomically unlikely with a 10-character id: pick a fresh id and
+-        // retry a bounded number of times rather than clobbering the
+-        // incumbent classroom.
+       }
+     }
+ 
+@@ -113,6 +137,38 @@ export async function POST(request: NextRequest) {
        return apiError(API_ERROR_CODES.INVALID_REQUEST, 409, 'Classroom id collision');
      }
  
@@ -36,16 +121,30 @@ index 3cbf7790..29940834 100644
 +          stage: { ...safeStage, id: persisted.id },
 +          scenes: safeScenes.map((scene) => ({ ...scene, stageId: persisted.id })),
 +        });
++        try {
++          const db = await getStageAccessDb();
++          await markStageGenerationComplete(db, persisted.id);
++        } catch (completeErr) {
++          log.warn(`Classroom ${persisted.id} failed to mark generation complete:`, completeErr);
++        }
 +        log.info(`Classroom ${persisted.id} also synced to owner store (${ownerId})`);
 +      } catch (dbError) {
 +        log.warn(`Classroom ${persisted.id} failed to sync to owner store:`, dbError);
 +      }
 +    }
 +
++    // Automatically package and export interactive scenes to interactive library
++    void syncInteractiveLibraryForStage(
++      { ...safeStage, id: persisted.id },
++      safeScenes.map((scene) => ({ ...scene, stageId: persisted.id })),
++    ).catch((err) => {
++      log.warn(`Classroom ${persisted?.id} failed to sync to interactive library:`, err);
++    });
++
      return apiSuccess({ id: persisted.id, url: persisted.url }, 201);
    } catch (error) {
      log.error(
-@@ -144,7 +170,28 @@ export async function GET(request: NextRequest) {
+@@ -144,7 +200,28 @@ export async function GET(request: NextRequest) {
        return apiError(API_ERROR_CODES.INVALID_REQUEST, 400, 'Invalid classroom id');
      }
  
@@ -76,48 +175,206 @@ index 3cbf7790..29940834 100644
        return apiError(API_ERROR_CODES.INVALID_REQUEST, 404, 'Classroom not found');
      }
 diff --git a/app/api/stages/[id]/route.ts b/app/api/stages/[id]/route.ts
-index 6bc07e84..23682901 100644
+index 6bc07e84..e0ac8059 100644
 --- a/app/api/stages/[id]/route.ts
 +++ b/app/api/stages/[id]/route.ts
-@@ -27,6 +27,8 @@ import { getOwnerScopedDocumentStore } from '@/lib/server/agent-runtime/owner-sc
+@@ -27,6 +27,20 @@ import { getOwnerScopedDocumentStore } from '@/lib/server/agent-runtime/owner-sc
  import { ownerApiError, ownerJson, ownerNotFound } from '@/lib/server/agent-runtime/route-response';
  import { withRequestOwnerId } from '@/lib/server/agent-runtime/with-owner';
  import { STAGE_NAME_MAX_LENGTH } from '@/lib/server/agent-runtime/stage-limits';
 +import { getSessionPayload } from '@/lib/server/auth/session';
-+import { getServerPersistenceProvider } from '@/lib/persistence/server-provider';
++import {
++  renameInteractiveLibraryStage,
++  deleteInteractiveLibraryStage,
++  syncInteractiveLibraryForStage,
++} from '@/lib/server/interactive-library';
++import {
++  buildRequestOrigin,
++  isValidClassroomId,
++  persistClassroom,
++} from '@/lib/server/classroom-storage';
++import { sanitizeSceneContent } from '@/lib/server/sanitize-scene-content';
++import { markStageGenerationComplete } from '@/lib/persistence/stage-meta';
++import { getStageAccessDb } from '@/lib/server/stage-access';
  
  export const runtime = 'nodejs';
  
-@@ -180,10 +182,26 @@ export async function PUT(req: NextRequest, { params }: Params) {
+@@ -107,6 +121,7 @@ export async function PATCH(req: NextRequest, { params }: Params) {
+         ...document,
+         stage: { ...document.stage, name, updatedAt: Date.now() },
+       });
++      void renameInteractiveLibraryStage(id, name).catch(() => {});
+     } catch (error) {
+       return mapSaveError(error, responseHeaders);
+     }
+@@ -154,12 +169,14 @@ export async function PUT(req: NextRequest, { params }: Params) {
+       );
+     }
+     const store = await getOwnerScopedDocumentStore(ownerId);
+-    // Save is existence-gated (the reference's update path is too): PUT
+-    // updates a course that exists; it must not resurrect a deleted one or
+-    // mint a course under a client-chosen id. The owner scope is re-checked
+-    // inside the write transaction, so a foreign id still refuses there.
+-    const existing = await store.loadDocument(id);
+-    if (!existing) return ownerNotFound(responseHeaders);
++    if (!isValidClassroomId(id)) {
++      return ownerApiError(
++        'INVALID_REQUEST',
++        400,
++        'invalid stage id format',
++        responseHeaders,
++      );
++    }
+     try {
+       // The server is authoritative for "last modified": bumping updatedAt
+       // keeps the manifest/freshness signal accurate for this route's writes.
+@@ -169,6 +186,46 @@ export async function PUT(req: NextRequest, { params }: Params) {
+         ...(body as MaicDocument),
+         stage: { ...(body as MaicDocument).stage, updatedAt: Date.now() },
+       });
++
++      // If marked generation complete, record in stage_meta
++      const candidateOutline = (body as any)?.outline;
++      if (candidateOutline?.generationComplete) {
++        try {
++          const db = await getStageAccessDb();
++          await markStageGenerationComplete(db, id);
++        } catch {
++          // ignore stage_meta non-critical error
++        }
++      }
++
++      // Persist to filesystem for offline static serving
++      try {
++        const baseUrl = buildRequestOrigin(req);
++        const safeStage = sanitizeSceneContent((body as any).stage);
++        const safeScenes = sanitizeSceneContent((body as any).scenes || []);
++        await persistClassroom(
++          {
++            id,
++            stage: { ...safeStage, id },
++            scenes: safeScenes.map((scene: any) => ({ ...scene, stageId: id })),
++          },
++          baseUrl,
++          { exclusive: false },
++        );
++      } catch (fsErr) {
++        console.warn(`[PUT /api/stages/${id}] Filesystem persistence fallback:`, fsErr);
++      }
++
++      // Automatically sync interactive scenes to interactive library
++      const scenesList = (body as any).scenes || [];
++      if (Array.isArray(scenesList) && scenesList.some((s: any) => s.type === 'interactive')) {
++        void syncInteractiveLibraryForStage(
++          (body as any).stage,
++          scenesList,
++        ).catch((err) => {
++          console.warn(`[PUT /api/stages/${id}] Interactive library sync error:`, err);
++        });
++      }
+     } catch (error) {
+       return mapSaveError(error, responseHeaders);
+     }
+@@ -176,14 +233,92 @@ export async function PUT(req: NextRequest, { params }: Params) {
+   });
+ }
+ 
+-// DELETE /api/stages/[id] — remove the course and its scenes/outline.
++// DELETE /api/stages/[id] — remove the course completely from DB, disk files, and interactive library.
  export async function DELETE(req: NextRequest, { params }: Params) {
    if (!isAgentRuntimeConfigured()) return new Response('Not found', { status: 404 });
  
 +  const session = getSessionPayload(req);
 +  const isAdmin = session?.role === 'admin';
++  const { id } = await params;
 +
    return withRequestOwnerId(req, async (ownerId, responseHeaders) => {
-     const { id } = await params;
-     const store = await getOwnerScopedDocumentStore(ownerId);
+-    const { id } = await params;
+-    const store = await getOwnerScopedDocumentStore(ownerId);
 -    await store.deleteDocument(id);
+-    return ownerJson({ ok: true }, 200, responseHeaders);
++    let deletedViaStore = false;
 +    try {
++      const store = await getOwnerScopedDocumentStore(ownerId);
 +      await store.deleteDocument(id);
-+    } catch (err) {
-+      if (isAdmin) {
-+        try {
-+          const provider = await getServerPersistenceProvider(process.env.DATABASE_URL ?? '');
-+          await provider.documentStore.deleteDocument(id);
-+        } catch (innerErr) {
-+          throw innerErr;
-+        }
-+      } else {
-+        throw err;
-+      }
++      deletedViaStore = true;
++    } catch {
++      // Owner-scoped delete failed (e.g. foreign owner); handled via admin cascade below
 +    }
-     return ownerJson({ ok: true }, 200, responseHeaders);
++
++    // 1. Direct database cascade purge if admin or store didn't handle it
++    if (!deletedViaStore && (isAdmin || !process.env.DATABASE_URL)) {
++      if (process.env.DATABASE_URL) {
++        try {
++          const { Pool } = await import('pg');
++          const pool = new Pool({ connectionString: process.env.DATABASE_URL });
++          await pool.query('DELETE FROM document_scenes WHERE stage_id = $1', [id]);
++          await pool.query('DELETE FROM stage_meta WHERE stage_id = $1', [id]);
++          await pool.query('DELETE FROM document_stages WHERE id = $1', [id]);
++          try {
++            await pool.query('DELETE FROM document_asset_refs WHERE stage_id = $1', [id]);
++          } catch {}
++          try {
++            await pool.query('DELETE FROM document_asset_withdrawals WHERE stage_id = $1', [id]);
++          } catch {}
++          await pool.end();
++        } catch (dbErr) {
++          console.warn(`[DELETE /api/stages/${id}] Direct DB deletion encountered error:`, dbErr);
++        }
++      }
++    } else if (!deletedViaStore && !isAdmin) {
++      return ownerApiError('INVALID_REQUEST', 403, 'Permission denied', responseHeaders);
++    }
++
++    // 2. Direct database cleanup even if store delete succeeded (ensure stage_meta and scenes are clean)
++    if (isAdmin && process.env.DATABASE_URL) {
++      try {
++        const { Pool } = await import('pg');
++        const pool = new Pool({ connectionString: process.env.DATABASE_URL });
++        await pool.query('DELETE FROM document_scenes WHERE stage_id = $1', [id]);
++        await pool.query('DELETE FROM stage_meta WHERE stage_id = $1', [id]);
++        await pool.query('DELETE FROM document_stages WHERE id = $1', [id]);
++        await pool.end();
++      } catch {}
++    }
++
++    // 3. Purge physical files in data/classrooms/
++    try {
++      const { promises: fsPromises } = await import('fs');
++      const pathModule = await import('path');
++      const classroomsDir = pathModule.join(process.cwd(), 'data', 'classrooms');
++      const jsonPath = pathModule.join(classroomsDir, `${id}.json`);
++      const mediaDirPath = pathModule.join(classroomsDir, id);
++
++      await fsPromises.rm(jsonPath, { force: true }).catch(() => {});
++      await fsPromises.rm(mediaDirPath, { recursive: true, force: true }).catch(() => {});
++
++      // Clean up any classroom-jobs for this stage
++      const jobsDir = pathModule.join(process.cwd(), 'data', 'classroom-jobs');
++      try {
++        const jobFiles = await fsPromises.readdir(jobsDir);
++        for (const jf of jobFiles) {
++          if (jf.includes(id)) {
++            await fsPromises.rm(pathModule.join(jobsDir, jf), { force: true }).catch(() => {});
++          }
++        }
++      } catch {}
++    } catch (fsErr) {
++      console.warn(`[DELETE /api/stages/${id}] Filesystem purge error:`, fsErr);
++    }
++
++    // 4. Purge interactive games folder in data/interactive-library/
++    try {
++      await deleteInteractiveLibraryStage(id);
++    } catch (libErr) {
++      console.warn(`[DELETE /api/stages/${id}] Interactive library delete error:`, libErr);
++    }
++
++    return ownerJson({ ok: true, success: true }, 200, responseHeaders);
    });
  }
 diff --git a/app/api/stages/route.ts b/app/api/stages/route.ts
-index a85831b5..19b5e76d 100644
+index a85831b5..ffa0a5ee 100644
 --- a/app/api/stages/route.ts
 +++ b/app/api/stages/route.ts
 @@ -24,6 +24,9 @@ import { ownerJson } from '@/lib/server/agent-runtime/route-response';
@@ -130,7 +387,7 @@ index a85831b5..19b5e76d 100644
  export const runtime = 'nodejs';
  
  /** Mint a fresh, collision-free course id in the same `stage-` family as the agent tools. */
-@@ -35,9 +38,24 @@ function createStageId(): string {
+@@ -35,9 +38,37 @@ function createStageId(): string {
  export async function GET(req: NextRequest) {
    if (!isAgentRuntimeConfigured()) return new Response('Not found', { status: 404 });
  
@@ -141,14 +398,27 @@ index a85831b5..19b5e76d 100644
      const store = await getOwnerScopedDocumentStore(ownerId);
 -    const stages = await store.listDocuments();
 +    let stages = await store.listDocuments();
-+    if (isAdmin) {
++    if (isAdmin && process.env.DATABASE_URL) {
 +      try {
-+        const provider = await getServerPersistenceProvider(process.env.DATABASE_URL ?? '');
-+        const allDocs = await provider.documentStore.listDocuments();
++        const { Pool } = await import('pg');
++        const pool = new Pool({ connectionString: process.env.DATABASE_URL });
++        const res = await pool.query(
++          'SELECT id, name, interactive_mode, task_engine_mode, created_at, updated_at FROM document_stages ORDER BY updated_at DESC',
++        );
 +        const map = new Map<string, any>();
-+        for (const doc of allDocs) map.set(doc.id, doc);
++        for (const doc of res.rows) {
++          map.set(doc.id, {
++            id: doc.id,
++            name: doc.name,
++            interactiveMode: doc.interactive_mode,
++            taskEngineMode: doc.task_engine_mode,
++            createdAt: doc.created_at,
++            updatedAt: doc.updated_at,
++          });
++        }
 +        for (const s of stages) map.set(s.id, s);
 +        stages = Array.from(map.values()).sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
++        await pool.end();
 +      } catch {
 +        // Keep store stages on error
 +      }
@@ -158,10 +428,10 @@ index a85831b5..19b5e76d 100644
  }
 diff --git a/app/my-courses/page.tsx b/app/my-courses/page.tsx
 new file mode 100644
-index 00000000..1032a9d2
+index 00000000..8d1495df
 --- /dev/null
 +++ b/app/my-courses/page.tsx
-@@ -0,0 +1,880 @@
+@@ -0,0 +1,897 @@
 +'use client';
 +
 +import React, { useEffect, useState, useMemo, useTransition } from 'react';
@@ -190,6 +460,7 @@ index 00000000..1032a9d2
 +  CloudUpload,
 +  HardDrive,
 +  Database,
++  Gamepad2,
 +} from 'lucide-react';
 +import { useAuthStore } from '@/lib/store/auth-store';
 +import { UserNav } from '@/components/auth/user-nav';
@@ -495,14 +766,20 @@ index 00000000..1032a9d2
 +        console.warn('Failed to delete from local storage:', e);
 +      }
 +
-+      // 2. 服务端 PostgreSQL 彻底删除
++      // 2. 服务端彻底删除 (PostgreSQL + 磁盘文件 + 互动展厅)
 +      try {
-+        await fetch(`/api/stages/${encodeURIComponent(deletingCourse.id)}`, {
++        const res = await fetch(`/api/stages/${encodeURIComponent(deletingCourse.id)}`, {
 +          method: 'DELETE',
 +          credentials: 'include',
 +        });
-+      } catch (e) {
++        if (!res.ok) {
++          const errData = await res.json().catch(() => null);
++          throw new Error(errData?.error || `HTTP ${res.status}`);
++        }
++      } catch (e: any) {
 +        console.warn('Failed to delete from server:', e);
++        toast.error(`服务端删除失败: ${e.message || '网络异常'}`);
++        return;
 +      }
 +
 +      setCourses((prev) => prev.filter((c) => c.id !== deletingCourse.id));
@@ -589,6 +866,16 @@ index 00000000..1032a9d2
 +            >
 +              <Sparkles className="w-3.5 h-3.5" />
 +              批量快速制课
++            </Button>
++
++            <Button
++              variant="outline"
++              size="sm"
++              onClick={() => router.push('/interactive-hub')}
++              className="gap-1.5 text-purple-600 dark:text-purple-400 border-purple-500/30 hover:bg-purple-50 dark:hover:bg-purple-950/40 text-xs cursor-pointer"
++            >
++              <Gamepad2 className="w-3.5 h-3.5" />
++              互动展厅
 +            </Button>
 +
 +            <Button
@@ -1043,18 +1330,19 @@ index 00000000..1032a9d2
 +  );
 +}
 diff --git a/app/page.tsx b/app/page.tsx
-index 31059149..910cbd69 100644
+index 31059149..dc9a8e7d 100644
 --- a/app/page.tsx
 +++ b/app/page.tsx
-@@ -27,6 +27,7 @@ import {
+@@ -27,6 +27,8 @@ import {
    X,
    Presentation,
    Loader2,
 +  BookOpen,
++  Gamepad2,
  } from 'lucide-react';
  import { useI18n } from '@/lib/hooks/use-i18n';
  import { LanguageSwitcher } from '@/components/language-switcher';
-@@ -36,6 +37,8 @@ import { InputGroup, InputGroupInput, InputGroupButton } from '@/components/ui/i
+@@ -36,6 +38,8 @@ import { InputGroup, InputGroupInput, InputGroupButton } from '@/components/ui/i
  import { Textarea as UITextarea } from '@/components/ui/textarea';
  import { cn } from '@/lib/utils';
  import { SettingsDialog } from '@/components/settings';
@@ -1063,7 +1351,7 @@ index 31059149..910cbd69 100644
  import { GenerationToolbar } from '@/components/generation/generation-toolbar';
  import { AgentBar } from '@/components/agent/agent-bar';
  import { useTheme } from '@/lib/hooks/use-theme';
-@@ -89,6 +92,8 @@ import {
+@@ -89,6 +93,8 @@ import {
  } from '@/lib/config/feature-flags';
  import { useImportPptx } from '@/lib/import/use-import-pptx';
  import { InteractiveModeButton } from '@/components/generation/interactive-mode-button';
@@ -1072,7 +1360,7 @@ index 31059149..910cbd69 100644
  import { ProBadge } from '@/components/workbench/ProBadge';
  import { arrivedByProSwap, startProSwap } from '@/lib/workbench/pro-swap';
  import {
-@@ -100,6 +105,7 @@ const log = createLogger('Home');
+@@ -100,6 +106,7 @@ const log = createLogger('Home');
  
  const RECENT_OPEN_STORAGE_KEY = 'recentClassroomsOpen';
  const INTERACTIVE_MODE_STORAGE_KEY = 'interactiveModeEnabled';
@@ -1080,7 +1368,7 @@ index 31059149..910cbd69 100644
  
  // PPTX import is still scaffolding: `useImportPptx` has no `onImported` consumer
  // yet, so the flow only logs the parsed slides. Hide the entry point behind a
-@@ -112,6 +118,7 @@ let workbenchRuntimeCache: boolean | null = null;
+@@ -112,6 +119,7 @@ let workbenchRuntimeCache: boolean | null = null;
  interface FormState {
    courseMaterials: SelectedCourseMaterial[];
    requirement: string;
@@ -1088,7 +1376,7 @@ index 31059149..910cbd69 100644
    interactiveMode: boolean;
    vocationalTestMode: boolean;
  }
-@@ -119,6 +126,7 @@ interface FormState {
+@@ -119,6 +127,7 @@ interface FormState {
  const initialFormState: FormState = {
    courseMaterials: [],
    requirement: '',
@@ -1096,7 +1384,7 @@ index 31059149..910cbd69 100644
    interactiveMode: false,
    vocationalTestMode: false,
  };
-@@ -201,6 +209,19 @@ function HomePage() {
+@@ -201,6 +210,19 @@ function HomePage() {
      } catch {
        /* localStorage unavailable */
      }
@@ -1116,7 +1404,7 @@ index 31059149..910cbd69 100644
    }, []);
  
    // Restore requirement draft from localStorage on mount. The previous derived-state
-@@ -217,6 +238,7 @@ function HomePage() {
+@@ -217,6 +239,7 @@ function HomePage() {
  
    const [themeOpen, setThemeOpen] = useState(false);
    const [error, setError] = useState<string | null>(null);
@@ -1124,7 +1412,7 @@ index 31059149..910cbd69 100644
    // True while the Generate click drains upload-time ingests and builds the
    // generation session. Doubles as the guard flag that freezes the course
    // material set for the duration of prep and as the switch that disables the
-@@ -504,6 +526,8 @@ function HomePage() {
+@@ -504,6 +527,8 @@ function HomePage() {
      try {
        if (field === 'interactiveMode')
          localStorage.setItem(INTERACTIVE_MODE_STORAGE_KEY, String(value));
@@ -1133,7 +1421,7 @@ index 31059149..910cbd69 100644
        if (field === 'requirement') updateRequirementCache(value as string);
      } catch {
        /* ignore */
-@@ -599,6 +623,7 @@ function HomePage() {
+@@ -599,6 +624,7 @@ function HomePage() {
        const userProfile = useUserProfileStore.getState();
        const requirements: UserRequirements = {
          requirement: form.requirement,
@@ -1141,7 +1429,7 @@ index 31059149..910cbd69 100644
          userNickname: userProfile.nickname || undefined,
          userBio: userProfile.bio || undefined,
          // Course-level web search now lives in settings (课程模型配置 → 联网调研)
-@@ -783,26 +808,57 @@ function HomePage() {
+@@ -783,26 +809,67 @@ function HomePage() {
            )}
          </div>
  
@@ -1182,6 +1470,16 @@ index 31059149..910cbd69 100644
 +          <span>批量制课</span>
 +        </button>
 +
++        {/* Interactive Hub Button */}
++        <button
++          onClick={() => router.push('/interactive-hub')}
++          className="flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium text-purple-600 dark:text-purple-400 bg-purple-500/10 hover:bg-purple-500/20 border border-purple-500/30 transition-all shadow-xs cursor-pointer"
++          title="互动实验与游戏展厅"
++        >
++          <Gamepad2 className="w-3.5 h-3.5 text-purple-500" />
++          <span>互动展厅</span>
++        </button>
++
 +        {/* My Courses Button */}
 +        <button
 +          onClick={() => router.push('/my-courses')}
@@ -1216,7 +1514,7 @@ index 31059149..910cbd69 100644
  
        {/* ═══ Background Decor ═══ */}
        <div className="absolute inset-0 overflow-hidden pointer-events-none">
-@@ -904,6 +960,13 @@ function HomePage() {
+@@ -904,6 +971,13 @@ function HomePage() {
                  />
                </div>
  

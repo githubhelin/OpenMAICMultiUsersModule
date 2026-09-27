@@ -83,39 +83,53 @@ export async function POST(request: NextRequest) {
     const safeStage = sanitizeSceneContent(stage);
     const safeScenes = sanitizeSceneContent(scenes);
 
-    // The storage id is ALWAYS server-generated. A caller-supplied stage.id is
-    // ignored: ids are public share-URL segments, so accepting one would let
-    // any visitor name — and therefore attempt to replace — an existing
-    // classroom. The generated id becomes the stage id and every scene's
-    // stageId so the persisted document is internally consistent.
+    // If caller supplied a valid stage.id, preserve it so client, cloud DB and filesystem stay 100% consistent.
+    const callerStageId =
+      stage?.id && typeof stage.id === 'string' && isValidClassroomId(stage.id)
+        ? stage.id
+        : undefined;
+
     let persisted: Awaited<ReturnType<typeof persistClassroom>> | undefined;
-    for (let attempt = 0; attempt < CLASSROOM_ID_MAX_ATTEMPTS; attempt += 1) {
-      const id = generateClassroomId();
 
-      // Defence in depth: the generator only emits allowlisted characters, but
-      // an id must never be joined into a filesystem path unasserted.
-      if (!isValidClassroomId(id)) {
-        return apiError(API_ERROR_CODES.INVALID_REQUEST, 400, 'Invalid classroom id');
-      }
+    if (callerStageId) {
+      persisted = await persistClassroom(
+        {
+          id: callerStageId,
+          stage: { ...safeStage, id: callerStageId },
+          scenes: safeScenes.map((scene) => ({ ...scene, stageId: callerStageId })),
+        },
+        baseUrl,
+        { exclusive: false },
+      );
+    } else {
+      for (let attempt = 0; attempt < CLASSROOM_ID_MAX_ATTEMPTS; attempt += 1) {
+        const id = generateClassroomId();
 
-      try {
-        persisted = await persistClassroom(
-          {
-            id,
-            stage: { ...safeStage, id },
-            scenes: safeScenes.map((scene) => ({ ...scene, stageId: id })),
-          },
-          baseUrl,
-          { exclusive: true },
-        );
-        break;
-      } catch (error) {
-        if (!(error instanceof ClassroomAlreadyExistsError)) {
-          throw error;
+        // Defence in depth: the generator only emits allowlisted characters, but
+        // an id must never be joined into a filesystem path unasserted.
+        if (!isValidClassroomId(id)) {
+          return apiError(API_ERROR_CODES.INVALID_REQUEST, 400, 'Invalid classroom id');
         }
-        // Astronomically unlikely with a 10-character id: pick a fresh id and
-        // retry a bounded number of times rather than clobbering the
-        // incumbent classroom.
+
+        try {
+          persisted = await persistClassroom(
+            {
+              id,
+              stage: { ...safeStage, id },
+              scenes: safeScenes.map((scene) => ({ ...scene, stageId: id })),
+            },
+            baseUrl,
+            { exclusive: true },
+          );
+          break;
+        } catch (error) {
+          if (!(error instanceof ClassroomAlreadyExistsError)) {
+            throw error;
+          }
+          // Astronomically unlikely with a 10-character id: pick a fresh id and
+          // retry a bounded number of times rather than clobbering the
+          // incumbent classroom.
+        }
       }
     }
 

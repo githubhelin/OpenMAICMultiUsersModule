@@ -28,11 +28,19 @@ import { ownerApiError, ownerJson, ownerNotFound } from '@/lib/server/agent-runt
 import { withRequestOwnerId } from '@/lib/server/agent-runtime/with-owner';
 import { STAGE_NAME_MAX_LENGTH } from '@/lib/server/agent-runtime/stage-limits';
 import { getSessionPayload } from '@/lib/server/auth/session';
-import { getServerPersistenceProvider } from '@/lib/persistence/server-provider';
 import {
   renameInteractiveLibraryStage,
   deleteInteractiveLibraryStage,
+  syncInteractiveLibraryForStage,
 } from '@/lib/server/interactive-library';
+import {
+  buildRequestOrigin,
+  isValidClassroomId,
+  persistClassroom,
+} from '@/lib/server/classroom-storage';
+import { sanitizeSceneContent } from '@/lib/server/sanitize-scene-content';
+import { markStageGenerationComplete } from '@/lib/persistence/stage-meta';
+import { getStageAccessDb } from '@/lib/server/stage-access';
 
 export const runtime = 'nodejs';
 
@@ -161,12 +169,14 @@ export async function PUT(req: NextRequest, { params }: Params) {
       );
     }
     const store = await getOwnerScopedDocumentStore(ownerId);
-    // Save is existence-gated (the reference's update path is too): PUT
-    // updates a course that exists; it must not resurrect a deleted one or
-    // mint a course under a client-chosen id. The owner scope is re-checked
-    // inside the write transaction, so a foreign id still refuses there.
-    const existing = await store.loadDocument(id);
-    if (!existing) return ownerNotFound(responseHeaders);
+    if (!isValidClassroomId(id)) {
+      return ownerApiError(
+        'INVALID_REQUEST',
+        400,
+        'invalid stage id format',
+        responseHeaders,
+      );
+    }
     try {
       // The server is authoritative for "last modified": bumping updatedAt
       // keeps the manifest/freshness signal accurate for this route's writes.
@@ -176,6 +186,46 @@ export async function PUT(req: NextRequest, { params }: Params) {
         ...(body as MaicDocument),
         stage: { ...(body as MaicDocument).stage, updatedAt: Date.now() },
       });
+
+      // If marked generation complete, record in stage_meta
+      const candidateOutline = (body as any)?.outline;
+      if (candidateOutline?.generationComplete) {
+        try {
+          const db = await getStageAccessDb();
+          await markStageGenerationComplete(db, id);
+        } catch {
+          // ignore stage_meta non-critical error
+        }
+      }
+
+      // Persist to filesystem for offline static serving
+      try {
+        const baseUrl = buildRequestOrigin(req);
+        const safeStage = sanitizeSceneContent((body as any).stage);
+        const safeScenes = sanitizeSceneContent((body as any).scenes || []);
+        await persistClassroom(
+          {
+            id,
+            stage: { ...safeStage, id },
+            scenes: safeScenes.map((scene: any) => ({ ...scene, stageId: id })),
+          },
+          baseUrl,
+          { exclusive: false },
+        );
+      } catch (fsErr) {
+        console.warn(`[PUT /api/stages/${id}] Filesystem persistence fallback:`, fsErr);
+      }
+
+      // Automatically sync interactive scenes to interactive library
+      const scenesList = (body as any).scenes || [];
+      if (Array.isArray(scenesList) && scenesList.some((s: any) => s.type === 'interactive')) {
+        void syncInteractiveLibraryForStage(
+          (body as any).stage,
+          scenesList,
+        ).catch((err) => {
+          console.warn(`[PUT /api/stages/${id}] Interactive library sync error:`, err);
+        });
+      }
     } catch (error) {
       return mapSaveError(error, responseHeaders);
     }

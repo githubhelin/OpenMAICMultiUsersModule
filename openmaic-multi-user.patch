@@ -1000,7 +1000,7 @@ index 00000000..bab59967
 +  }
 +}
 diff --git a/app/api/classroom/route.ts b/app/api/classroom/route.ts
-index 3cbf7790..ac0d52c0 100644
+index 3cbf7790..484a65c5 100644
 --- a/app/api/classroom/route.ts
 +++ b/app/api/classroom/route.ts
 @@ -9,9 +9,19 @@ import {
@@ -1023,7 +1023,90 @@ index 3cbf7790..ac0d52c0 100644
  
  const log = createLogger('Classroom API');
  
-@@ -113,6 +123,38 @@ export async function POST(request: NextRequest) {
+@@ -73,39 +83,53 @@ export async function POST(request: NextRequest) {
+     const safeStage = sanitizeSceneContent(stage);
+     const safeScenes = sanitizeSceneContent(scenes);
+ 
+-    // The storage id is ALWAYS server-generated. A caller-supplied stage.id is
+-    // ignored: ids are public share-URL segments, so accepting one would let
+-    // any visitor name — and therefore attempt to replace — an existing
+-    // classroom. The generated id becomes the stage id and every scene's
+-    // stageId so the persisted document is internally consistent.
++    // If caller supplied a valid stage.id, preserve it so client, cloud DB and filesystem stay 100% consistent.
++    const callerStageId =
++      stage?.id && typeof stage.id === 'string' && isValidClassroomId(stage.id)
++        ? stage.id
++        : undefined;
++
+     let persisted: Awaited<ReturnType<typeof persistClassroom>> | undefined;
+-    for (let attempt = 0; attempt < CLASSROOM_ID_MAX_ATTEMPTS; attempt += 1) {
+-      const id = generateClassroomId();
+ 
+-      // Defence in depth: the generator only emits allowlisted characters, but
+-      // an id must never be joined into a filesystem path unasserted.
+-      if (!isValidClassroomId(id)) {
+-        return apiError(API_ERROR_CODES.INVALID_REQUEST, 400, 'Invalid classroom id');
+-      }
++    if (callerStageId) {
++      persisted = await persistClassroom(
++        {
++          id: callerStageId,
++          stage: { ...safeStage, id: callerStageId },
++          scenes: safeScenes.map((scene) => ({ ...scene, stageId: callerStageId })),
++        },
++        baseUrl,
++        { exclusive: false },
++      );
++    } else {
++      for (let attempt = 0; attempt < CLASSROOM_ID_MAX_ATTEMPTS; attempt += 1) {
++        const id = generateClassroomId();
++
++        // Defence in depth: the generator only emits allowlisted characters, but
++        // an id must never be joined into a filesystem path unasserted.
++        if (!isValidClassroomId(id)) {
++          return apiError(API_ERROR_CODES.INVALID_REQUEST, 400, 'Invalid classroom id');
++        }
+ 
+-      try {
+-        persisted = await persistClassroom(
+-          {
+-            id,
+-            stage: { ...safeStage, id },
+-            scenes: safeScenes.map((scene) => ({ ...scene, stageId: id })),
+-          },
+-          baseUrl,
+-          { exclusive: true },
+-        );
+-        break;
+-      } catch (error) {
+-        if (!(error instanceof ClassroomAlreadyExistsError)) {
+-          throw error;
++        try {
++          persisted = await persistClassroom(
++            {
++              id,
++              stage: { ...safeStage, id },
++              scenes: safeScenes.map((scene) => ({ ...scene, stageId: id })),
++            },
++            baseUrl,
++            { exclusive: true },
++          );
++          break;
++        } catch (error) {
++          if (!(error instanceof ClassroomAlreadyExistsError)) {
++            throw error;
++          }
++          // Astronomically unlikely with a 10-character id: pick a fresh id and
++          // retry a bounded number of times rather than clobbering the
++          // incumbent classroom.
+         }
+-        // Astronomically unlikely with a 10-character id: pick a fresh id and
+-        // retry a bounded number of times rather than clobbering the
+-        // incumbent classroom.
+       }
+     }
+ 
+@@ -113,6 +137,38 @@ export async function POST(request: NextRequest) {
        return apiError(API_ERROR_CODES.INVALID_REQUEST, 409, 'Classroom id collision');
      }
  
@@ -1062,7 +1145,7 @@ index 3cbf7790..ac0d52c0 100644
      return apiSuccess({ id: persisted.id, url: persisted.url }, 201);
    } catch (error) {
      log.error(
-@@ -144,7 +186,28 @@ export async function GET(request: NextRequest) {
+@@ -144,7 +200,28 @@ export async function GET(request: NextRequest) {
        return apiError(API_ERROR_CODES.INVALID_REQUEST, 400, 'Invalid classroom id');
      }
  
@@ -1249,23 +1332,31 @@ index 00000000..734573b2
 +  }
 +}
 diff --git a/app/api/stages/[id]/route.ts b/app/api/stages/[id]/route.ts
-index 6bc07e84..f01373a8 100644
+index 6bc07e84..e0ac8059 100644
 --- a/app/api/stages/[id]/route.ts
 +++ b/app/api/stages/[id]/route.ts
-@@ -27,6 +27,12 @@ import { getOwnerScopedDocumentStore } from '@/lib/server/agent-runtime/owner-sc
+@@ -27,6 +27,20 @@ import { getOwnerScopedDocumentStore } from '@/lib/server/agent-runtime/owner-sc
  import { ownerApiError, ownerJson, ownerNotFound } from '@/lib/server/agent-runtime/route-response';
  import { withRequestOwnerId } from '@/lib/server/agent-runtime/with-owner';
  import { STAGE_NAME_MAX_LENGTH } from '@/lib/server/agent-runtime/stage-limits';
 +import { getSessionPayload } from '@/lib/server/auth/session';
-+import { getServerPersistenceProvider } from '@/lib/persistence/server-provider';
 +import {
 +  renameInteractiveLibraryStage,
 +  deleteInteractiveLibraryStage,
++  syncInteractiveLibraryForStage,
 +} from '@/lib/server/interactive-library';
++import {
++  buildRequestOrigin,
++  isValidClassroomId,
++  persistClassroom,
++} from '@/lib/server/classroom-storage';
++import { sanitizeSceneContent } from '@/lib/server/sanitize-scene-content';
++import { markStageGenerationComplete } from '@/lib/persistence/stage-meta';
++import { getStageAccessDb } from '@/lib/server/stage-access';
  
  export const runtime = 'nodejs';
  
-@@ -107,6 +113,7 @@ export async function PATCH(req: NextRequest, { params }: Params) {
+@@ -107,6 +121,7 @@ export async function PATCH(req: NextRequest, { params }: Params) {
          ...document,
          stage: { ...document.stage, name, updatedAt: Date.now() },
        });
@@ -1273,7 +1364,75 @@ index 6bc07e84..f01373a8 100644
      } catch (error) {
        return mapSaveError(error, responseHeaders);
      }
-@@ -176,14 +183,92 @@ export async function PUT(req: NextRequest, { params }: Params) {
+@@ -154,12 +169,14 @@ export async function PUT(req: NextRequest, { params }: Params) {
+       );
+     }
+     const store = await getOwnerScopedDocumentStore(ownerId);
+-    // Save is existence-gated (the reference's update path is too): PUT
+-    // updates a course that exists; it must not resurrect a deleted one or
+-    // mint a course under a client-chosen id. The owner scope is re-checked
+-    // inside the write transaction, so a foreign id still refuses there.
+-    const existing = await store.loadDocument(id);
+-    if (!existing) return ownerNotFound(responseHeaders);
++    if (!isValidClassroomId(id)) {
++      return ownerApiError(
++        'INVALID_REQUEST',
++        400,
++        'invalid stage id format',
++        responseHeaders,
++      );
++    }
+     try {
+       // The server is authoritative for "last modified": bumping updatedAt
+       // keeps the manifest/freshness signal accurate for this route's writes.
+@@ -169,6 +186,46 @@ export async function PUT(req: NextRequest, { params }: Params) {
+         ...(body as MaicDocument),
+         stage: { ...(body as MaicDocument).stage, updatedAt: Date.now() },
+       });
++
++      // If marked generation complete, record in stage_meta
++      const candidateOutline = (body as any)?.outline;
++      if (candidateOutline?.generationComplete) {
++        try {
++          const db = await getStageAccessDb();
++          await markStageGenerationComplete(db, id);
++        } catch {
++          // ignore stage_meta non-critical error
++        }
++      }
++
++      // Persist to filesystem for offline static serving
++      try {
++        const baseUrl = buildRequestOrigin(req);
++        const safeStage = sanitizeSceneContent((body as any).stage);
++        const safeScenes = sanitizeSceneContent((body as any).scenes || []);
++        await persistClassroom(
++          {
++            id,
++            stage: { ...safeStage, id },
++            scenes: safeScenes.map((scene: any) => ({ ...scene, stageId: id })),
++          },
++          baseUrl,
++          { exclusive: false },
++        );
++      } catch (fsErr) {
++        console.warn(`[PUT /api/stages/${id}] Filesystem persistence fallback:`, fsErr);
++      }
++
++      // Automatically sync interactive scenes to interactive library
++      const scenesList = (body as any).scenes || [];
++      if (Array.isArray(scenesList) && scenesList.some((s: any) => s.type === 'interactive')) {
++        void syncInteractiveLibraryForStage(
++          (body as any).stage,
++          scenesList,
++        ).catch((err) => {
++          console.warn(`[PUT /api/stages/${id}] Interactive library sync error:`, err);
++        });
++      }
+     } catch (error) {
+       return mapSaveError(error, responseHeaders);
+     }
+@@ -176,14 +233,92 @@ export async function PUT(req: NextRequest, { params }: Params) {
    });
  }
  
@@ -5673,6 +5832,41 @@ index 00000000..109853c8
 +    </DropdownMenu>
 +  );
 +}
+diff --git a/components/scene-renderers/classroom-complete.tsx b/components/scene-renderers/classroom-complete.tsx
+index a7dca80c..5e35c158 100644
+--- a/components/scene-renderers/classroom-complete.tsx
++++ b/components/scene-renderers/classroom-complete.tsx
+@@ -657,5 +657,30 @@ export function ClassroomCompletePage({ scenes, title }: ClassroomCompletePagePr
+ export function ClassroomCompletePageConnected() {
+   const stage = useStageStore((s) => s.stage);
+   const scenes = useStageStore((s) => s.scenes);
++  const outlines = useStageStore((s) => s.outlines);
++
++  // Safety net: ensure course is safely persisted to cloud and interactive hub upon reaching completion
++  useEffect(() => {
++    if (stage?.id && scenes && scenes.length > 0) {
++      void fetch(`/api/stages/${encodeURIComponent(stage.id)}`, {
++        method: 'PUT',
++        headers: { 'Content-Type': 'application/json' },
++        body: JSON.stringify({
++          stage,
++          scenes,
++          outline: {
++            outlines,
++            generationComplete: true,
++            createdAt: stage.createdAt || Date.now(),
++            updatedAt: Date.now(),
++          },
++        }),
++        credentials: 'include',
++      }).catch((err) => {
++        log.warn('Classroom complete background sync error:', err);
++      });
++    }
++  }, [stage?.id, scenes?.length]);
++
+   return <ClassroomCompletePage scenes={scenes} title={stage?.name ?? ''} />;
+ }
 diff --git a/components/settings/index.tsx b/components/settings/index.tsx
 index 617b6f6a..66836cab 100644
 --- a/components/settings/index.tsx
@@ -8726,10 +8920,50 @@ index d26e71e4..87e4efc5 100644
        },
      },
 diff --git a/lib/store/stage.ts b/lib/store/stage.ts
-index 552e168c..df70fd79 100644
+index 552e168c..c75605b4 100644
 --- a/lib/store/stage.ts
 +++ b/lib/store/stage.ts
-@@ -1054,7 +1054,8 @@ const useStageStoreBase = create<StageState>()((set, get) => ({
+@@ -778,6 +778,39 @@ const useStageStoreBase = create<StageState>()((set, get) => ({
+     set({ generationComplete });
+     // Final scenes and the completion barrier commit in the same aggregate write.
+     void get().saveToStorage();
++    if (generationComplete) {
++      // Trigger automatic silent cloud sync to PostgreSQL and interactive exhibition hall
++      void (async () => {
++        try {
++          const { stage, scenes, outlines } = get();
++          if (!stage?.id) return;
++          const res = await fetch(`/api/stages/${encodeURIComponent(stage.id)}`, {
++            method: 'PUT',
++            headers: { 'Content-Type': 'application/json' },
++            body: JSON.stringify({
++              stage,
++              scenes,
++              outline: {
++                outlines,
++                generationComplete: true,
++                createdAt: stage.createdAt || Date.now(),
++                updatedAt: Date.now(),
++              },
++            }),
++            credentials: 'include',
++          });
++          if (res.ok && typeof window !== 'undefined') {
++            const { toast } = await import('sonner');
++            toast.success('🎉 课程已自动安全备份至云端！', {
++              id: `auto-sync-${stage.id}`,
++              duration: 3500,
++            });
++          }
++        } catch (err) {
++          log.warn('Auto cloud sync failed:', err);
++        }
++      })();
++    }
+   },
+ 
+   markGenerationCompleteIfDone: () => {
+@@ -1054,7 +1087,8 @@ const useStageStoreBase = create<StageState>()((set, get) => ({
              outlines,
              scenes: migrated,
              failedOutlines,
