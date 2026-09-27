@@ -367,7 +367,12 @@ async function executeBatchIndependentJob(
       });
 
       // 2. 组装当前课程的个性化提示词
-      const courseTitle = extracted.title || task.fileName.replace(/\.[^/.]+$/, '');
+      const cleanFileName = task.fileName.replace(/\.[^/.]+$/, '');
+      const hasSeriesMarker = /(第\s*\d+\s*[课讲章节]|[\(（]\s*[0-9一二三四五六七八九十上下]+\s*[\)）]|\bpart\s*\d+\b)/i.test(cleanFileName);
+      const courseTitle =
+        hasSeriesMarker && !/(第\s*\d+\s*[课讲章节]|[\(（]\s*[0-9一二三四五六七八九十上下]+\s*[\)）]|\bpart\s*\d+\b)/i.test(extracted.title || '')
+          ? cleanFileName
+          : extracted.title || cleanFileName;
       const scaleInstruction = buildCourseScaleInstruction(initialJob.courseScale, initialJob.enableInteractiveMode);
       const requirement = initialJob.enableInteractiveMode
         ? `【课程主题】：《${courseTitle}》\n${initialJob.requirement ? '【教学总要求】：' + initialJob.requirement + '\n' : ''}【教学交互规范】：必须启用深度互动模式（Interactive-First），全课必须生成不少于3~4个生动的高品质可交互场景（涵盖物理/科学过程仿真、动态沙盒、算法可视化或趣味闯关游戏，提供完备的 widgetType 与 widgetOutline），与理论精讲及阶段小测深度交替融合。${scaleInstruction}`

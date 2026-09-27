@@ -6137,7 +6137,7 @@ index 6d88151a..40e0fd66 100644
      readOnly: !access.isOwner,
      generationEpoch: state.generationEpoch + 1,
 diff --git a/lib/prompts/templates/interactive-outlines/system.md b/lib/prompts/templates/interactive-outlines/system.md
-index ae2091d4..74199bd1 100644
+index ae2091d4..102e2614 100644
 --- a/lib/prompts/templates/interactive-outlines/system.md
 +++ b/lib/prompts/templates/interactive-outlines/system.md
 @@ -2,12 +2,15 @@
@@ -6161,7 +6161,17 @@ index ae2091d4..74199bd1 100644
  
  ---
  
-@@ -107,23 +110,22 @@ Live code editor with execution and test cases.
+@@ -49,7 +52,8 @@ Produce a **`courseTitle`** (required): a concise, human-readable name for the *
+ - **Length**: ≤ 30 characters (roughly one short phrase). Hard cap; if the concept is long, compress it.
+ - **Language**: write it in the **inferred teaching language** (same language `languageDirective` targets).
+ - **Style**: a noun phrase summarizing the topic — e.g. "抛体运动实战", "Hands-on Recursion", "太阳系探索". Not a sentence, not a question.
+-- **Do NOT** include: quotes, numbering, leading emojis, the teacher's name/role, or words like "Course"/"课程"/"A course about".
++- **Do NOT** include: quotes, leading emojis, the teacher's name/role, or words like "Course"/"课程"/"A course about".
++- **Series/Part Markers**: If the course requirement or material indicates it is part of a numbered series or multi-part lesson (e.g. "第18课", "第19课", "(1)", "(2)", "Part 1"), you MUST PRESERVE the lesson number or part distinction in the title so separate lessons in a series never collapse into identical titles.
+ - If the requirement is already a crisp title, you may reuse it (trimmed to the limit). If it is a long prompt, distill it to its essence.
+ 
+ ---
+@@ -107,23 +111,22 @@ Live code editor with execution and test cases.
  - `challengeType`: Type of coding challenge
  
  ### 4. Game Widget (`game`)
@@ -6196,7 +6206,7 @@ index ae2091d4..74199bd1 100644
  
  **Design Principles:**
  - Player MUST control something meaningful
-@@ -295,6 +297,27 @@ Rules:
+@@ -295,6 +298,27 @@ Rules:
          "concept": "projectile_motion",
          "keyVariables": ["angle", "initial_velocity"]
        }
@@ -6224,7 +6234,7 @@ index ae2091d4..74199bd1 100644
      }
    ]
  }
-@@ -310,10 +333,10 @@ Rules:
+@@ -310,10 +334,10 @@ Rules:
  
  **Scene-level rules:**
  
@@ -6945,10 +6955,10 @@ index 00000000..502e0168
 +}
 diff --git a/lib/server/batch-generation/runner.ts b/lib/server/batch-generation/runner.ts
 new file mode 100644
-index 00000000..32774591
+index 00000000..17b0cbcf
 --- /dev/null
 +++ b/lib/server/batch-generation/runner.ts
-@@ -0,0 +1,535 @@
+@@ -0,0 +1,540 @@
 +import { promises as fs } from 'fs';
 +import { createLogger } from '@/lib/logger';
 +import { generateClassroom } from '@/lib/server/classroom-generation';
@@ -7318,7 +7328,12 @@ index 00000000..32774591
 +      });
 +
 +      // 2. 组装当前课程的个性化提示词
-+      const courseTitle = extracted.title || task.fileName.replace(/\.[^/.]+$/, '');
++      const cleanFileName = task.fileName.replace(/\.[^/.]+$/, '');
++      const hasSeriesMarker = /(第\s*\d+\s*[课讲章节]|[\(（]\s*[0-9一二三四五六七八九十上下]+\s*[\)）]|\bpart\s*\d+\b)/i.test(cleanFileName);
++      const courseTitle =
++        hasSeriesMarker && !/(第\s*\d+\s*[课讲章节]|[\(（]\s*[0-9一二三四五六七八九十上下]+\s*[\)）]|\bpart\s*\d+\b)/i.test(extracted.title || '')
++          ? cleanFileName
++          : extracted.title || cleanFileName;
 +      const scaleInstruction = buildCourseScaleInstruction(initialJob.courseScale, initialJob.enableInteractiveMode);
 +      const requirement = initialJob.enableInteractiveMode
 +        ? `【课程主题】：《${courseTitle}》\n${initialJob.requirement ? '【教学总要求】：' + initialJob.requirement + '\n' : ''}【教学交互规范】：必须启用深度互动模式（Interactive-First），全课必须生成不少于3~4个生动的高品质可交互场景（涵盖物理/科学过程仿真、动态沙盒、算法可视化或趣味闯关游戏，提供完备的 widgetType 与 widgetOutline），与理论精讲及阶段小测深度交替融合。${scaleInstruction}`
