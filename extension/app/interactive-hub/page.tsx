@@ -24,11 +24,17 @@ import {
   FolderOpen,
   RefreshCw,
   CheckCircle2,
+  CheckSquare,
+  Square,
+  DownloadCloud,
+  Archive,
+  Check,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Badge } from '@/components/ui/badge';
 import { Dialog, DialogContent } from '@/components/ui/dialog';
+import { toast } from 'sonner';
 
 interface InteractiveItem {
   sceneId: string;
@@ -83,6 +89,12 @@ export default function InteractiveHubPage() {
   // Active playing item in modal
   const [activeItem, setActiveItem] = useState<InteractiveItem | null>(null);
   const [isFullscreen, setIsFullscreen] = useState(false);
+
+  // Multi-select & Batch download state
+  const [selectedKeys, setSelectedKeys] = useState<Set<string>>(new Set());
+  const [isMultiSelectMode, setIsMultiSelectMode] = useState(false);
+  const [downloadingZip, setDownloadingZip] = useState(false);
+  const [downloadingCourseId, setDownloadingCourseId] = useState<string | null>(null);
 
   // Load interactive library data
   const loadData = async (forceSync = false) => {
@@ -195,6 +207,136 @@ export default function InteractiveHubPage() {
     }
     return Array.from(map.values());
   }, [filteredItems]);
+
+  // Unique key generator for an interactive item
+  const getItemKey = (item: { stageId: string; fileName: string }) =>
+    `${item.stageId}::${item.fileName}`;
+
+  // Toggle single item selection
+  const toggleSelectItem = (item: InteractiveItem) => {
+    const key = getItemKey(item);
+    setSelectedKeys((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) {
+        next.delete(key);
+      } else {
+        next.add(key);
+      }
+      return next;
+    });
+  };
+
+  // Select all items currently visible under filters
+  const selectAllFiltered = () => {
+    setSelectedKeys((prev) => {
+      const next = new Set(prev);
+      filteredItems.forEach((item) => next.add(getItemKey(item)));
+      return next;
+    });
+    toast.success(`已勾选当前视图中的全部 ${filteredItems.length} 个互动组件`);
+  };
+
+  // Clear all selections
+  const clearSelection = () => {
+    setSelectedKeys(new Set());
+  };
+
+  // Toggle all items for a course
+  const toggleCourseSelection = (group: CourseGroup) => {
+    const allSelected = group.items.length > 0 && group.items.every((it) => selectedKeys.has(getItemKey(it)));
+    setSelectedKeys((prev) => {
+      const next = new Set(prev);
+      if (allSelected) {
+        group.items.forEach((it) => next.delete(getItemKey(it)));
+      } else {
+        group.items.forEach((it) => next.add(getItemKey(it)));
+      }
+      return next;
+    });
+  };
+
+  // Trigger batch ZIP archive download
+  const handleBatchDownload = async (
+    customItems?: InteractiveItem[],
+    customArchiveName?: string,
+  ) => {
+    let itemsToDownload: InteractiveItem[] = [];
+    if (customItems && customItems.length > 0) {
+      itemsToDownload = customItems;
+    } else {
+      itemsToDownload = allItems.filter((it) => selectedKeys.has(getItemKey(it)));
+    }
+
+    if (itemsToDownload.length === 0) {
+      toast.error('请至少勾选一个互动组件');
+      return;
+    }
+
+    try {
+      setDownloadingZip(true);
+      const res = await fetch('/api/interactive-library/batch-download', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          items: itemsToDownload.map((it) => ({
+            stageId: it.stageId,
+            fileName: it.fileName,
+            courseName: it.courseName,
+            title: it.title,
+          })),
+          archiveName: customArchiveName,
+        }),
+      });
+
+      if (!res.ok) {
+        const errJson = await res.json().catch(() => ({}));
+        throw new Error(errJson.error || '打包下载失败');
+      }
+
+      // Determine downloaded filename
+      let downloadFilename = customArchiveName ? `${customArchiveName}.zip` : '互动展厅_精选合集.zip';
+      const disposition = res.headers.get('Content-Disposition');
+      if (disposition) {
+        const utf8Match = disposition.match(/filename\*=UTF-8''([^;]+)/i);
+        if (utf8Match && utf8Match[1]) {
+          downloadFilename = decodeURIComponent(utf8Match[1]);
+        } else {
+          const asciiMatch = disposition.match(/filename="?([^";]+)"?/i);
+          if (asciiMatch && asciiMatch[1]) {
+            downloadFilename = asciiMatch[1];
+          }
+        }
+      }
+
+      const blob = await res.blob();
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = downloadFilename;
+      document.body.appendChild(a);
+      a.click();
+      window.URL.revokeObjectURL(url);
+      document.body.removeChild(a);
+
+      toast.success(`成功打包导出 ${itemsToDownload.length} 个离线互动应用！`);
+    } catch (err: any) {
+      console.error('Batch download failed:', err);
+      toast.error(err.message || '打包下载失败，请稍后重试');
+    } finally {
+      setDownloadingZip(false);
+    }
+  };
+
+  // Download all interactive items of a specific course
+  const handleDownloadCourse = async (group: CourseGroup) => {
+    try {
+      setDownloadingCourseId(group.stageId);
+      await handleBatchDownload(group.items, `${group.courseName}_全部互动`);
+    } finally {
+      setDownloadingCourseId(null);
+    }
+  };
+
 
   const getTypeMeta = (type: string) => {
     const t = type.toLowerCase();
@@ -440,11 +582,39 @@ export default function InteractiveHubPage() {
               size="sm"
               onClick={() => triggerForceRescan(false)}
               disabled={syncing || loading}
-              className="gap-1 px-2.5 h-8 text-xs text-slate-600 dark:text-slate-400 hover:text-slate-900 border-slate-200 dark:border-slate-700"
+              className="gap-1 px-2.5 h-8 text-xs text-slate-600 dark:text-slate-400 hover:text-slate-900 border-slate-200 dark:border-slate-700 cursor-pointer"
               title="刷新全量归集数据"
             >
               <RefreshCw className={`w-3.5 h-3.5 ${syncing ? 'animate-spin' : ''}`} />
               <span className="hidden sm:inline">{syncing ? '同步中...' : '刷新'}</span>
+            </Button>
+
+            {/* 多选模式切换与批量下载按钮 */}
+            <Button
+              variant={isMultiSelectMode || selectedKeys.size > 0 ? 'default' : 'outline'}
+              size="sm"
+              onClick={() => {
+                if (selectedKeys.size > 0 && isMultiSelectMode) {
+                  clearSelection();
+                  setIsMultiSelectMode(false);
+                } else {
+                  setIsMultiSelectMode(!isMultiSelectMode);
+                }
+              }}
+              className={`gap-1.5 px-3 h-8 text-xs cursor-pointer ${
+                isMultiSelectMode || selectedKeys.size > 0
+                  ? 'bg-purple-600 hover:bg-purple-700 text-white shadow-xs'
+                  : 'text-purple-600 dark:text-purple-400 border-purple-200 dark:border-purple-800 hover:bg-purple-50 dark:hover:bg-purple-950/40'
+              }`}
+              title="切换多选模式以批量选择和打包下载组件"
+            >
+              <CheckSquare className="w-3.5 h-3.5" />
+              <span>{isMultiSelectMode ? '多选模式已开启' : '多选下载'}</span>
+              {selectedKeys.size > 0 && (
+                <span className="ml-1 px-1.5 py-0.5 rounded-full bg-white text-purple-700 font-bold text-[10px]">
+                  {selectedKeys.size}
+                </span>
+              )}
             </Button>
 
             {/* 视图切换按钮 */}
@@ -520,19 +690,43 @@ export default function InteractiveHubPage() {
             {filteredItems.map((item) => {
               const meta = getTypeMeta(item.widgetType);
               const Icon = meta.icon;
+              const isSelected = selectedKeys.has(getItemKey(item));
               return (
                 <div
                   key={`${item.stageId}-${item.sceneId}`}
-                  className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200/80 dark:border-slate-800 p-4 flex flex-col justify-between hover:shadow-md hover:border-indigo-500/30 transition-all group"
+                  className={`bg-white dark:bg-slate-900 rounded-2xl border p-4 flex flex-col justify-between transition-all group ${
+                    isSelected
+                      ? 'border-purple-500 ring-2 ring-purple-500/30 bg-purple-50/20 dark:bg-purple-950/20 shadow-md'
+                      : 'border-slate-200/80 dark:border-slate-800 hover:shadow-md hover:border-indigo-500/30'
+                  }`}
                 >
                   <div>
                     <div className="flex items-center justify-between gap-2 mb-2.5">
-                      <span
-                        className={`text-[10px] font-semibold px-2 py-0.5 rounded-full border flex items-center gap-1 ${meta.color}`}
-                      >
-                        <Icon className="w-3 h-3" />
-                        {meta.label}
-                      </span>
+                      <div className="flex items-center gap-2">
+                        {/* 勾选多选框 */}
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            toggleSelectItem(item);
+                          }}
+                          className={`w-5 h-5 rounded-md flex items-center justify-center border transition-all cursor-pointer ${
+                            isSelected
+                              ? 'bg-purple-600 border-purple-600 text-white shadow-xs'
+                              : 'border-slate-300 dark:border-slate-700 hover:border-purple-400 bg-white dark:bg-slate-800'
+                          }`}
+                          title={isSelected ? '取消勾选' : '勾选加入批量下载'}
+                        >
+                          {isSelected && <Check className="w-3.5 h-3.5 stroke-[3]" />}
+                        </button>
+
+                        <span
+                          className={`text-[10px] font-semibold px-2 py-0.5 rounded-full border flex items-center gap-1 ${meta.color}`}
+                        >
+                          <Icon className="w-3 h-3" />
+                          {meta.label}
+                        </span>
+                      </div>
                       <span className="text-[10px] text-slate-400">
                         {formatFileSize(item.size)} · 离线HTML
                       </span>
@@ -603,54 +797,120 @@ export default function InteractiveHubPage() {
         ) : (
           /* 按课程归类折叠视图 */
           <div className="space-y-6">
-            {courseGroups.map((group) => (
-              <div
-                key={group.stageId}
-                className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200/80 dark:border-slate-800 p-5 shadow-xs"
-              >
-                <div className="flex items-center justify-between gap-4 mb-4 pb-3 border-b border-slate-100 dark:border-slate-800">
-                  <div className="flex items-center gap-3">
-                    <div className="w-9 h-9 rounded-xl bg-indigo-50 dark:bg-indigo-950/60 text-indigo-600 dark:text-indigo-400 flex items-center justify-center shrink-0">
-                      <BookOpen className="w-4 h-4" />
-                    </div>
-                    <div>
-                      <h2 className="text-sm font-bold text-slate-900 dark:text-white">
-                        {group.courseName}
-                      </h2>
-                      <div className="text-[11px] text-slate-400">
-                        课程 ID: {group.stageId} · 包含 {group.items.length} 个独立互动页面
+            {courseGroups.map((group) => {
+              const isCourseAllSelected =
+                group.items.length > 0 &&
+                group.items.every((it) => selectedKeys.has(getItemKey(it)));
+              return (
+                <div
+                  key={group.stageId}
+                  className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200/80 dark:border-slate-800 p-5 shadow-xs"
+                >
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-4 pb-3 border-b border-slate-100 dark:border-slate-800">
+                    <div className="flex items-center gap-3">
+                      <div className="w-9 h-9 rounded-xl bg-indigo-50 dark:bg-indigo-950/60 text-indigo-600 dark:text-indigo-400 flex items-center justify-center shrink-0">
+                        <BookOpen className="w-4 h-4" />
+                      </div>
+                      <div>
+                        <h2 className="text-sm font-bold text-slate-900 dark:text-white">
+                          {group.courseName}
+                        </h2>
+                        <div className="text-[11px] text-slate-400">
+                          课程 ID: {group.stageId} · 包含 {group.items.length} 个独立互动页面
+                        </div>
                       </div>
                     </div>
-                  </div>
 
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    onClick={() => router.push(`/classroom/${group.stageId}`)}
-                    className="text-xs text-indigo-600 dark:text-indigo-400 gap-1"
-                  >
-                    <span>进入授课</span>
-                    <ChevronRight className="w-3.5 h-3.5" />
-                  </Button>
-                </div>
+                    <div className="flex items-center gap-2 flex-wrap">
+                      {/* 全选本课互动按钮 */}
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => toggleCourseSelection(group)}
+                        className={`text-xs h-7 px-2.5 gap-1.5 cursor-pointer ${
+                          isCourseAllSelected
+                            ? 'bg-purple-50 text-purple-600 border-purple-300 dark:bg-purple-950/40 dark:text-purple-300'
+                            : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 border-slate-200 dark:border-slate-700'
+                        }`}
+                      >
+                        {isCourseAllSelected ? (
+                          <CheckSquare className="w-3.5 h-3.5 text-purple-600" />
+                        ) : (
+                          <Square className="w-3.5 h-3.5" />
+                        )}
+                        <span>{isCourseAllSelected ? '取消全选本课' : `全选本课 (${group.items.length})`}</span>
+                      </Button>
+
+                      {/* 本课独立打包下载 */}
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => handleDownloadCourse(group)}
+                        disabled={downloadingCourseId === group.stageId}
+                        className="text-xs h-7 px-2.5 gap-1.5 text-indigo-600 dark:text-indigo-400 border-indigo-200 dark:border-indigo-800 hover:bg-indigo-50 dark:hover:bg-indigo-950/40 cursor-pointer"
+                        title="将本课所有互动应用一键打包为 ZIP 压缩包下载"
+                      >
+                        {downloadingCourseId === group.stageId ? (
+                          <Loader2 className="w-3 h-3 animate-spin" />
+                        ) : (
+                          <Archive className="w-3 h-3" />
+                        )}
+                        <span>下载本课 (.zip)</span>
+                      </Button>
+
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => router.push(`/classroom/${group.stageId}`)}
+                        className="text-xs text-indigo-600 dark:text-indigo-400 gap-1"
+                      >
+                        <span>进入授课</span>
+                        <ChevronRight className="w-3.5 h-3.5" />
+                      </Button>
+                    </div>
+                  </div>
 
                 <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3.5">
                   {group.items.map((item) => {
                     const meta = getTypeMeta(item.widgetType);
                     const Icon = meta.icon;
+                    const isSelected = selectedKeys.has(getItemKey(item));
                     return (
                       <div
                         key={item.sceneId}
-                        className="bg-slate-50 dark:bg-slate-950 rounded-xl p-3.5 border border-slate-200/60 dark:border-slate-800/80 flex flex-col justify-between hover:bg-slate-100/80 dark:hover:bg-slate-900 transition-colors"
+                        className={`rounded-xl p-3.5 border transition-all flex flex-col justify-between ${
+                          isSelected
+                            ? 'border-purple-500 ring-2 ring-purple-500/30 bg-purple-50/20 dark:bg-purple-950/20 shadow-xs'
+                            : 'bg-slate-50 dark:bg-slate-950 border-slate-200/60 dark:border-slate-800/80 hover:bg-slate-100/80 dark:hover:bg-slate-900'
+                        }`}
                       >
                         <div>
                           <div className="flex items-center justify-between gap-2 mb-2">
-                            <span
-                              className={`text-[9px] font-semibold px-1.5 py-0.5 rounded border flex items-center gap-1 ${meta.color}`}
-                            >
-                              <Icon className="w-2.5 h-2.5" />
-                              {meta.label}
-                            </span>
+                            <div className="flex items-center gap-1.5">
+                              {/* 勾选多选框 */}
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  toggleSelectItem(item);
+                                }}
+                                className={`w-4 h-4 rounded flex items-center justify-center border transition-all cursor-pointer ${
+                                  isSelected
+                                    ? 'bg-purple-600 border-purple-600 text-white'
+                                    : 'border-slate-300 dark:border-slate-700 hover:border-purple-400 bg-white dark:bg-slate-800'
+                                }`}
+                                title={isSelected ? '取消勾选' : '勾选加入批量下载'}
+                              >
+                                {isSelected && <Check className="w-3 h-3 stroke-[3]" />}
+                              </button>
+
+                              <span
+                                className={`text-[9px] font-semibold px-1.5 py-0.5 rounded border flex items-center gap-1 ${meta.color}`}
+                              >
+                                <Icon className="w-2.5 h-2.5" />
+                                {meta.label}
+                              </span>
+                            </div>
                             <span className="text-[10px] text-slate-400">第 {item.order} 页</span>
                           </div>
                           <h4 className="text-xs font-bold text-slate-800 dark:text-slate-200 mb-1 line-clamp-1">
@@ -704,7 +964,64 @@ export default function InteractiveHubPage() {
                   })}
                 </div>
               </div>
-            ))}
+            );
+          })}
+          </div>
+        )}
+
+        {/* 底部悬浮批量下载操作栏 (Floating Batch Action Bar) */}
+        {selectedKeys.size > 0 && (
+          <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-50 bg-slate-900/95 dark:bg-slate-900/95 text-white backdrop-blur-md px-4 sm:px-5 py-3 rounded-2xl shadow-2xl border border-slate-700/80 flex items-center gap-3 sm:gap-4 animate-in fade-in slide-in-from-bottom-4 max-w-[95vw]">
+            <div className="flex items-center gap-2 text-xs shrink-0">
+              <div className="w-5 h-5 rounded-full bg-purple-500 flex items-center justify-center text-white font-bold text-[10px]">
+                {selectedKeys.size}
+              </div>
+              <span className="font-semibold text-slate-100">已选 {selectedKeys.size} 项</span>
+              <span className="text-slate-400 text-[11px] hidden md:inline">
+                (当前匹配 {filteredItems.length} 项)
+              </span>
+            </div>
+
+            <div className="h-4 w-px bg-slate-700 shrink-0" />
+
+            <div className="flex items-center gap-2">
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={selectAllFiltered}
+                className="text-xs h-8 text-slate-300 hover:text-white hover:bg-slate-800 px-2 sm:px-2.5 cursor-pointer"
+              >
+                全选当前 ({filteredItems.length})
+              </Button>
+
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={clearSelection}
+                className="text-xs h-8 text-slate-400 hover:text-slate-200 hover:bg-slate-800 px-2 cursor-pointer"
+              >
+                清空
+              </Button>
+
+              <Button
+                size="sm"
+                onClick={() => handleBatchDownload()}
+                disabled={downloadingZip}
+                className="text-xs h-8 bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-700 hover:to-indigo-700 text-white font-medium px-4 gap-1.5 shadow-md shadow-purple-500/25 shrink-0 cursor-pointer"
+              >
+                {downloadingZip ? (
+                  <>
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    <span>正在打包 ZIP...</span>
+                  </>
+                ) : (
+                  <>
+                    <DownloadCloud className="w-4 h-4" />
+                    <span>打包下载 ZIP ({selectedKeys.size})</span>
+                  </>
+                )}
+              </Button>
+            </div>
           </div>
         )}
       </main>

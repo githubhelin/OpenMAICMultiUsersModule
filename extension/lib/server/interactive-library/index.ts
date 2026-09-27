@@ -1,5 +1,6 @@
 import fs from 'fs/promises';
 import path from 'path';
+import JSZip from 'jszip';
 import { createLogger } from '@/lib/logger';
 import { inlineHtmlAssets } from '@/lib/export/inline-assets';
 import type { Scene } from '@/lib/types/stage';
@@ -445,3 +446,93 @@ export async function backfillInteractiveLibrary(options?: { force?: boolean }):
 
   return processed;
 }
+
+export interface BatchDownloadItem {
+  stageId: string;
+  fileName: string;
+  courseName?: string;
+  title?: string;
+}
+
+/**
+ * Package selected interactive HTML files into a structured ZIP archive.
+ */
+export async function createInteractiveZipArchive(
+  items: BatchDownloadItem[],
+  customArchiveName?: string,
+): Promise<{ buffer: Buffer; filename: string; count: number } | null> {
+  if (!items || items.length === 0) return null;
+
+  const zip = new JSZip();
+  let includedCount = 0;
+  const uniqueCourses = new Set<string>();
+
+  for (const item of items) {
+    if (!item.stageId || !item.fileName) continue;
+    const stageDir = await findStageDir(item.stageId);
+    if (!stageDir) continue;
+
+    const safeFileName = path.basename(item.fileName);
+    const filePath = path.join(stageDir, safeFileName);
+
+    try {
+      const content = await fs.readFile(filePath);
+      const courseName = sanitizeFsName(
+        item.courseName || path.basename(stageDir).replace(/_[^_]+$/, '') || '课程互动',
+      );
+      uniqueCourses.add(courseName);
+
+      // Organize files inside the ZIP by course directory
+      const zipPath = `${courseName}/${safeFileName}`;
+      zip.file(zipPath, content);
+      includedCount++;
+    } catch (err) {
+      log.warn(`Skipping missing interactive file during zip packing: ${filePath}`, err);
+    }
+  }
+
+  if (includedCount === 0) {
+    return null;
+  }
+
+  // Add offline instructions readme
+  const dateStr = new Date().toLocaleString('zh-CN', {
+    timeZone: 'Asia/Shanghai',
+    hour12: false,
+  });
+  const readmeText = `=====================================================
+OpenMAIC 互动展厅 - 离线交互单页应用合集
+=====================================================
+
+导出时间：${dateStr}
+收录项目：共 ${includedCount} 个独立互动应用
+涉及课程：${Array.from(uniqueCourses).join('、')}
+
+【使用指引】：
+1. 本压缩包中的所有 HTML 文件均为完全独立的单页应用（已完成全量静态依赖与资源内嵌）。
+2. 无需安装任何环境，在联网或离线环境下，直接使用 Chrome / Edge / Safari / Firefox 等任意主流浏览器双击打开即可流畅体验。
+3. 涵盖科学模拟仿真、算法可视化图解、闯关小游戏及代码交互工坊等多种互动形态。
+4. 适合用于多媒体智慧大屏课堂演示、机房学生动手实践或课后探究巩固。
+`;
+  zip.file('使用说明与离线运行指引.txt', readmeText);
+
+  const buffer = await zip.generateAsync({
+    type: 'nodebuffer',
+    compression: 'DEFLATE',
+    compressionOptions: { level: 6 },
+  });
+
+  let filename = '';
+  if (customArchiveName) {
+    filename = `${sanitizeFsName(customArchiveName)}.zip`;
+  } else if (uniqueCourses.size === 1) {
+    const singleCourse = Array.from(uniqueCourses)[0];
+    filename = `互动展厅_${singleCourse}_(${includedCount}个项目).zip`;
+  } else {
+    const today = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+    filename = `互动展厅_精选合集_${today}_(${includedCount}个项目).zip`;
+  }
+
+  return { buffer, filename, count: includedCount };
+}
+
