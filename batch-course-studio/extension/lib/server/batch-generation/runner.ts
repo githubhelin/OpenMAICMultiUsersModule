@@ -226,9 +226,9 @@ async function executeSingleMergedJob(
   }
 
   // 3. 构建综合生成指令
-  const scaleInstruction = buildCourseScaleInstruction(job.courseScale);
+  const scaleInstruction = buildCourseScaleInstruction(job.courseScale, job.enableInteractiveMode);
   const requirement = job.enableInteractiveMode
-    ? `【课程教学主题】：${job.title || '多课件融合互动微课堂'}\n${job.requirement ? '【教学总要求】：' + job.requirement + '\n' : ''}【教学交互规范】：必须启用深度互动模式（Interactive-First），核心概念探究与实战挑战环节必须采用生动的可交互仿真、动态沙盒、算法可视化或趣味闯关游戏（提供完备的 widgetType 与 widgetOutline），与理论精讲及阶段小测深度交替融合。${scaleInstruction}`
+    ? `【课程教学主题】：${job.title || '多课件融合互动微课堂'}\n${job.requirement ? '【教学总要求】：' + job.requirement + '\n' : ''}【教学交互规范】：必须启用深度互动模式（Interactive-First），全课必须生成不少于3~4个生动的高品质可交互场景（涵盖物理/科学过程仿真、动态沙盒、算法可视化或趣味闯关游戏，提供完备的 widgetType 与 widgetOutline），与理论精讲及阶段小测深度交替融合。${scaleInstruction}`
     : `【课程教学主题】：${job.title || '多课件融合微课堂'}\n${job.requirement ? '【教学总要求】：' + job.requirement + '\n' : ''}${scaleInstruction}`;
 
   await updateBatchJob(jobId, (j) => {
@@ -368,9 +368,9 @@ async function executeBatchIndependentJob(
 
       // 2. 组装当前课程的个性化提示词
       const courseTitle = extracted.title || task.fileName.replace(/\.[^/.]+$/, '');
-      const scaleInstruction = buildCourseScaleInstruction(initialJob.courseScale);
+      const scaleInstruction = buildCourseScaleInstruction(initialJob.courseScale, initialJob.enableInteractiveMode);
       const requirement = initialJob.enableInteractiveMode
-        ? `【课程主题】：《${courseTitle}》\n${initialJob.requirement ? '【教学总要求】：' + initialJob.requirement + '\n' : ''}【教学交互规范】：必须启用深度互动模式（Interactive-First），核心概念探究与实战挑战环节必须采用生动的可交互仿真、动态沙盒、算法可视化或趣味闯关游戏（提供完备的 widgetType 与 widgetOutline），与理论精讲及阶段小测深度交替融合。${scaleInstruction}`
+        ? `【课程主题】：《${courseTitle}》\n${initialJob.requirement ? '【教学总要求】：' + initialJob.requirement + '\n' : ''}【教学交互规范】：必须启用深度互动模式（Interactive-First），全课必须生成不少于3~4个生动的高品质可交互场景（涵盖物理/科学过程仿真、动态沙盒、算法可视化或趣味闯关游戏，提供完备的 widgetType 与 widgetOutline），与理论精讲及阶段小测深度交替融合。${scaleInstruction}`
         : `【课程主题】：《${courseTitle}》\n${initialJob.requirement ? '【教学总要求】：' + initialJob.requirement + '\n' : ''}${scaleInstruction}`;
 
       // 3. 执行生成
