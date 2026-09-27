@@ -228,8 +228,8 @@ async function executeSingleMergedJob(
   // 3. 构建综合生成指令
   const scaleInstruction = buildCourseScaleInstruction(job.courseScale);
   const requirement = job.enableInteractiveMode
-    ? `【课程教学主题】：${job.title || '多课件融合互动微课堂'}\n${job.requirement ? '【教学总要求】：' + job.requirement + '\n' : ''}【核心模式】：必须采用深度交互模式，全课70%以上场景为交互场景（物理/科学过程仿真、动手探究实验、游戏化闯关、交互测验），极少篇幅为过渡与总结。${scaleInstruction}`
-    : `${job.requirement ? job.requirement + '\n\n' : ''}${scaleInstruction}`;
+    ? `【课程教学主题】：${job.title || '多课件融合互动微课堂'}\n${job.requirement ? '【教学总要求】：' + job.requirement + '\n' : ''}【教学交互规范】：必须启用深度互动模式（Interactive-First），核心概念探究与实战挑战环节必须采用生动的可交互仿真、动态沙盒、算法可视化或趣味闯关游戏（提供完备的 widgetType 与 widgetOutline），与理论精讲及阶段小测深度交替融合。${scaleInstruction}`
+    : `【课程教学主题】：${job.title || '多课件融合微课堂'}\n${job.requirement ? '【教学总要求】：' + job.requirement + '\n' : ''}${scaleInstruction}`;
 
   await updateBatchJob(jobId, (j) => {
     j.progress = 30;
@@ -370,7 +370,7 @@ async function executeBatchIndependentJob(
       const courseTitle = extracted.title || task.fileName.replace(/\.[^/.]+$/, '');
       const scaleInstruction = buildCourseScaleInstruction(initialJob.courseScale);
       const requirement = initialJob.enableInteractiveMode
-        ? `【课程主题】：《${courseTitle}》\n${initialJob.requirement ? '【教学总要求】：' + initialJob.requirement + '\n' : ''}【核心模式】：必须采用深度交互模式，全课70%以上场景为交互场景（交互模拟器、动手探索、趣味闯关游戏及互动测验），极少篇幅为过渡与总结。${scaleInstruction}`
+        ? `【课程主题】：《${courseTitle}》\n${initialJob.requirement ? '【教学总要求】：' + initialJob.requirement + '\n' : ''}【教学交互规范】：必须启用深度互动模式（Interactive-First），核心概念探究与实战挑战环节必须采用生动的可交互仿真、动态沙盒、算法可视化或趣味闯关游戏（提供完备的 widgetType 与 widgetOutline），与理论精讲及阶段小测深度交替融合。${scaleInstruction}`
         : `【课程主题】：《${courseTitle}》\n${initialJob.requirement ? '【教学总要求】：' + initialJob.requirement + '\n' : ''}${scaleInstruction}`;
 
       // 3. 执行生成
