@@ -35,6 +35,19 @@ import { toast } from 'sonner';
 import type { BatchJob, BatchJobMode, BatchSubTask } from '@/lib/server/batch-generation/types';
 import { type CourseScale, COURSE_SCALES } from '@/lib/types/course-scale';
 
+export const DEFAULT_PEDAGOGICAL_PROMPT = `# 教学角色与目标
+你是一位顶尖的“交互式课程设计师兼智能体教学专家”，深度掌握 OpenMAIC 的多智能体协作与动态课件生成能力。请根据上传的课件内容，设计一堂高参与度、高互动性的优质沉浸式交互微课。
+
+# 学情分析与教学法原则
+1. **学情认知**：契合学习者认知特点，控制认知负荷（注意力集中时长在 10-15 分钟）；抽象概念与枯燥原理必须通过“生活化比喻 + 动手模拟/可视化操作”来落地。
+2. **教学闭环**：各环节教学逻辑严格遵循“探究导入 ➔ 概念拆解 ➔ 核心互动体验 ➔ 任务式闯关 ➔ 总结归纳”五步法。
+3. **语言风格**：亲切生动、富有趣味探究感（多用“小小架构师”、“侦探任务”等情境代入），避免生硬枯燥的学术定义。
+
+# 核心交互与智能体引导规范
+1. **沙盒与过程模拟**：在核心互动环节，优先将抽象概念、算法流程或运行机理转化为直观的可视化沙盒与操作模拟器（如拖拽连线、参数微调、流程推演）。
+2. **即时反馈测验**：阶段小测融入启发式情境与正向鼓励反馈，针对易错点提供清晰的引导提示。
+3. **探究式智能体引导**：AI 主讲人台词循循善诱、善于启发；AI 学伴与助教紧扣学习重难点展开提问与互动，营造生动活泼的双向课堂氛围。`;
+
 export default function BatchStudioPage() {
   const router = useRouter();
 
@@ -42,9 +55,7 @@ export default function BatchStudioPage() {
   const [activeTab, setActiveTab] = useState<'create' | 'board'>('create');
   const [files, setFiles] = useState<File[]>([]);
   const [mode, setMode] = useState<BatchJobMode>('batch_independent');
-  const [prompt, setPrompt] = useState<string>(
-    '提炼核心教学重难点，为每一页生成生动精彩的教师讲解台词与互动问答，制作富有沉浸感的互动微课堂。',
-  );
+  const [prompt, setPrompt] = useState<string>(DEFAULT_PEDAGOGICAL_PROMPT);
   const [enableTTS, setEnableTTS] = useState<boolean>(true);
   const [enableImageGeneration, setEnableImageGeneration] = useState<boolean>(true);
   const [enableInteractiveMode, setEnableInteractiveMode] = useState<boolean>(false);
@@ -523,16 +534,30 @@ export default function BatchStudioPage() {
 
             {/* 指导要求配置 */}
             <div className="space-y-2">
-              <label className="text-sm font-medium text-slate-700 dark:text-slate-300">
-                教学总要求 / 提示词指导 (Prompt)
-              </label>
+              <div className="flex items-center justify-between">
+                <label className="text-sm font-medium text-slate-700 dark:text-slate-300">
+                  教学总要求 / 提示词指导 (Prompt)
+                </label>
+                <button
+                  type="button"
+                  onClick={() => setPrompt(DEFAULT_PEDAGOGICAL_PROMPT)}
+                  className="text-xs text-amber-600 dark:text-amber-400 hover:underline flex items-center gap-1 cursor-pointer"
+                  title="恢复系统默认的交互课件教学法提示词"
+                >
+                  <RefreshCw className="w-3 h-3" />
+                  恢复默认提示词
+                </button>
+              </div>
               <textarea
                 value={prompt}
                 onChange={(e) => setPrompt(e.target.value)}
-                rows={3}
-                className="w-full text-xs p-3 rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 focus:outline-none focus:ring-2 focus:ring-amber-500/20 focus:border-amber-500"
-                placeholder="输入指导生成的总要求，例如：语气亲切幽默，增加针对性测验..."
+                rows={8}
+                className="w-full text-xs p-3 font-mono leading-relaxed rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 focus:outline-none focus:ring-2 focus:ring-amber-500/20 focus:border-amber-500"
+                placeholder="输入指导生成的总要求，例如教学法、语言风格与互动要求..."
               />
+              <p className="text-[11px] text-slate-400">
+                💡 针对课件教学法与呈现风格提供总纲指导，将自动渗透至大纲构思、讲师台词、互动设计及测验中。
+              </p>
             </div>
 
             {/* 课程篇幅与形态规格选择 */}
