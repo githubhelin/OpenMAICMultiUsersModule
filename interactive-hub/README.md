@@ -1,13 +1,13 @@
 # 🎮 OpenMAIC 互动实验与游戏工坊 / 互动展厅 (Interactive Hub)
 
-[![OpenMAIC](https://img.shields.io/badge/OpenMAIC-v1.1.0-blue?style=flat-square)](https://github.com/THU-MAIC/OpenMAIC)
+[![OpenMAIC](https://img.shields.io/badge/OpenMAIC-v1.1.2-blue?style=flat-square)](https://github.com/THU-MAIC/OpenMAIC)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg?style=flat-square)](../LICENSE)
 
 本模块为 **OpenMAIC** 提供了全功能的**互动实验与游戏工坊 / 互动展厅 (Interactive Hub)**。
 
 在 OpenMAIC 的 AI 制课过程中，大模型会生成极为丰富的互动场景（包括物理与化学科学仿真、趣味探究游戏、算法动态图解、代码实验沙箱等）。此前，这些互动组件深嵌在单一幻灯片内部，体验或分享必须逐页翻阅课堂。
 
-**Interactive Hub** 将全站所有历史课程与实时新课中的互动内容**全量归集、深度内联打包为纯脱机单文件 HTML，并提供集中陈列的沉浸式展厅 (`/interactive-hub`)**。支持脱机即开即玩、离线下载、全屏模态运行与全生命周期双向联动。
+**Interactive Hub** 将全站所有历史课程与实时新课中的互动内容**全量归集、深度内联打包为纯脱机单文件 HTML，并提供集中陈列的沉浸式展厅 (`/interactive-hub`)**。支持脱机即开即玩、离线下载、多选批量打包为 ZIP、全屏模态运行与全生命周期双向联动。
 
 ---
 
@@ -41,7 +41,7 @@
 - 支持 `GET /api/interactive-library?refresh=1` 与 `POST /api/interactive-library`。
 - 采用内存/磁盘轻量增量比对，无需耗时的全量重新内联，全库扫描同步耗时低于 50ms。
 
-### 4. 🕹️ 沉浸式互动展厅体验 (`/interactive-hub`)
+### 4. 🕹️ 沉浸式互动展厅与多选批量下载 (`/interactive-hub`)
 - **多维度智能分类过滤**：
   - 🔬 **科学仿真 (`simulation`)**：物理沙箱、化学反应动力学、生物微观结构探究等；
   - 🎮 **探究游戏 (`game`)**：闯关解谜、连线归类、互动问答挑战等；
@@ -50,10 +50,14 @@
 - **双视图自由切换**：
   - 🗂️ **平铺卡片流视图**：大图预览、直接体验；
   - 📚 **按课程分组视图**：按课时树形收展，结构清晰明了。
-- **三种灵活交互体验**：
+- **四种灵活交互与批量分发体验**：
   - 🪟 **模态弹窗即点即玩**：无需跳出当前页面，在居中大弹窗中即时操控互动实验；
   - 🚀 **新窗口全屏运行**：直达脱机独立页面，独占全屏视界；
-  - 💾 **一键脱机单文件下载**：点击卡片下载按钮直接保存 `.html` 到本地电脑。
+  - 💾 **单文件独立离线下载**：点击卡片下载按钮直接保存单个 `.html` 到本地；
+  - 🗜️ **多选批量打包下载为 ZIP 压缩包**：
+    - 进入「多选下载」模式后，支持按单项勾选、一键「全选当前结果」与「取消选择」；
+    - 底部浮动操作栏直观显示已选数量，点击「打包下载 ZIP (N 项)」即可调用后端高压缩流式引擎（`/api/interactive-library/batch-download`）；
+    - ZIP 包内按课程自动分类建档存放，纯 JS 内存封包，零外部系统工具依赖。
 
 ---
 

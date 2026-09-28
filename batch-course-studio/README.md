@@ -1,6 +1,6 @@
 # 🎓 OpenMAIC 批量制课工坊扩展补丁 (Batch Course Studio)
 
-[![OpenMAIC](https://img.shields.io/badge/OpenMAIC-Batch--Studio-blue?style=flat-square)](https://github.com/THU-MAIC/OpenMAIC)
+[![OpenMAIC](https://img.shields.io/badge/OpenMAIC-v1.1.2-blue?style=flat-square)](https://github.com/THU-MAIC/OpenMAIC)
 [![Next.js](https://img.shields.io/badge/Next.js-16-black?style=flat-square&logo=next.js)](https://nextjs.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg?style=flat-square)](../LICENSE)
 
@@ -43,7 +43,16 @@
   - **批量制课工作台**：提供可视化单选卡片，支持一次性批量应用到所有文件；
   - **底层标准化注入**：无论是否开启深度交互模式，均能自动按对应的结构与比例指导大模型规划大纲。
 
-### 4. 任务中断、队列删除与 Token 资源保护
+### 4. 🏷️ 系列课程防碰撞与教学教研小测防扎堆优化
+- **系列课程 Part/集数编号严格保护**：
+  - 在生成课程大纲标题时，自动智能识别并保留原始文件名或输入资料中的集数、课次编号（如 `第14课`、`Part 2` 等），杜绝因大模型过度抽象导致同一系列多个课件生成完全相同的名称而发生覆盖或冲突。
+- **分段小测穿插与防连续扎堆机制**：
+  - 遵循现代教育认知心理学规范，严格禁止大模型将多个小测验（Quiz）连续堆叠输出；
+  - 强制规约测验场景必须与概念精讲、互动探究场景交替穿插，并在最后一页完整生成总结收尾结算页（`classroom-complete`）。
+- **专业信息科技/创客交互提示词深度对齐**：
+  - 严格落地“探究导入 ➔ 概念拆解 ➔ 核心互动体验 ➔ 任务式闯关 ➔ 总结归纳”五步法，提供高参与度探究式引导脚本。
+
+### 5. 任务中断、队列删除与 Token 资源保护
 - **一键中断任务 (`Cancel Job`)**：
   - 在生成过程中若发现提示词不理想或需临时终止，可点击看板上的 **「中断任务 (停止消耗 Token)」** 按钮；
   - 后台立即触发 `AbortController` 终止进行中的网络与大模型请求，并将所有待处理课件状态设置为 `cancelled`，**即刻停止后续 Token 消耗**。
@@ -53,11 +62,11 @@
 - **历史记录安全删除 (`Delete Record`)**：
   - 已完成、已取消或失败的批处理记录支持一键清理，并自动销毁服务器上的临时解析缓存文件。
 
-### 5. 深度打通多用户与「我的课程中心」云端漫游
+### 6. 深度打通多用户与「我的课程中心」云端漫游
 - 批量生成的课程直接通过多用户底层数据接口（`getOwnerScopedDocumentStore`）持久化写入所属账号的存储中。
 - **直通课程中心**：工坊顶部导航栏配备 **「我的课程」** 直达按钮，一键跳转全功能课程中心（`/my-courses`）。用户无论在办公室电脑、家用电脑还是移动端平板上登录，均可在课程中心无缝查看、在线播放、调用 Pro 工作台二次深度编辑或执行一键云端漫游备份。
 
-### 6. 标准 REST API 接口（支持脚本与外部系统集成）
+### 7. 标准 REST API 接口（支持脚本与外部系统集成）
 - 提供标准 HTTP Multipart 接口，可在命令行中使用 `curl`、Python 脚本或外部排课系统直接投递批量制课任务、中断任务或移除队列项。
 
 ---

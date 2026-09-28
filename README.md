@@ -1,17 +1,17 @@
 # 👥 OpenMAIC 模块化扩展补丁集 (Multi-Users, Course-Manager, Batch-Studio & Interactive-Hub)
 
-[![OpenMAIC](https://img.shields.io/badge/OpenMAIC-v1.1.0-blue?style=flat-square)](https://github.com/THU-MAIC/OpenMAIC)
+[![OpenMAIC](https://img.shields.io/badge/OpenMAIC-v1.1.2-blue?style=flat-square)](https://github.com/THU-MAIC/OpenMAIC)
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-16+-336791?style=flat-square&logo=postgresql&logoColor=white)](https://www.postgresql.org/)
 [![Next.js](https://img.shields.io/badge/Next.js-16-black?style=flat-square&logo=next.js)](https://nextjs.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg?style=flat-square)](LICENSE)
 
-本仓库是针对清华大学开源项目 [**THU-MAIC/OpenMAIC**](https://github.com/THU-MAIC/OpenMAIC) 的**高可用模块化生产级扩展套件**。
+本仓库是针对清华大学开源项目 [**THU-MAIC/OpenMAIC**](https://github.com/THU-MAIC/OpenMAIC) 的**高可用模块化生产级扩展套件**。全面适配官方最新 **v1.1.2** 基线架构。
 
 包含五大核心独立模块，支持按需独立安装或统一全量部署：
-1. **👥 多用户管理与统一身份认证模块**：开箱即用的多用户注册/登录、RBAC 角色权限、超级管理员全站控制台与多端云端漫游；
+1. **👥 多用户管理与统一身份认证模块**：开箱即用的多用户注册/登录、RBAC 角色权限、超级管理员全站控制台与多端云端漫游，**全面接入官方 Owner Identity Seam 与 PersistenceHooks 宿主标准接口**；
 2. **📚 我的课程管理中心与双轨存储漫游模块 (`/my-courses`)**：本地 IndexedDB 历史课程与 PostgreSQL 云端课程双轨智能聚合、一键上云备份、集中播放、Pro 工作台二次深度编辑、行内重命名与**四维彻底物理级联删除保障**；
-3. **⚡ 批量制课工坊扩展 (`/batch-studio`)**：纯后台异步批处理、三档课时定制（微课/标准/长课）、真·70%+ 深度互动场景、实时任务大屏看板与任务即时中断止损；
-4. **🎮 互动实验与游戏工坊 / 互动展厅 (`/interactive-hub`)**：纯脱机单文件 HTML 自动内联打包、断网即开即用、全生命周期联动与极速强制同步归集；
+3. **⚡ 批量制课工坊扩展 (`/batch-studio`)**：纯后台异步批处理、三档课时定制（微课/标准/大课）、真·70%+ 深度互动场景、**系列编号防重碰撞保护**、**阶段小测穿插防扎堆机制**、实时任务大屏看板与任务即时中断止损；
+4. **🎮 互动实验与游戏工坊 / 互动展厅 (`/interactive-hub`)**：纯脱机单文件 HTML 自动内联打包、**多选批量打包下载为 ZIP 压缩包**、断网即开即用、全生命周期联动与极速强制同步归集；
 5. **🎛️ Pro Mode 专业工作台方案 B 指南**：智能体多轮对话编排与 MAIC Editor 专业课件排版二次编辑模式；
 6. **🧠 运行时自愈与大模型动态迁移机制**：动态模型白名单校验，历史过期模型（如 `gemini-3.7-flash-high`）自动平滑迁移至新模型（`gemini-3.8-flash-high`）并自动修剪失效配置，杜绝模型漂移与报错。
 
@@ -20,9 +20,10 @@
 ## 🌟 核心特性概览 (Features)
 
 ### 1. 统一账号认证与物理数据隔离 (Multi-User & Isolation)
+- **接入官方 Owner Identity Seam**：全面采用官方在 v1.1.2 引入的标准 `OwnerAuthMethod` 与 `configureOwnerAuthentication` 规范，杜绝非标准侵入式代码篡改，稳定持久。
 - **多端数据漫游**：支持前台用户名/密码注册与登录，支持个人资料（昵称、头像）与自主密码修改。在不同电脑或设备登录同一个账号，自动同步所有课程与数据。
 - **物理级数据隔离**：深度桥接 OpenMAIC 原生 `ownerId` 架构与 PostgreSQL 数据库，不同用户的课程大纲、对话历史、私有技能 100% 物理隔离。
-- **分权控制与管理员后台**：超级管理员独享顶部“全站用户管理”弹窗，支持全站用户搜索、手动建号、提权/降权、冻结账号与密码重置。
+- **分权控制与管理员后台**：超级管理员独享顶部“全站用户管理”弹窗，支持全站用户搜索、手动建号、提权/降权、冻结账号与密码重置；并通过官方 `LibraryProvider` 钩子享受全站课程俯瞰视野。
 - **系统设置安全防护**：大模型 API Key、TTS、ASR、生图生视频服务商全局配置仅超级管理员可查看与修改，普通用户完全隐藏设置入口。
 
 ### 2. 📚 我的课程中心与双轨存储漫游 (`/my-courses`)
@@ -38,18 +39,21 @@
   - 🎯 **标准课时 (`standard` / 10~13 页，默认)**：经典完整课堂，含梯度精讲、多项互动探究、2次随堂小测与拓展总结；
   - 📚 **专题大课 (`thematic` / 16~20 页)**：体系化深度大课，多阶认知进阶、多轮科学实验沙箱、分段闯关小测与全课知识图谱收官；
   - 首页输入框与批量工作台均提供选择入口，确保小测验与课程总结结算页完整生成。
+- **系列课程防碰撞与小测防扎堆**：保留文件集数与课次编号，严禁连续输出小测场景，确保概念教学与交互测验穿插交替。
 - **真·70%+ 深度交互模式**：硬性约束 70% 以上为物理科学仿真（`simulation`）、闯关游戏（`game`）与动态图解（`diagram`），内置防误降级保护机制。
 - **任务即时中断与 Token 止损**：毫秒级中断大模型生成，排队课件支持精准移除，彻底杜绝 Token 浪费。
 
 ### 4. 🎮 互动实验与游戏工坊 / 互动展厅 (`/interactive-hub`)
 - **纯脱机单文件 HTML 打包**：系统在生成课件时自动调用 `inlineHtmlAssets`，将所有 CSS、JS 与互动逻辑全部内联封包为约 0.8MB~1.3MB 的独立脱机 HTML，断网状态下即可直接双击运行、演示与分发。
+- **多选批量打包下载为 ZIP 压缩包**：支持进入多选模式一键全选或自定义勾选多个互动场景，自动在服务端打包为带课程分层目录的 ZIP 压缩包高速下载，零外部系统二进制依赖。
 - **全生命周期双向联动**：单课生成与批量制课完成自动归集；课程重命名自动毫秒级同步重命名展厅目录及 `meta.json`；课程删除自动彻底清除对应互动文件。
 - **极速缓存感知强制同步**：提供顶部「强制同步归集」按钮，支持 `GET /api/interactive-library?refresh=1` 与 `POST /api/interactive-library`，耗时低于 50ms，自动清扫失效孤儿目录。
 - **沉浸式互动展厅**：支持按科学仿真、探究游戏、动态图解、代码工坊分类筛选，支持卡片流与课程分组双视图，提供居中模态弹窗即点即玩、新窗口全屏独占与单文件本地直接下载。
 
-### 5. 🧠 大模型配置自愈与自动热迁移
-- 针对用户配置的旧模型（如 `gemini-3.7-flash-high`），系统在初始化和请求调用时会自动热迁移为最新标准模型（`gemini-3.8-flash-high`）。
-- 动态白名单探针，自动从客户端持久化缓存中剔除无效或弃用的遗留模型，确保大模型调用 100% 稳定可靠。
+### 5. 🧠 大模型配置自愈、降级重试与多轮思考
+- **官方 v1.1.2 思考模式修复**：完美支持 DeepSeek 思考模型（R1）多轮交互中回传 `reasoning_content`，解决长文本断流与报错问题。
+- **LLM 故障降级重试**：遇到服务商限流或瞬时网络抖动自动调用 Fallback 模型重试。
+- **模型自动热迁移**：针对用户配置的旧模型（如 `gemini-3.7-flash-high`），自动热迁移为最新标准模型（`gemini-3.8-flash-high`），并自动修剪失效配置。
 
 ---
 
@@ -218,10 +222,10 @@ pm2 restart openmaic --update-env
 
 ```
 OpenMAICMultiUsersModule/
-├── openmaic-multi-user.patch         # 完整多用户、课程中心与互动展厅统一补丁包 (对齐 v1.1.0)
+├── openmaic-multi-user.patch         # 完整多用户、课程中心与互动展厅统一补丁包 (对齐 v1.1.2)
 ├── apply.sh                          # 多用户模块一键安装、诊断与回滚工具
 ├── interactive-hub/                  # 🎮 互动实验与游戏工坊 / 互动展厅独立模块
-│   ├── openmaic-interactive-hub.patch# 互动展厅独立补丁
+│   ├── openmaic-interactive-hub.patch# 互动展厅独立补丁 (含多选 ZIP 批量打包下载)
 │   ├── apply-interactive-hub.sh      # 互动展厅一键安装与诊断脚本
 │   ├── README.md                     # 互动展厅脱机打包与架构设计文档
 │   └── extension/                    # 互动展厅独立源码副本
@@ -231,7 +235,7 @@ OpenMAICMultiUsersModule/
 │   ├── README.md                     # 课程中心详细架构与使用文档
 │   └── extension/                    # 课程中心独立源码副本
 ├── batch-course-studio/              # ⚡ 批量制课工坊扩展模块
-│   ├── openmaic-batch-studio.patch   # 批量制课工坊独立补丁
+│   ├── openmaic-batch-studio.patch   # 批量制课工坊独立补丁 (含防重编号与小测穿插)
 │   ├── apply-batch-studio.sh         # 批量制课一键安装脚本
 │   ├── README.md                     # 批量制课工坊使用文档
 │   └── extension/                    # 批量制课独立源码副本
@@ -244,11 +248,12 @@ OpenMAICMultiUsersModule/
 │   ├── app/api/auth/                 # 身份认证 API (login, register, logout, me, profile)
 │   ├── app/api/admin/                # 管理员全站用户管理 API
 │   ├── app/api/stages/               # 课程列表与管理聚合 API (含四维级联物理删除)
-│   ├── app/api/interactive-library/  # 展厅索引、离线 HTML 托管与强制归集 API
+│   ├── app/api/interactive-library/  # 展厅索引、离线 HTML 托管、ZIP 打包与强制归集 API
 │   ├── lib/server/interactive-library/# 离线 HTML 资源内联打包与孤儿清扫引擎
 │   ├── components/auth/              # 登录注册、个人中心与导航栏 UserNav 组件
 │   ├── components/admin/             # 全站用户管理控制台
 │   ├── lib/server/auth/              # 密码加密、数据库连接与会话凭据工具
+│   ├── lib/server/auth/identity-method.ts # 官方 Owner Identity Seam 认证方法与库钩子
 │   ├── lib/store/settings.ts         # 模型设置自愈与自动迁移
 │   └── scripts/                      # 管理员密码重置等运维工具
 ├── LICENSE                           # MIT 开源许可证
