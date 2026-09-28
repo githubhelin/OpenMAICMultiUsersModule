@@ -1,36 +1,3 @@
-commit f0f029340df4fe89063c2269db462ebb9aa02cfb
-Author: helin <lionhe@gmail.com>
-Date:   Sat Sep 26 23:42:17 2026 +0800
-
-    feat(interactive-hub): add interactive exhibition hall and cascade clean physical deletion
-
-diff --git a/app/api/classroom/route.ts b/app/api/classroom/route.ts
-index 29940834..c14f7f68 100644
---- a/app/api/classroom/route.ts
-+++ b/app/api/classroom/route.ts
-@@ -19,6 +19,7 @@ import { getServerPersistenceProvider } from '@/lib/persistence/server-provider'
- import { getSessionPayload } from '@/lib/server/auth/session';
- import { resolveRequestOwnerId } from '@/lib/server/agent-runtime/owner';
- import { getOwnerScopedDocumentStore } from '@/lib/server/agent-runtime/owner-scoped-documents';
-+import { syncInteractiveLibraryForStage } from '@/lib/server/interactive-library';
- import type { Stage, Scene } from '@/lib/types/stage';
- 
- const log = createLogger('Classroom API');
-@@ -139,6 +140,14 @@ export async function POST(request: NextRequest) {
-       }
-     }
- 
-+    // Automatically package and export interactive scenes to interactive library
-+    void syncInteractiveLibraryForStage(
-+      { ...safeStage, id: persisted.id },
-+      safeScenes.map((scene) => ({ ...scene, stageId: persisted.id })),
-+    ).catch((err) => {
-+      log.warn(`Classroom ${persisted?.id} failed to sync to interactive library:`, err);
-+    });
-+
-     return apiSuccess({ id: persisted.id, url: persisted.url }, 201);
-   } catch (error) {
-     log.error(
 diff --git a/app/api/interactive-library/[stageId]/[filename]/route.ts b/app/api/interactive-library/[stageId]/[filename]/route.ts
 new file mode 100644
 index 00000000..d4215ce5
@@ -70,6 +37,156 @@ index 00000000..d4215ce5
 +    status: 200,
 +    headers,
 +  });
++}
+diff --git a/app/api/interactive-library/batch-download/route.ts b/app/api/interactive-library/batch-download/route.ts
+new file mode 100644
+index 00000000..2ef7f32b
+--- /dev/null
++++ b/app/api/interactive-library/batch-download/route.ts
+@@ -0,0 +1,144 @@
++import { NextRequest, NextResponse } from 'next/server';
++import {
++  createInteractiveZipArchive,
++  listInteractiveLibrary,
++  type BatchDownloadItem,
++} from '@/lib/server/interactive-library';
++import { createLogger } from '@/lib/logger';
++
++const log = createLogger('InteractiveBatchDownloadAPI');
++
++export const runtime = 'nodejs';
++export const dynamic = 'force-dynamic';
++
++export async function POST(req: NextRequest) {
++  try {
++    const body = await req.json().catch(() => ({}));
++    let items: BatchDownloadItem[] = Array.isArray(body?.items) ? body.items : [];
++    const stageId = typeof body?.stageId === 'string' ? body.stageId.trim() : undefined;
++    const archiveName = typeof body?.archiveName === 'string' ? body.archiveName.trim() : undefined;
++
++    // If stageId is provided but items is empty, fetch all items for this stage
++    if (items.length === 0 && stageId) {
++      const overview = await listInteractiveLibrary();
++      const course = overview.courses.find((c) => c.stageId === stageId);
++      if (course && course.items.length > 0) {
++        items = course.items.map((it) => ({
++          stageId: course.stageId,
++          fileName: it.fileName,
++          courseName: course.courseName,
++          title: it.title,
++        }));
++      }
++    }
++
++    if (items.length === 0) {
++      return NextResponse.json(
++        { success: false, error: '未提供待下载的互动项目或指定课程暂无互动内容' },
++        { status: 400 },
++      );
++    }
++
++    log.info(`Batch download requested for ${items.length} items`);
++    const zipResult = await createInteractiveZipArchive(items, archiveName);
++
++    if (!zipResult || zipResult.count === 0) {
++      return NextResponse.json(
++        { success: false, error: '未能找到待下载的有效互动应用文件' },
++        { status: 404 },
++      );
++    }
++
++    const { buffer, filename, count } = zipResult;
++    log.info(`Successfully packed ${count} items into ${filename} (${buffer.length} bytes)`);
++
++    const encodedFilename = encodeURIComponent(filename);
++    const asciiFallback = filename.replace(/[^\x20-\x7E]/g, '_');
++
++    const headers = new Headers();
++    headers.set('Content-Type', 'application/zip');
++    headers.set(
++      'Content-Disposition',
++      `attachment; filename="${asciiFallback}"; filename*=UTF-8''${encodedFilename}`,
++    );
++    headers.set('Content-Length', String(buffer.length));
++    headers.set('Cache-Control', 'no-store, no-cache, must-revalidate');
++
++    return new NextResponse(new Uint8Array(buffer), {
++      status: 200,
++      headers,
++    });
++  } catch (error) {
++    log.error('Batch download failed:', error);
++    return NextResponse.json(
++      { success: false, error: '打包批量下载失败，请稍后重试' },
++      { status: 500 },
++    );
++  }
++}
++
++export async function GET(req: NextRequest) {
++  try {
++    const { searchParams } = new URL(req.url);
++    const stageId = searchParams.get('stageId');
++    const archiveName = searchParams.get('name') || undefined;
++
++    if (!stageId) {
++      return NextResponse.json(
++        { success: false, error: '缺少 stageId 课程参数' },
++        { status: 400 },
++      );
++    }
++
++    const overview = await listInteractiveLibrary();
++    const course = overview.courses.find((c) => c.stageId === stageId);
++    if (!course || course.items.length === 0) {
++      return NextResponse.json(
++        { success: false, error: '指定课程暂无互动组件' },
++        { status: 404 },
++      );
++    }
++
++    const items: BatchDownloadItem[] = course.items.map((it) => ({
++      stageId: course.stageId,
++      fileName: it.fileName,
++      courseName: course.courseName,
++      title: it.title,
++    }));
++
++    const zipResult = await createInteractiveZipArchive(
++      items,
++      archiveName || course.courseName,
++    );
++
++    if (!zipResult) {
++      return NextResponse.json(
++        { success: false, error: '未能找到有效互动应用文件' },
++        { status: 404 },
++      );
++    }
++
++    const { buffer, filename } = zipResult;
++    const encodedFilename = encodeURIComponent(filename);
++    const asciiFallback = filename.replace(/[^\x20-\x7E]/g, '_');
++
++    const headers = new Headers();
++    headers.set('Content-Type', 'application/zip');
++    headers.set(
++      'Content-Disposition',
++      `attachment; filename="${asciiFallback}"; filename*=UTF-8''${encodedFilename}`,
++    );
++    headers.set('Content-Length', String(buffer.length));
++
++    return new NextResponse(new Uint8Array(buffer), {
++      status: 200,
++      headers,
++    });
++  } catch (error) {
++    log.error('GET Batch download failed:', error);
++    return NextResponse.json(
++      { success: false, error: '打包下载失败' },
++      { status: 500 },
++    );
++  }
 +}
 diff --git a/app/api/interactive-library/route.ts b/app/api/interactive-library/route.ts
 new file mode 100644
@@ -142,204 +259,12 @@ index 00000000..734573b2
 +    return apiError('INTERNAL_ERROR', 500, 'Failed to sync interactive library');
 +  }
 +}
-diff --git a/app/api/stages/[id]/route.ts b/app/api/stages/[id]/route.ts
-index 23682901..f01373a8 100644
---- a/app/api/stages/[id]/route.ts
-+++ b/app/api/stages/[id]/route.ts
-@@ -29,6 +29,10 @@ import { withRequestOwnerId } from '@/lib/server/agent-runtime/with-owner';
- import { STAGE_NAME_MAX_LENGTH } from '@/lib/server/agent-runtime/stage-limits';
- import { getSessionPayload } from '@/lib/server/auth/session';
- import { getServerPersistenceProvider } from '@/lib/persistence/server-provider';
-+import {
-+  renameInteractiveLibraryStage,
-+  deleteInteractiveLibraryStage,
-+} from '@/lib/server/interactive-library';
- 
- export const runtime = 'nodejs';
- 
-@@ -109,6 +113,7 @@ export async function PATCH(req: NextRequest, { params }: Params) {
-         ...document,
-         stage: { ...document.stage, name, updatedAt: Date.now() },
-       });
-+      void renameInteractiveLibraryStage(id, name).catch(() => {});
-     } catch (error) {
-       return mapSaveError(error, responseHeaders);
-     }
-@@ -178,30 +183,92 @@ export async function PUT(req: NextRequest, { params }: Params) {
-   });
- }
- 
--// DELETE /api/stages/[id] — remove the course and its scenes/outline.
-+// DELETE /api/stages/[id] — remove the course completely from DB, disk files, and interactive library.
- export async function DELETE(req: NextRequest, { params }: Params) {
-   if (!isAgentRuntimeConfigured()) return new Response('Not found', { status: 404 });
- 
-   const session = getSessionPayload(req);
-   const isAdmin = session?.role === 'admin';
-+  const { id } = await params;
- 
-   return withRequestOwnerId(req, async (ownerId, responseHeaders) => {
--    const { id } = await params;
--    const store = await getOwnerScopedDocumentStore(ownerId);
-+    let deletedViaStore = false;
-     try {
-+      const store = await getOwnerScopedDocumentStore(ownerId);
-       await store.deleteDocument(id);
--    } catch (err) {
--      if (isAdmin) {
-+      deletedViaStore = true;
-+    } catch {
-+      // Owner-scoped delete failed (e.g. foreign owner); handled via admin cascade below
-+    }
-+
-+    // 1. Direct database cascade purge if admin or store didn't handle it
-+    if (!deletedViaStore && (isAdmin || !process.env.DATABASE_URL)) {
-+      if (process.env.DATABASE_URL) {
-         try {
--          const provider = await getServerPersistenceProvider(process.env.DATABASE_URL ?? '');
--          await provider.documentStore.deleteDocument(id);
--        } catch (innerErr) {
--          throw innerErr;
-+          const { Pool } = await import('pg');
-+          const pool = new Pool({ connectionString: process.env.DATABASE_URL });
-+          await pool.query('DELETE FROM document_scenes WHERE stage_id = $1', [id]);
-+          await pool.query('DELETE FROM stage_meta WHERE stage_id = $1', [id]);
-+          await pool.query('DELETE FROM document_stages WHERE id = $1', [id]);
-+          try {
-+            await pool.query('DELETE FROM document_asset_refs WHERE stage_id = $1', [id]);
-+          } catch {}
-+          try {
-+            await pool.query('DELETE FROM document_asset_withdrawals WHERE stage_id = $1', [id]);
-+          } catch {}
-+          await pool.end();
-+        } catch (dbErr) {
-+          console.warn(`[DELETE /api/stages/${id}] Direct DB deletion encountered error:`, dbErr);
-         }
--      } else {
--        throw err;
-       }
-+    } else if (!deletedViaStore && !isAdmin) {
-+      return ownerApiError('INVALID_REQUEST', 403, 'Permission denied', responseHeaders);
-+    }
-+
-+    // 2. Direct database cleanup even if store delete succeeded (ensure stage_meta and scenes are clean)
-+    if (isAdmin && process.env.DATABASE_URL) {
-+      try {
-+        const { Pool } = await import('pg');
-+        const pool = new Pool({ connectionString: process.env.DATABASE_URL });
-+        await pool.query('DELETE FROM document_scenes WHERE stage_id = $1', [id]);
-+        await pool.query('DELETE FROM stage_meta WHERE stage_id = $1', [id]);
-+        await pool.query('DELETE FROM document_stages WHERE id = $1', [id]);
-+        await pool.end();
-+      } catch {}
-+    }
-+
-+    // 3. Purge physical files in data/classrooms/
-+    try {
-+      const { promises: fsPromises } = await import('fs');
-+      const pathModule = await import('path');
-+      const classroomsDir = pathModule.join(process.cwd(), 'data', 'classrooms');
-+      const jsonPath = pathModule.join(classroomsDir, `${id}.json`);
-+      const mediaDirPath = pathModule.join(classroomsDir, id);
-+
-+      await fsPromises.rm(jsonPath, { force: true }).catch(() => {});
-+      await fsPromises.rm(mediaDirPath, { recursive: true, force: true }).catch(() => {});
-+
-+      // Clean up any classroom-jobs for this stage
-+      const jobsDir = pathModule.join(process.cwd(), 'data', 'classroom-jobs');
-+      try {
-+        const jobFiles = await fsPromises.readdir(jobsDir);
-+        for (const jf of jobFiles) {
-+          if (jf.includes(id)) {
-+            await fsPromises.rm(pathModule.join(jobsDir, jf), { force: true }).catch(() => {});
-+          }
-+        }
-+      } catch {}
-+    } catch (fsErr) {
-+      console.warn(`[DELETE /api/stages/${id}] Filesystem purge error:`, fsErr);
-     }
--    return ownerJson({ ok: true }, 200, responseHeaders);
-+
-+    // 4. Purge interactive games folder in data/interactive-library/
-+    try {
-+      await deleteInteractiveLibraryStage(id);
-+    } catch (libErr) {
-+      console.warn(`[DELETE /api/stages/${id}] Interactive library delete error:`, libErr);
-+    }
-+
-+    return ownerJson({ ok: true, success: true }, 200, responseHeaders);
-   });
- }
-diff --git a/app/api/stages/route.ts b/app/api/stages/route.ts
-index 19b5e76d..ffa0a5ee 100644
---- a/app/api/stages/route.ts
-+++ b/app/api/stages/route.ts
-@@ -44,14 +44,27 @@ export async function GET(req: NextRequest) {
-   return withRequestOwnerId(req, async (ownerId, responseHeaders) => {
-     const store = await getOwnerScopedDocumentStore(ownerId);
-     let stages = await store.listDocuments();
--    if (isAdmin) {
-+    if (isAdmin && process.env.DATABASE_URL) {
-       try {
--        const provider = await getServerPersistenceProvider(process.env.DATABASE_URL ?? '');
--        const allDocs = await provider.documentStore.listDocuments();
-+        const { Pool } = await import('pg');
-+        const pool = new Pool({ connectionString: process.env.DATABASE_URL });
-+        const res = await pool.query(
-+          'SELECT id, name, interactive_mode, task_engine_mode, created_at, updated_at FROM document_stages ORDER BY updated_at DESC',
-+        );
-         const map = new Map<string, any>();
--        for (const doc of allDocs) map.set(doc.id, doc);
-+        for (const doc of res.rows) {
-+          map.set(doc.id, {
-+            id: doc.id,
-+            name: doc.name,
-+            interactiveMode: doc.interactive_mode,
-+            taskEngineMode: doc.task_engine_mode,
-+            createdAt: doc.created_at,
-+            updatedAt: doc.updated_at,
-+          });
-+        }
-         for (const s of stages) map.set(s.id, s);
-         stages = Array.from(map.values()).sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
-+        await pool.end();
-       } catch {
-         // Keep store stages on error
-       }
-diff --git a/app/batch-studio/page.tsx b/app/batch-studio/page.tsx
-index d7499cd7..d2c504c8 100644
---- a/app/batch-studio/page.tsx
-+++ b/app/batch-studio/page.tsx
-@@ -24,6 +24,7 @@ import {
-   Zap,
-   Target,
-   BookOpen,
-+  Gamepad2,
- } from 'lucide-react';
- import { Button } from '@/components/ui/button';
- import { Card } from '@/components/ui/card';
-@@ -341,6 +342,15 @@ export default function BatchStudioPage() {
-           </div>
- 
-           <div className="flex items-center gap-2">
-+            <Button
-+              variant="outline"
-+              size="sm"
-+              onClick={() => router.push('/interactive-hub')}
-+              className="gap-1.5 border-purple-200 dark:border-purple-800 text-purple-600 dark:text-purple-400 hover:bg-purple-50 dark:hover:bg-purple-950/40"
-+            >
-+              <Gamepad2 className="w-4 h-4" />
-+              互动展厅
-+            </Button>
-             <Button
-               variant="outline"
-               size="sm"
 diff --git a/app/interactive-hub/page.tsx b/app/interactive-hub/page.tsx
 new file mode 100644
-index 00000000..f9d845b9
+index 00000000..416a892c
 --- /dev/null
 +++ b/app/interactive-hub/page.tsx
-@@ -0,0 +1,816 @@
+@@ -0,0 +1,1133 @@
 +'use client';
 +
 +import React, { useState, useEffect, useMemo } from 'react';
@@ -366,11 +291,17 @@ index 00000000..f9d845b9
 +  FolderOpen,
 +  RefreshCw,
 +  CheckCircle2,
++  CheckSquare,
++  Square,
++  DownloadCloud,
++  Archive,
++  Check,
 +} from 'lucide-react';
 +import { Button } from '@/components/ui/button';
 +import { Input } from '@/components/ui/input';
 +import { Badge } from '@/components/ui/badge';
 +import { Dialog, DialogContent } from '@/components/ui/dialog';
++import { toast } from 'sonner';
 +
 +interface InteractiveItem {
 +  sceneId: string;
@@ -425,6 +356,12 @@ index 00000000..f9d845b9
 +  // Active playing item in modal
 +  const [activeItem, setActiveItem] = useState<InteractiveItem | null>(null);
 +  const [isFullscreen, setIsFullscreen] = useState(false);
++
++  // Multi-select & Batch download state
++  const [selectedKeys, setSelectedKeys] = useState<Set<string>>(new Set());
++  const [isMultiSelectMode, setIsMultiSelectMode] = useState(false);
++  const [downloadingZip, setDownloadingZip] = useState(false);
++  const [downloadingCourseId, setDownloadingCourseId] = useState<string | null>(null);
 +
 +  // Load interactive library data
 +  const loadData = async (forceSync = false) => {
@@ -537,6 +474,136 @@ index 00000000..f9d845b9
 +    }
 +    return Array.from(map.values());
 +  }, [filteredItems]);
++
++  // Unique key generator for an interactive item
++  const getItemKey = (item: { stageId: string; fileName: string }) =>
++    `${item.stageId}::${item.fileName}`;
++
++  // Toggle single item selection
++  const toggleSelectItem = (item: InteractiveItem) => {
++    const key = getItemKey(item);
++    setSelectedKeys((prev) => {
++      const next = new Set(prev);
++      if (next.has(key)) {
++        next.delete(key);
++      } else {
++        next.add(key);
++      }
++      return next;
++    });
++  };
++
++  // Select all items currently visible under filters
++  const selectAllFiltered = () => {
++    setSelectedKeys((prev) => {
++      const next = new Set(prev);
++      filteredItems.forEach((item) => next.add(getItemKey(item)));
++      return next;
++    });
++    toast.success(`已勾选当前视图中的全部 ${filteredItems.length} 个互动组件`);
++  };
++
++  // Clear all selections
++  const clearSelection = () => {
++    setSelectedKeys(new Set());
++  };
++
++  // Toggle all items for a course
++  const toggleCourseSelection = (group: CourseGroup) => {
++    const allSelected = group.items.length > 0 && group.items.every((it) => selectedKeys.has(getItemKey(it)));
++    setSelectedKeys((prev) => {
++      const next = new Set(prev);
++      if (allSelected) {
++        group.items.forEach((it) => next.delete(getItemKey(it)));
++      } else {
++        group.items.forEach((it) => next.add(getItemKey(it)));
++      }
++      return next;
++    });
++  };
++
++  // Trigger batch ZIP archive download
++  const handleBatchDownload = async (
++    customItems?: InteractiveItem[],
++    customArchiveName?: string,
++  ) => {
++    let itemsToDownload: InteractiveItem[] = [];
++    if (customItems && customItems.length > 0) {
++      itemsToDownload = customItems;
++    } else {
++      itemsToDownload = allItems.filter((it) => selectedKeys.has(getItemKey(it)));
++    }
++
++    if (itemsToDownload.length === 0) {
++      toast.error('请至少勾选一个互动组件');
++      return;
++    }
++
++    try {
++      setDownloadingZip(true);
++      const res = await fetch('/api/interactive-library/batch-download', {
++        method: 'POST',
++        headers: { 'Content-Type': 'application/json' },
++        body: JSON.stringify({
++          items: itemsToDownload.map((it) => ({
++            stageId: it.stageId,
++            fileName: it.fileName,
++            courseName: it.courseName,
++            title: it.title,
++          })),
++          archiveName: customArchiveName,
++        }),
++      });
++
++      if (!res.ok) {
++        const errJson = await res.json().catch(() => ({}));
++        throw new Error(errJson.error || '打包下载失败');
++      }
++
++      // Determine downloaded filename
++      let downloadFilename = customArchiveName ? `${customArchiveName}.zip` : '互动展厅_精选合集.zip';
++      const disposition = res.headers.get('Content-Disposition');
++      if (disposition) {
++        const utf8Match = disposition.match(/filename\*=UTF-8''([^;]+)/i);
++        if (utf8Match && utf8Match[1]) {
++          downloadFilename = decodeURIComponent(utf8Match[1]);
++        } else {
++          const asciiMatch = disposition.match(/filename="?([^";]+)"?/i);
++          if (asciiMatch && asciiMatch[1]) {
++            downloadFilename = asciiMatch[1];
++          }
++        }
++      }
++
++      const blob = await res.blob();
++      const url = window.URL.createObjectURL(blob);
++      const a = document.createElement('a');
++      a.href = url;
++      a.download = downloadFilename;
++      document.body.appendChild(a);
++      a.click();
++      window.URL.revokeObjectURL(url);
++      document.body.removeChild(a);
++
++      toast.success(`成功打包导出 ${itemsToDownload.length} 个离线互动应用！`);
++    } catch (err: any) {
++      console.error('Batch download failed:', err);
++      toast.error(err.message || '打包下载失败，请稍后重试');
++    } finally {
++      setDownloadingZip(false);
++    }
++  };
++
++  // Download all interactive items of a specific course
++  const handleDownloadCourse = async (group: CourseGroup) => {
++    try {
++      setDownloadingCourseId(group.stageId);
++      await handleBatchDownload(group.items, `${group.courseName}_全部互动`);
++    } finally {
++      setDownloadingCourseId(null);
++    }
++  };
++
 +
 +  const getTypeMeta = (type: string) => {
 +    const t = type.toLowerCase();
@@ -782,11 +849,39 @@ index 00000000..f9d845b9
 +              size="sm"
 +              onClick={() => triggerForceRescan(false)}
 +              disabled={syncing || loading}
-+              className="gap-1 px-2.5 h-8 text-xs text-slate-600 dark:text-slate-400 hover:text-slate-900 border-slate-200 dark:border-slate-700"
++              className="gap-1 px-2.5 h-8 text-xs text-slate-600 dark:text-slate-400 hover:text-slate-900 border-slate-200 dark:border-slate-700 cursor-pointer"
 +              title="刷新全量归集数据"
 +            >
 +              <RefreshCw className={`w-3.5 h-3.5 ${syncing ? 'animate-spin' : ''}`} />
 +              <span className="hidden sm:inline">{syncing ? '同步中...' : '刷新'}</span>
++            </Button>
++
++            {/* 多选模式切换与批量下载按钮 */}
++            <Button
++              variant={isMultiSelectMode || selectedKeys.size > 0 ? 'default' : 'outline'}
++              size="sm"
++              onClick={() => {
++                if (selectedKeys.size > 0 && isMultiSelectMode) {
++                  clearSelection();
++                  setIsMultiSelectMode(false);
++                } else {
++                  setIsMultiSelectMode(!isMultiSelectMode);
++                }
++              }}
++              className={`gap-1.5 px-3 h-8 text-xs cursor-pointer ${
++                isMultiSelectMode || selectedKeys.size > 0
++                  ? 'bg-purple-600 hover:bg-purple-700 text-white shadow-xs'
++                  : 'text-purple-600 dark:text-purple-400 border-purple-200 dark:border-purple-800 hover:bg-purple-50 dark:hover:bg-purple-950/40'
++              }`}
++              title="切换多选模式以批量选择和打包下载组件"
++            >
++              <CheckSquare className="w-3.5 h-3.5" />
++              <span>{isMultiSelectMode ? '多选模式已开启' : '多选下载'}</span>
++              {selectedKeys.size > 0 && (
++                <span className="ml-1 px-1.5 py-0.5 rounded-full bg-white text-purple-700 font-bold text-[10px]">
++                  {selectedKeys.size}
++                </span>
++              )}
 +            </Button>
 +
 +            {/* 视图切换按钮 */}
@@ -862,19 +957,43 @@ index 00000000..f9d845b9
 +            {filteredItems.map((item) => {
 +              const meta = getTypeMeta(item.widgetType);
 +              const Icon = meta.icon;
++              const isSelected = selectedKeys.has(getItemKey(item));
 +              return (
 +                <div
 +                  key={`${item.stageId}-${item.sceneId}`}
-+                  className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200/80 dark:border-slate-800 p-4 flex flex-col justify-between hover:shadow-md hover:border-indigo-500/30 transition-all group"
++                  className={`bg-white dark:bg-slate-900 rounded-2xl border p-4 flex flex-col justify-between transition-all group ${
++                    isSelected
++                      ? 'border-purple-500 ring-2 ring-purple-500/30 bg-purple-50/20 dark:bg-purple-950/20 shadow-md'
++                      : 'border-slate-200/80 dark:border-slate-800 hover:shadow-md hover:border-indigo-500/30'
++                  }`}
 +                >
 +                  <div>
 +                    <div className="flex items-center justify-between gap-2 mb-2.5">
-+                      <span
-+                        className={`text-[10px] font-semibold px-2 py-0.5 rounded-full border flex items-center gap-1 ${meta.color}`}
-+                      >
-+                        <Icon className="w-3 h-3" />
-+                        {meta.label}
-+                      </span>
++                      <div className="flex items-center gap-2">
++                        {/* 勾选多选框 */}
++                        <button
++                          type="button"
++                          onClick={(e) => {
++                            e.stopPropagation();
++                            toggleSelectItem(item);
++                          }}
++                          className={`w-5 h-5 rounded-md flex items-center justify-center border transition-all cursor-pointer ${
++                            isSelected
++                              ? 'bg-purple-600 border-purple-600 text-white shadow-xs'
++                              : 'border-slate-300 dark:border-slate-700 hover:border-purple-400 bg-white dark:bg-slate-800'
++                          }`}
++                          title={isSelected ? '取消勾选' : '勾选加入批量下载'}
++                        >
++                          {isSelected && <Check className="w-3.5 h-3.5 stroke-[3]" />}
++                        </button>
++
++                        <span
++                          className={`text-[10px] font-semibold px-2 py-0.5 rounded-full border flex items-center gap-1 ${meta.color}`}
++                        >
++                          <Icon className="w-3 h-3" />
++                          {meta.label}
++                        </span>
++                      </div>
 +                      <span className="text-[10px] text-slate-400">
 +                        {formatFileSize(item.size)} · 离线HTML
 +                      </span>
@@ -945,54 +1064,120 @@ index 00000000..f9d845b9
 +        ) : (
 +          /* 按课程归类折叠视图 */
 +          <div className="space-y-6">
-+            {courseGroups.map((group) => (
-+              <div
-+                key={group.stageId}
-+                className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200/80 dark:border-slate-800 p-5 shadow-xs"
-+              >
-+                <div className="flex items-center justify-between gap-4 mb-4 pb-3 border-b border-slate-100 dark:border-slate-800">
-+                  <div className="flex items-center gap-3">
-+                    <div className="w-9 h-9 rounded-xl bg-indigo-50 dark:bg-indigo-950/60 text-indigo-600 dark:text-indigo-400 flex items-center justify-center shrink-0">
-+                      <BookOpen className="w-4 h-4" />
-+                    </div>
-+                    <div>
-+                      <h2 className="text-sm font-bold text-slate-900 dark:text-white">
-+                        {group.courseName}
-+                      </h2>
-+                      <div className="text-[11px] text-slate-400">
-+                        课程 ID: {group.stageId} · 包含 {group.items.length} 个独立互动页面
++            {courseGroups.map((group) => {
++              const isCourseAllSelected =
++                group.items.length > 0 &&
++                group.items.every((it) => selectedKeys.has(getItemKey(it)));
++              return (
++                <div
++                  key={group.stageId}
++                  className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200/80 dark:border-slate-800 p-5 shadow-xs"
++                >
++                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-4 pb-3 border-b border-slate-100 dark:border-slate-800">
++                    <div className="flex items-center gap-3">
++                      <div className="w-9 h-9 rounded-xl bg-indigo-50 dark:bg-indigo-950/60 text-indigo-600 dark:text-indigo-400 flex items-center justify-center shrink-0">
++                        <BookOpen className="w-4 h-4" />
++                      </div>
++                      <div>
++                        <h2 className="text-sm font-bold text-slate-900 dark:text-white">
++                          {group.courseName}
++                        </h2>
++                        <div className="text-[11px] text-slate-400">
++                          课程 ID: {group.stageId} · 包含 {group.items.length} 个独立互动页面
++                        </div>
 +                      </div>
 +                    </div>
-+                  </div>
 +
-+                  <Button
-+                    variant="ghost"
-+                    size="sm"
-+                    onClick={() => router.push(`/classroom/${group.stageId}`)}
-+                    className="text-xs text-indigo-600 dark:text-indigo-400 gap-1"
-+                  >
-+                    <span>进入授课</span>
-+                    <ChevronRight className="w-3.5 h-3.5" />
-+                  </Button>
-+                </div>
++                    <div className="flex items-center gap-2 flex-wrap">
++                      {/* 全选本课互动按钮 */}
++                      <Button
++                        variant="outline"
++                        size="sm"
++                        onClick={() => toggleCourseSelection(group)}
++                        className={`text-xs h-7 px-2.5 gap-1.5 cursor-pointer ${
++                          isCourseAllSelected
++                            ? 'bg-purple-50 text-purple-600 border-purple-300 dark:bg-purple-950/40 dark:text-purple-300'
++                            : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 border-slate-200 dark:border-slate-700'
++                        }`}
++                      >
++                        {isCourseAllSelected ? (
++                          <CheckSquare className="w-3.5 h-3.5 text-purple-600" />
++                        ) : (
++                          <Square className="w-3.5 h-3.5" />
++                        )}
++                        <span>{isCourseAllSelected ? '取消全选本课' : `全选本课 (${group.items.length})`}</span>
++                      </Button>
++
++                      {/* 本课独立打包下载 */}
++                      <Button
++                        variant="outline"
++                        size="sm"
++                        onClick={() => handleDownloadCourse(group)}
++                        disabled={downloadingCourseId === group.stageId}
++                        className="text-xs h-7 px-2.5 gap-1.5 text-indigo-600 dark:text-indigo-400 border-indigo-200 dark:border-indigo-800 hover:bg-indigo-50 dark:hover:bg-indigo-950/40 cursor-pointer"
++                        title="将本课所有互动应用一键打包为 ZIP 压缩包下载"
++                      >
++                        {downloadingCourseId === group.stageId ? (
++                          <Loader2 className="w-3 h-3 animate-spin" />
++                        ) : (
++                          <Archive className="w-3 h-3" />
++                        )}
++                        <span>下载本课 (.zip)</span>
++                      </Button>
++
++                      <Button
++                        variant="ghost"
++                        size="sm"
++                        onClick={() => router.push(`/classroom/${group.stageId}`)}
++                        className="text-xs text-indigo-600 dark:text-indigo-400 gap-1"
++                      >
++                        <span>进入授课</span>
++                        <ChevronRight className="w-3.5 h-3.5" />
++                      </Button>
++                    </div>
++                  </div>
 +
 +                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3.5">
 +                  {group.items.map((item) => {
 +                    const meta = getTypeMeta(item.widgetType);
 +                    const Icon = meta.icon;
++                    const isSelected = selectedKeys.has(getItemKey(item));
 +                    return (
 +                      <div
 +                        key={item.sceneId}
-+                        className="bg-slate-50 dark:bg-slate-950 rounded-xl p-3.5 border border-slate-200/60 dark:border-slate-800/80 flex flex-col justify-between hover:bg-slate-100/80 dark:hover:bg-slate-900 transition-colors"
++                        className={`rounded-xl p-3.5 border transition-all flex flex-col justify-between ${
++                          isSelected
++                            ? 'border-purple-500 ring-2 ring-purple-500/30 bg-purple-50/20 dark:bg-purple-950/20 shadow-xs'
++                            : 'bg-slate-50 dark:bg-slate-950 border-slate-200/60 dark:border-slate-800/80 hover:bg-slate-100/80 dark:hover:bg-slate-900'
++                        }`}
 +                      >
 +                        <div>
 +                          <div className="flex items-center justify-between gap-2 mb-2">
-+                            <span
-+                              className={`text-[9px] font-semibold px-1.5 py-0.5 rounded border flex items-center gap-1 ${meta.color}`}
-+                            >
-+                              <Icon className="w-2.5 h-2.5" />
-+                              {meta.label}
-+                            </span>
++                            <div className="flex items-center gap-1.5">
++                              {/* 勾选多选框 */}
++                              <button
++                                type="button"
++                                onClick={(e) => {
++                                  e.stopPropagation();
++                                  toggleSelectItem(item);
++                                }}
++                                className={`w-4 h-4 rounded flex items-center justify-center border transition-all cursor-pointer ${
++                                  isSelected
++                                    ? 'bg-purple-600 border-purple-600 text-white'
++                                    : 'border-slate-300 dark:border-slate-700 hover:border-purple-400 bg-white dark:bg-slate-800'
++                                }`}
++                                title={isSelected ? '取消勾选' : '勾选加入批量下载'}
++                              >
++                                {isSelected && <Check className="w-3 h-3 stroke-[3]" />}
++                              </button>
++
++                              <span
++                                className={`text-[9px] font-semibold px-1.5 py-0.5 rounded border flex items-center gap-1 ${meta.color}`}
++                              >
++                                <Icon className="w-2.5 h-2.5" />
++                                {meta.label}
++                              </span>
++                            </div>
 +                            <span className="text-[10px] text-slate-400">第 {item.order} 页</span>
 +                          </div>
 +                          <h4 className="text-xs font-bold text-slate-800 dark:text-slate-200 mb-1 line-clamp-1">
@@ -1046,7 +1231,64 @@ index 00000000..f9d845b9
 +                  })}
 +                </div>
 +              </div>
-+            ))}
++            );
++          })}
++          </div>
++        )}
++
++        {/* 底部悬浮批量下载操作栏 (Floating Batch Action Bar) */}
++        {selectedKeys.size > 0 && (
++          <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-50 bg-slate-900/95 dark:bg-slate-900/95 text-white backdrop-blur-md px-4 sm:px-5 py-3 rounded-2xl shadow-2xl border border-slate-700/80 flex items-center gap-3 sm:gap-4 animate-in fade-in slide-in-from-bottom-4 max-w-[95vw]">
++            <div className="flex items-center gap-2 text-xs shrink-0">
++              <div className="w-5 h-5 rounded-full bg-purple-500 flex items-center justify-center text-white font-bold text-[10px]">
++                {selectedKeys.size}
++              </div>
++              <span className="font-semibold text-slate-100">已选 {selectedKeys.size} 项</span>
++              <span className="text-slate-400 text-[11px] hidden md:inline">
++                (当前匹配 {filteredItems.length} 项)
++              </span>
++            </div>
++
++            <div className="h-4 w-px bg-slate-700 shrink-0" />
++
++            <div className="flex items-center gap-2">
++              <Button
++                variant="ghost"
++                size="sm"
++                onClick={selectAllFiltered}
++                className="text-xs h-8 text-slate-300 hover:text-white hover:bg-slate-800 px-2 sm:px-2.5 cursor-pointer"
++              >
++                全选当前 ({filteredItems.length})
++              </Button>
++
++              <Button
++                variant="ghost"
++                size="sm"
++                onClick={clearSelection}
++                className="text-xs h-8 text-slate-400 hover:text-slate-200 hover:bg-slate-800 px-2 cursor-pointer"
++              >
++                清空
++              </Button>
++
++              <Button
++                size="sm"
++                onClick={() => handleBatchDownload()}
++                disabled={downloadingZip}
++                className="text-xs h-8 bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-700 hover:to-indigo-700 text-white font-medium px-4 gap-1.5 shadow-md shadow-purple-500/25 shrink-0 cursor-pointer"
++              >
++                {downloadingZip ? (
++                  <>
++                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
++                    <span>正在打包 ZIP...</span>
++                  </>
++                ) : (
++                  <>
++                    <DownloadCloud className="w-4 h-4" />
++                    <span>打包下载 ZIP ({selectedKeys.size})</span>
++                  </>
++                )}
++              </Button>
++            </div>
 +          </div>
 +        )}
 +      </main>
@@ -1156,160 +1398,15 @@ index 00000000..f9d845b9
 +    </div>
 +  );
 +}
-diff --git a/app/my-courses/page.tsx b/app/my-courses/page.tsx
-index 1032a9d2..8d1495df 100644
---- a/app/my-courses/page.tsx
-+++ b/app/my-courses/page.tsx
-@@ -26,6 +26,7 @@ import {
-   CloudUpload,
-   HardDrive,
-   Database,
-+  Gamepad2,
- } from 'lucide-react';
- import { useAuthStore } from '@/lib/store/auth-store';
- import { UserNav } from '@/components/auth/user-nav';
-@@ -331,14 +332,20 @@ export default function MyCoursesPage() {
-         console.warn('Failed to delete from local storage:', e);
-       }
- 
--      // 2. 服务端 PostgreSQL 彻底删除
-+      // 2. 服务端彻底删除 (PostgreSQL + 磁盘文件 + 互动展厅)
-       try {
--        await fetch(`/api/stages/${encodeURIComponent(deletingCourse.id)}`, {
-+        const res = await fetch(`/api/stages/${encodeURIComponent(deletingCourse.id)}`, {
-           method: 'DELETE',
-           credentials: 'include',
-         });
--      } catch (e) {
-+        if (!res.ok) {
-+          const errData = await res.json().catch(() => null);
-+          throw new Error(errData?.error || `HTTP ${res.status}`);
-+        }
-+      } catch (e: any) {
-         console.warn('Failed to delete from server:', e);
-+        toast.error(`服务端删除失败: ${e.message || '网络异常'}`);
-+        return;
-       }
- 
-       setCourses((prev) => prev.filter((c) => c.id !== deletingCourse.id));
-@@ -427,6 +434,16 @@ export default function MyCoursesPage() {
-               批量快速制课
-             </Button>
- 
-+            <Button
-+              variant="outline"
-+              size="sm"
-+              onClick={() => router.push('/interactive-hub')}
-+              className="gap-1.5 text-purple-600 dark:text-purple-400 border-purple-500/30 hover:bg-purple-50 dark:hover:bg-purple-950/40 text-xs cursor-pointer"
-+            >
-+              <Gamepad2 className="w-3.5 h-3.5" />
-+              互动展厅
-+            </Button>
-+
-             <Button
-               variant="default"
-               size="sm"
-diff --git a/app/page.tsx b/app/page.tsx
-index 910cbd69..dc9a8e7d 100644
---- a/app/page.tsx
-+++ b/app/page.tsx
-@@ -28,6 +28,7 @@ import {
-   Presentation,
-   Loader2,
-   BookOpen,
-+  Gamepad2,
- } from 'lucide-react';
- import { useI18n } from '@/lib/hooks/use-i18n';
- import { LanguageSwitcher } from '@/components/language-switcher';
-@@ -836,6 +837,16 @@ function HomePage() {
-           <span>批量制课</span>
-         </button>
- 
-+        {/* Interactive Hub Button */}
-+        <button
-+          onClick={() => router.push('/interactive-hub')}
-+          className="flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium text-purple-600 dark:text-purple-400 bg-purple-500/10 hover:bg-purple-500/20 border border-purple-500/30 transition-all shadow-xs cursor-pointer"
-+          title="互动实验与游戏展厅"
-+        >
-+          <Gamepad2 className="w-3.5 h-3.5 text-purple-500" />
-+          <span>互动展厅</span>
-+        </button>
-+
-         {/* My Courses Button */}
-         <button
-           onClick={() => router.push('/my-courses')}
-diff --git a/components/auth/user-nav.tsx b/components/auth/user-nav.tsx
-index 5f9dcd7b..420c403b 100644
---- a/components/auth/user-nav.tsx
-+++ b/components/auth/user-nav.tsx
-@@ -12,7 +12,7 @@ import {
-   DropdownMenuSeparator,
-   DropdownMenuTrigger,
- } from '@/components/ui/dropdown-menu';
--import { LogIn, User as UserIcon, Shield, LogOut, Settings as SettingsIcon, BookOpen } from 'lucide-react';
-+import { LogIn, User as UserIcon, Shield, LogOut, Settings as SettingsIcon, BookOpen, Gamepad2 } from 'lucide-react';
- import { AuthDialog } from './auth-dialog';
- import { UserProfileDialog } from './user-profile-dialog';
- import { UserManagementDialog } from '../admin/user-management-dialog';
-@@ -92,6 +92,14 @@ export function UserNav({ onOpenSettings }: { onOpenSettings?: () => void }) {
-               我的课程中心
-             </DropdownMenuItem>
- 
-+            <DropdownMenuItem
-+              onClick={() => router.push('/interactive-hub')}
-+              className="rounded-xl py-2 cursor-pointer font-medium text-purple-600 dark:text-purple-400 focus:text-purple-600"
-+            >
-+              <Gamepad2 className="w-3.5 h-3.5 mr-2" />
-+              互动实验与游戏展厅
-+            </DropdownMenuItem>
-+
-             <DropdownMenuItem onClick={() => setProfileModalOpen(true)} className="rounded-xl py-2 cursor-pointer">
-               <UserIcon className="w-3.5 h-3.5 mr-2 text-zinc-500" />
-               个人资料与密码
-diff --git a/lib/server/batch-generation/runner.ts b/lib/server/batch-generation/runner.ts
-index 29caef9d..606be77b 100644
---- a/lib/server/batch-generation/runner.ts
-+++ b/lib/server/batch-generation/runner.ts
-@@ -6,6 +6,7 @@ import { extractFileContent } from './extractor';
- import { getBatchJob, updateBatchJob } from './store';
- import type { BatchJob, SubTaskStep } from './types';
- import { buildCourseScaleInstruction } from '@/lib/types/course-scale';
-+import { syncInteractiveLibraryForStage } from '@/lib/server/interactive-library';
- 
- const log = createLogger('BatchJobRunner');
- const runningBatchJobs = new Map<string, Promise<void>>();
-@@ -270,6 +271,11 @@ async function executeSingleMergedJob(
-     log.warn(`Failed to sync merged course ${result.id} to owner store:`, dbError);
-   }
- 
-+  // 5.5 自动打包并导出互动内容至互动展厅
-+  void syncInteractiveLibraryForStage(result.stage, result.scenes).catch((err) => {
-+    log.warn(`Failed to sync interactive library for merged course ${result.id}:`, err);
-+  });
-+
-   // 6. 标记批次完成
-   await updateBatchJob(jobId, (j) => {
-     j.status = 'completed';
-@@ -418,6 +424,11 @@ async function executeBatchIndependentJob(
-         log.warn(`Failed to sync course ${result.id} to owner store:`, dbError);
-       }
- 
-+      // 4.5 自动打包并导出互动内容至互动展厅
-+      void syncInteractiveLibraryForStage(result.stage, result.scenes).catch((err) => {
-+        log.warn(`Failed to sync interactive library for course ${result.id}:`, err);
-+      });
-+
-       // 5. 标记子任务成功
-       completedCount++;
-       await updateBatchJob(jobId, (j) => {
 diff --git a/lib/server/interactive-library/index.ts b/lib/server/interactive-library/index.ts
 new file mode 100644
-index 00000000..6e3154eb
+index 00000000..c22cb0ae
 --- /dev/null
 +++ b/lib/server/interactive-library/index.ts
-@@ -0,0 +1,447 @@
+@@ -0,0 +1,538 @@
 +import fs from 'fs/promises';
 +import path from 'path';
++import JSZip from 'jszip';
 +import { createLogger } from '@/lib/logger';
 +import { inlineHtmlAssets } from '@/lib/export/inline-assets';
 +import type { Scene } from '@/lib/types/stage';
@@ -1755,3 +1852,93 @@ index 00000000..6e3154eb
 +
 +  return processed;
 +}
++
++export interface BatchDownloadItem {
++  stageId: string;
++  fileName: string;
++  courseName?: string;
++  title?: string;
++}
++
++/**
++ * Package selected interactive HTML files into a structured ZIP archive.
++ */
++export async function createInteractiveZipArchive(
++  items: BatchDownloadItem[],
++  customArchiveName?: string,
++): Promise<{ buffer: Buffer; filename: string; count: number } | null> {
++  if (!items || items.length === 0) return null;
++
++  const zip = new JSZip();
++  let includedCount = 0;
++  const uniqueCourses = new Set<string>();
++
++  for (const item of items) {
++    if (!item.stageId || !item.fileName) continue;
++    const stageDir = await findStageDir(item.stageId);
++    if (!stageDir) continue;
++
++    const safeFileName = path.basename(item.fileName);
++    const filePath = path.join(stageDir, safeFileName);
++
++    try {
++      const content = await fs.readFile(filePath);
++      const courseName = sanitizeFsName(
++        item.courseName || path.basename(stageDir).replace(/_[^_]+$/, '') || '课程互动',
++      );
++      uniqueCourses.add(courseName);
++
++      // Organize files inside the ZIP by course directory
++      const zipPath = `${courseName}/${safeFileName}`;
++      zip.file(zipPath, content);
++      includedCount++;
++    } catch (err) {
++      log.warn(`Skipping missing interactive file during zip packing: ${filePath}`, err);
++    }
++  }
++
++  if (includedCount === 0) {
++    return null;
++  }
++
++  // Add offline instructions readme
++  const dateStr = new Date().toLocaleString('zh-CN', {
++    timeZone: 'Asia/Shanghai',
++    hour12: false,
++  });
++  const readmeText = `=====================================================
++OpenMAIC 互动展厅 - 离线交互单页应用合集
++=====================================================
++
++导出时间：${dateStr}
++收录项目：共 ${includedCount} 个独立互动应用
++涉及课程：${Array.from(uniqueCourses).join('、')}
++
++【使用指引】：
++1. 本压缩包中的所有 HTML 文件均为完全独立的单页应用（已完成全量静态依赖与资源内嵌）。
++2. 无需安装任何环境，在联网或离线环境下，直接使用 Chrome / Edge / Safari / Firefox 等任意主流浏览器双击打开即可流畅体验。
++3. 涵盖科学模拟仿真、算法可视化图解、闯关小游戏及代码交互工坊等多种互动形态。
++4. 适合用于多媒体智慧大屏课堂演示、机房学生动手实践或课后探究巩固。
++`;
++  zip.file('使用说明与离线运行指引.txt', readmeText);
++
++  const buffer = await zip.generateAsync({
++    type: 'nodebuffer',
++    compression: 'DEFLATE',
++    compressionOptions: { level: 6 },
++  });
++
++  let filename = '';
++  if (customArchiveName) {
++    filename = `${sanitizeFsName(customArchiveName)}.zip`;
++  } else if (uniqueCourses.size === 1) {
++    const singleCourse = Array.from(uniqueCourses)[0];
++    filename = `互动展厅_${singleCourse}_(${includedCount}个项目).zip`;
++  } else {
++    const today = new Date().toISOString().slice(0, 10).replace(/-/g, '');
++    filename = `互动展厅_精选合集_${today}_(${includedCount}个项目).zip`;
++  }
++
++  return { buffer, filename, count: includedCount };
++}
++
