@@ -1,9 +1,9 @@
 diff --git a/README-MULTIUSER.md b/README-MULTIUSER.md
 new file mode 100644
-index 00000000..36d0fc18
+index 00000000..8d7f1cbf
 --- /dev/null
 +++ b/README-MULTIUSER.md
-@@ -0,0 +1,142 @@
+@@ -0,0 +1,144 @@
 +# OpenMAIC 多用户管理与认证模块 (Multi-Users Module)
 +
 +本模块为 **OpenMAIC** 增加了开箱即用的**多用户身份认证（Authentication）、多端数据漫游、分权权限控制（RBAC）与全局用户管理后台**。
@@ -26,13 +26,15 @@ index 00000000..36d0fc18
 +   - **四维彻底物理级联删除保障**：删除课程时，同步清空 PostgreSQL 数据库关联行、`data/classrooms/<id>.json` 课堂持久化文件、`data/classrooms/<id>/` 媒体目录以及 `data/interactive-library/` 互动打包文件，杜绝遗留与虚假成功。
 +5. **「互动实验与游戏工坊」展厅 (`/interactive-hub`)**：
 +   - 自动在课程生成时调用系统资源内联器（`inlineHtmlAssets`），将所有互动场景打包为体积约 0.8MB~1.3MB 的**单文件离线纯前端应用**。
-+   - 支持科学实验、闯关游戏、算法图解、代码工坊分类浏览、内置模态弹窗全屏体验、新标签页全屏与离线下载 HTML。
++   - 支持科学实验、闯关游戏、算法图解、代码工坊分类浏览、内置模态弹窗全屏体验、新标签页全屏、单文件离线下载 HTML，**并支持多选批量打包下载为 ZIP 压缩包**。
 +   - **全生命周期双向联动**：课程新建/批量生成自动归集、课程重命名自动重命名展厅目录及元数据、课程删除自动清理展厅游戏文件。
 +   - **强力同步与孤儿探测**：支持一键“强制同步归集”（耗时 <50ms），自动跨文件与数据库扫描并自动清除孤儿残留。
 +6. **安全与轻量**：
 +   - 采用 Node.js 原生安全加密（`scrypt` 密码哈希 + 随机 Salt，HMAC-SHA256 JWT Token）。
 +   - 采用 `HttpOnly` + `SameSite=Lax` Cookie 存储会话，杜绝 XSS 风险。
 +   - 零额外重量级依赖，无缝融合 PostgreSQL 持久化与 Next.js 16 架构。
++7. **官方 Owner Identity Seam 标准集成**：
++   - 全面接入 OpenMAIC v1.1.2 官方标准的 `OwnerAuthMethod` 与 `PersistenceHooks` 宿主接口，无缝兼容 DeepSeek 思考模式（R1）多轮连贯会话与 LLM 故障降级重试。
 +
 +---
 +
@@ -147,7 +149,7 @@ index 00000000..36d0fc18
 +pm2 restart openmaic --update-env
 +```
 diff --git a/README-zh.md b/README-zh.md
-index a2829bc1..59485d88 100644
+index d20e64ef..0c96e2d0 100644
 --- a/README-zh.md
 +++ b/README-zh.md
 @@ -37,11 +37,48 @@
@@ -201,7 +203,7 @@ index a2829bc1..59485d88 100644
  ## 🗞️ 动态
  
 diff --git a/README.md b/README.md
-index b1c8b826..3b3bd7bb 100644
+index 72db8864..c69d75d8 100644
 --- a/README.md
 +++ b/README.md
 @@ -37,11 +37,49 @@
@@ -1000,10 +1002,10 @@ index 00000000..bab59967
 +  }
 +}
 diff --git a/app/api/classroom/route.ts b/app/api/classroom/route.ts
-index 3cbf7790..1d125a5d 100644
+index 3cbf7790..06ae1d94 100644
 --- a/app/api/classroom/route.ts
 +++ b/app/api/classroom/route.ts
-@@ -9,9 +9,19 @@ import {
+@@ -9,9 +9,20 @@ import {
    isValidClassroomId,
    persistClassroom,
    readClassroom,
@@ -1017,13 +1019,22 @@ index 3cbf7790..1d125a5d 100644
 +import { markStageGenerationComplete } from '@/lib/persistence/stage-meta';
 +import { getSessionPayload } from '@/lib/server/auth/session';
 +import { resolveRequestOwner } from '@/lib/server/identity/resolve';
++import { attachOwnerCookies } from '@/lib/server/identity/with-owner';
 +import { getOwnerScopedDocumentStore } from '@/lib/server/agent-runtime/owner-scoped-documents';
 +import { syncInteractiveLibraryForStage } from '@/lib/server/interactive-library';
 +import type { Stage, Scene } from '@/lib/types/stage';
  
  const log = createLogger('Classroom API');
  
-@@ -73,39 +83,53 @@ export async function POST(request: NextRequest) {
+@@ -23,6 +34,7 @@ function describeSceneIssue(issue: { path: string; message: string }): string {
+ export async function POST(request: NextRequest) {
+   let stageId: string | undefined;
+   let sceneCount: number | undefined;
++  let setCookies: readonly string[] | undefined;
+   try {
+     const body = await request.json();
+     const { stage, scenes } = body;
+@@ -73,39 +85,53 @@ export async function POST(request: NextRequest) {
      const safeStage = sanitizeSceneContent(stage);
      const safeScenes = sanitizeSceneContent(scenes);
  
@@ -1106,10 +1117,11 @@ index 3cbf7790..1d125a5d 100644
        }
      }
  
-@@ -113,6 +137,41 @@ export async function POST(request: NextRequest) {
+@@ -113,18 +139,58 @@ export async function POST(request: NextRequest) {
        return apiError(API_ERROR_CODES.INVALID_REQUEST, 409, 'Classroom id collision');
      }
  
+-    return apiSuccess({ id: persisted.id, url: persisted.url }, 201);
 +    if (isServerPersistenceConfigured()) {
 +      try {
 +        const session = getSessionPayload(request);
@@ -1117,7 +1129,10 @@ index 3cbf7790..1d125a5d 100644
 +          session && session.userId ? `user:${session.userId}` : undefined;
 +        if (!ownerId) {
 +          const outcome = await resolveRequestOwner(request);
-+          if (outcome.ok) ownerId = outcome.principal.ownerId;
++          if (outcome.ok) {
++            ownerId = outcome.principal.ownerId;
++            setCookies = outcome.setCookies;
++          }
 +        }
 +        if (!ownerId) ownerId = 'anon:guest';
 +        const store = await getOwnerScopedDocumentStore(ownerId);
@@ -1145,10 +1160,25 @@ index 3cbf7790..1d125a5d 100644
 +      log.warn(`Classroom ${persisted?.id} failed to sync to interactive library:`, err);
 +    });
 +
-     return apiSuccess({ id: persisted.id, url: persisted.url }, 201);
++    const response = apiSuccess({ id: persisted.id, url: persisted.url }, 201);
++    return setCookies ? attachOwnerCookies(response, setCookies) : response;
    } catch (error) {
      log.error(
-@@ -144,7 +203,35 @@ export async function GET(request: NextRequest) {
+       `Classroom storage failed [stageId=${stageId ?? 'unknown'}, scenes=${sceneCount ?? 0}]:`,
+       error,
+     );
+-    return apiError(
++    const errorResponse = apiError(
+       API_ERROR_CODES.INTERNAL_ERROR,
+       500,
+       'Failed to store classroom',
+       error instanceof Error ? error.message : String(error),
+     );
++    return setCookies ? attachOwnerCookies(errorResponse, setCookies) : errorResponse;
+   }
+ }
+ 
+@@ -144,7 +210,35 @@ export async function GET(request: NextRequest) {
        return apiError(API_ERROR_CODES.INVALID_REQUEST, 400, 'Invalid classroom id');
      }
  
@@ -4812,7 +4842,7 @@ index 00000000..8d1495df
 +  );
 +}
 diff --git a/app/page.tsx b/app/page.tsx
-index 31059149..dc9a8e7d 100644
+index 41979efe..85ae2a93 100644
 --- a/app/page.tsx
 +++ b/app/page.tsx
 @@ -27,6 +27,8 @@ import {
@@ -4833,7 +4863,7 @@ index 31059149..dc9a8e7d 100644
  import { GenerationToolbar } from '@/components/generation/generation-toolbar';
  import { AgentBar } from '@/components/agent/agent-bar';
  import { useTheme } from '@/lib/hooks/use-theme';
-@@ -89,6 +93,8 @@ import {
+@@ -90,6 +94,8 @@ import {
  } from '@/lib/config/feature-flags';
  import { useImportPptx } from '@/lib/import/use-import-pptx';
  import { InteractiveModeButton } from '@/components/generation/interactive-mode-button';
@@ -4842,7 +4872,7 @@ index 31059149..dc9a8e7d 100644
  import { ProBadge } from '@/components/workbench/ProBadge';
  import { arrivedByProSwap, startProSwap } from '@/lib/workbench/pro-swap';
  import {
-@@ -100,6 +106,7 @@ const log = createLogger('Home');
+@@ -101,6 +107,7 @@ const log = createLogger('Home');
  
  const RECENT_OPEN_STORAGE_KEY = 'recentClassroomsOpen';
  const INTERACTIVE_MODE_STORAGE_KEY = 'interactiveModeEnabled';
@@ -4850,7 +4880,7 @@ index 31059149..dc9a8e7d 100644
  
  // PPTX import is still scaffolding: `useImportPptx` has no `onImported` consumer
  // yet, so the flow only logs the parsed slides. Hide the entry point behind a
-@@ -112,6 +119,7 @@ let workbenchRuntimeCache: boolean | null = null;
+@@ -113,6 +120,7 @@ let workbenchRuntimeCache: boolean | null = null;
  interface FormState {
    courseMaterials: SelectedCourseMaterial[];
    requirement: string;
@@ -4858,7 +4888,7 @@ index 31059149..dc9a8e7d 100644
    interactiveMode: boolean;
    vocationalTestMode: boolean;
  }
-@@ -119,6 +127,7 @@ interface FormState {
+@@ -120,6 +128,7 @@ interface FormState {
  const initialFormState: FormState = {
    courseMaterials: [],
    requirement: '',
@@ -4866,7 +4896,7 @@ index 31059149..dc9a8e7d 100644
    interactiveMode: false,
    vocationalTestMode: false,
  };
-@@ -201,6 +210,19 @@ function HomePage() {
+@@ -202,6 +211,19 @@ function HomePage() {
      } catch {
        /* localStorage unavailable */
      }
@@ -4886,7 +4916,7 @@ index 31059149..dc9a8e7d 100644
    }, []);
  
    // Restore requirement draft from localStorage on mount. The previous derived-state
-@@ -217,6 +239,7 @@ function HomePage() {
+@@ -218,6 +240,7 @@ function HomePage() {
  
    const [themeOpen, setThemeOpen] = useState(false);
    const [error, setError] = useState<string | null>(null);
@@ -4894,7 +4924,7 @@ index 31059149..dc9a8e7d 100644
    // True while the Generate click drains upload-time ingests and builds the
    // generation session. Doubles as the guard flag that freezes the course
    // material set for the duration of prep and as the switch that disables the
-@@ -504,6 +527,8 @@ function HomePage() {
+@@ -513,6 +536,8 @@ function HomePage() {
      try {
        if (field === 'interactiveMode')
          localStorage.setItem(INTERACTIVE_MODE_STORAGE_KEY, String(value));
@@ -4903,7 +4933,7 @@ index 31059149..dc9a8e7d 100644
        if (field === 'requirement') updateRequirementCache(value as string);
      } catch {
        /* ignore */
-@@ -599,6 +624,7 @@ function HomePage() {
+@@ -608,6 +633,7 @@ function HomePage() {
        const userProfile = useUserProfileStore.getState();
        const requirements: UserRequirements = {
          requirement: form.requirement,
@@ -4911,7 +4941,7 @@ index 31059149..dc9a8e7d 100644
          userNickname: userProfile.nickname || undefined,
          userBio: userProfile.bio || undefined,
          // Course-level web search now lives in settings (课程模型配置 → 联网调研)
-@@ -783,26 +809,67 @@ function HomePage() {
+@@ -792,26 +818,67 @@ function HomePage() {
            )}
          </div>
  
@@ -4996,7 +5026,7 @@ index 31059149..dc9a8e7d 100644
  
        {/* ═══ Background Decor ═══ */}
        <div className="absolute inset-0 overflow-hidden pointer-events-none">
-@@ -904,6 +971,13 @@ function HomePage() {
+@@ -913,6 +980,13 @@ function HomePage() {
                  />
                </div>
  
@@ -6628,10 +6658,10 @@ index 00000000..90d79220
 +  ],
 +};
 diff --git a/instrumentation.ts b/instrumentation.ts
-index 488fc224..c7b2ab1a 100644
+index 6d668280..c18e6b9e 100644
 --- a/instrumentation.ts
 +++ b/instrumentation.ts
-@@ -153,20 +153,28 @@ async function validateBootConfiguration(): Promise<void> {
+@@ -173,20 +173,28 @@ async function validateBootConfiguration(): Promise<void> {
    // is treated as unset, so this only rejects values that are present and
    // unusable.
    //
@@ -6696,7 +6726,7 @@ index 2e4122e4..c4a7ca31 100644
  }
  
 diff --git a/lib/classroom/load-classroom.ts b/lib/classroom/load-classroom.ts
-index 6d88151a..40e0fd66 100644
+index 63b56599..e79610c5 100644
 --- a/lib/classroom/load-classroom.ts
 +++ b/lib/classroom/load-classroom.ts
 @@ -352,7 +352,7 @@ export function applyClassroomStageAndScenes(
@@ -9980,10 +10010,10 @@ index 1818c25f..9132d395 100644
        model: `${selection.providerId}:${selection.modelId}`,
        apiKey: config?.apiKey || undefined,
 diff --git a/lib/utils/stage-storage.ts b/lib/utils/stage-storage.ts
-index e7b54322..6be4a2e9 100644
+index 25b0a801..22e5c187 100644
 --- a/lib/utils/stage-storage.ts
 +++ b/lib/utils/stage-storage.ts
-@@ -29,6 +29,7 @@ import {
+@@ -26,6 +26,7 @@ import {
    loadCurrentScene,
    mutateDocument,
    saveCurrentScene,
@@ -9991,7 +10021,7 @@ index e7b54322..6be4a2e9 100644
    type AppDocumentOutline,
  } from '@/lib/document-store';
  import { clearAllForScene } from '@/lib/quiz/persistence';
-@@ -277,6 +278,16 @@ export async function saveStageData(
+@@ -280,6 +281,16 @@ export async function saveStageData(
        return 'stale-dropped';
      }
      log.info(`Saved stage: ${stageId}`);
@@ -10008,7 +10038,7 @@ index e7b54322..6be4a2e9 100644
      return failedChanges.length > 0 ? { failedChanges } : undefined;
    } catch (error) {
      log.error('Failed to save stage:', error);
-@@ -446,16 +457,97 @@ export async function saveStageDataIncremental(
+@@ -449,16 +460,97 @@ export async function saveStageDataIncremental(
    if (has('chats') && !(await saveStageChats(stageId, data))) {
      failedChanges.push({ kind: 'chats' });
    }
@@ -10108,7 +10138,7 @@ index e7b54322..6be4a2e9 100644
      if (!document) {
        log.info(`Stage not found: ${stageId}`);
        return null;
-@@ -684,6 +776,10 @@ async function performStageDeletion(stageId: string): Promise<void> {
+@@ -655,6 +747,10 @@ async function performStageDeletion(stageId: string): Promise<void> {
              }
  
              log.info(`Deleted stage: ${stageId}`);
@@ -10119,20 +10149,7 @@ index e7b54322..6be4a2e9 100644
              releaseCaller(undefined);
              // The public deletion remains bounded, but this callback deliberately
              // retains the exclusive lock until a late runtime cascade can no longer
-@@ -787,11 +883,9 @@ async function listOwnerStagesFromServer(): Promise<StageListItem[]> {
- export async function listStages(): Promise<StageListItem[]> {
-   try {
-     if (isBrowserPersistenceEnabled()) {
--      // Server persistence is on: the generic document listing answers 403 by
--      // design, so the home/workspace library lists through the owner-scoped
--      // workbench surface instead.
-       return await listOwnerStagesFromServer();
-     }
-+
-     const summaries = await getDocumentStore().listDocuments();
-     const ids = new Set(summaries.map((summary) => summary.id));
-     const legacy = await getLegacyDocumentStore().listStages();
-@@ -926,7 +1020,13 @@ export async function getFirstSlideByStages(
+@@ -845,7 +941,13 @@ export async function getFirstSlideByStages(
    try {
      await Promise.all(
        stageIds.map(async (stageId) => {
@@ -10147,7 +10164,7 @@ index e7b54322..6be4a2e9 100644
          const firstSlide = document?.scenes.find((s) => s.content?.type === 'slide');
          if (firstSlide && firstSlide.content.type === 'slide') {
            const slide = structuredClone(firstSlide.content.canvas);
-@@ -1090,10 +1190,20 @@ export async function getFirstSlideByStages(
+@@ -1009,10 +1111,20 @@ export async function getFirstSlideByStages(
   */
  export async function renameStage(stageId: string, newName: string): Promise<void> {
    try {
@@ -10172,90 +10189,6 @@ index e7b54322..6be4a2e9 100644
      log.info(`Renamed stage ${stageId} to "${newName}"`);
    } catch (error) {
      log.error('Failed to rename stage:', error);
-@@ -1108,7 +1218,12 @@ export async function stageExists(stageId: string): Promise<boolean> {
-   try {
-     const summaries = await getDocumentStore().listDocuments();
-     if (summaries.some((stage) => stage.id === stageId)) return true;
--    return (await getLegacyDocumentStore().read(stageId)) !== null;
-+    if ((await getLegacyDocumentStore().read(stageId)) !== null) return true;
-+    try {
-+      const res = await fetch(`/api/stages/${encodeURIComponent(stageId)}`, { credentials: 'include' });
-+      if (res.ok) return true;
-+    } catch {}
-+    return false;
-   } catch (error) {
-     log.error('Failed to check stage existence:', error);
-     return false;
-@@ -1192,11 +1307,17 @@ async function listOwnerFoldersFromServer(): Promise<FolderRecord[]> {
-  * List all folders, ordered by their `order` field (ascending).
-  */
- export async function listFolders(): Promise<FolderRecord[]> {
--  if (isBrowserPersistenceEnabled()) {
--    return await listOwnerFoldersFromServer();
-+  try {
-+    if (isBrowserPersistenceEnabled()) {
-+      return await listOwnerFoldersFromServer();
-+    }
-+
-+    const localFolders = await db.folders.toArray();
-+    return localFolders.sort((a, b) => a.order - b.order);
-+  } catch (error) {
-+    log.error('Failed to list folders:', error);
-+    throw error;
-   }
--  const folders = await db.folders.toArray();
--  return folders.sort((a, b) => a.order - b.order);
- }
- 
- /** Validate a folder name against the width rule and (optionally) duplicates. */
-@@ -1248,24 +1369,26 @@ export async function createFolder(name: string): Promise<FolderRecord> {
-     return await createOwnerFolderFromServer(name);
-   }
-   const now = Date.now();
--  return db.transaction('rw', db.folders, async () => {
-+  const folder = await db.transaction('rw', db.folders, async () => {
-     const existing = await db.folders.toArray();
-     if (existing.length >= FOLDER_COUNT_LIMIT) {
-       throw new FolderNameError('Folder count limit reached', 'limit');
-     }
-     assertFolderName(name, existing);
-     const order = existing.reduce((max, folder) => Math.max(max, folder.order), -1) + 1;
--    const folder: FolderRecord = {
-+    const item: FolderRecord = {
-       id: nanoid(),
-       name: name.trim(),
-       order,
-       createdAt: now,
-       updatedAt: now,
-     };
--    await db.folders.put(folder);
--    log.info(`Created folder "${name}" (${folder.id})`);
--    return folder;
-+    await db.folders.put(item);
-+    log.info(`Created folder "${name}" (${item.id})`);
-+    return item;
-   });
-+  createOwnerFolderFromServer(name).catch(() => {});
-+  return folder;
- }
- 
- /** PG mode: rename a folder through the owner-scoped route. */
-@@ -1300,6 +1423,7 @@ export async function renameFolder(id: string, name: string): Promise<void> {
-     await db.folders.put({ ...folder, name: name.trim(), updatedAt: now });
-     log.info(`Renamed folder ${id} to "${name}"`);
-   });
-+  renameOwnerFolderFromServer(id, name).catch(() => {});
- }
- 
- export type DeleteFolderMode = 'ungroup' | 'remove';
-@@ -1340,6 +1464,7 @@ export async function deleteFolder(id: string, mode: DeleteFolderMode = 'ungroup
-     await deleteOwnerFolderFromServer(id, mode);
-     return;
-   }
-+  deleteOwnerFolderFromServer(id, mode).catch(() => {});
-   // Atomically capture members, delete the folder row, and clear all membership
-   // rows in ONE transaction BEFORE the course-deletion cascade. This makes the
-   // folder invisible to `setStageFolder` (which checks folder existence in its
 diff --git a/packages/@openmaic/generation/src/outline-types.ts b/packages/@openmaic/generation/src/outline-types.ts
 index 673b9d76..50543c36 100644
 --- a/packages/@openmaic/generation/src/outline-types.ts
