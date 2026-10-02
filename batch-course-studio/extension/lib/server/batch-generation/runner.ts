@@ -390,6 +390,8 @@ async function executeSingleMergedJob(
       enableImageGeneration: job.enableImageGeneration,
       interactiveMode: job.enableInteractiveMode,
       courseScale: job.courseScale,
+      interactiveTheme: job.interactiveTheme,
+      slideTheme: job.slideTheme,
     },
     {
       baseUrl,
@@ -533,6 +535,8 @@ async function executeBatchIndependentJob(
           enableImageGeneration: initialJob.enableImageGeneration,
           interactiveMode: initialJob.enableInteractiveMode,
           courseScale: initialJob.courseScale,
+          interactiveTheme: initialJob.interactiveTheme,
+          slideTheme: initialJob.slideTheme,
         },
         {
           baseUrl,

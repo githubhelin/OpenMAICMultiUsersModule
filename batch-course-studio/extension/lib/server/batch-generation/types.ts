@@ -1,4 +1,5 @@
 import type { CourseScale } from '@/lib/types/course-scale';
+import type { InteractiveThemeStyle, SlideThemeStyle } from '@/lib/types/theme-style';
 
 export type BatchJobMode = 'single_merged' | 'batch_independent';
 
@@ -52,6 +53,8 @@ export interface BatchJob {
   enableImageGeneration: boolean;
   enableInteractiveMode?: boolean;
   courseScale?: CourseScale;
+  interactiveTheme?: InteractiveThemeStyle;
+  slideTheme?: SlideThemeStyle;
   totalTasks: number;
   completedTasks: number;
   failedTasks: number;

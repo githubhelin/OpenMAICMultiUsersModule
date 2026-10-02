@@ -14,6 +14,7 @@ import {
 import { runBatchJob, scheduleNextBatchJob } from '@/lib/server/batch-generation/runner';
 import type { BatchJob, BatchJobMode, BatchSubTask } from '@/lib/server/batch-generation/types';
 import type { CourseScale } from '@/lib/types/course-scale';
+import type { InteractiveThemeStyle, SlideThemeStyle } from '@/lib/types/theme-style';
 
 export const runtime = 'nodejs';
 export const maxDuration = 300;
@@ -48,6 +49,12 @@ export async function POST(req: NextRequest) {
     const rawCourseScale = formData.get('courseScale') as string;
     const courseScale: CourseScale =
       rawCourseScale === 'micro' || rawCourseScale === 'thematic' ? rawCourseScale : 'standard';
+    const rawInteractiveTheme = formData.get('interactiveTheme') as string;
+    const interactiveTheme: InteractiveThemeStyle =
+      rawInteractiveTheme === 'light' ? 'light' : 'dark';
+    const rawSlideTheme = formData.get('slideTheme') as string;
+    const slideTheme: SlideThemeStyle =
+      rawSlideTheme === 'dark' ? 'dark' : 'light';
 
     const jobId = `batch_${nanoid(10)}`;
     const now = new Date().toISOString();
@@ -95,6 +102,8 @@ export async function POST(req: NextRequest) {
       enableImageGeneration,
       enableInteractiveMode,
       courseScale,
+      interactiveTheme,
+      slideTheme,
       totalTasks: tasks.length,
       completedTasks: 0,
       failedTasks: 0,

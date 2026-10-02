@@ -836,10 +836,10 @@ index 00000000..ae23767d
 +}
 diff --git a/app/api/batch-generate/route.ts b/app/api/batch-generate/route.ts
 new file mode 100644
-index 00000000..e0ec2c41
+index 00000000..e20054d8
 --- /dev/null
 +++ b/app/api/batch-generate/route.ts
-@@ -0,0 +1,170 @@
+@@ -0,0 +1,179 @@
 +import { after, type NextRequest, NextResponse } from 'next/server';
 +import { promises as fs } from 'fs';
 +import path from 'path';
@@ -856,6 +856,7 @@ index 00000000..e0ec2c41
 +import { runBatchJob, scheduleNextBatchJob } from '@/lib/server/batch-generation/runner';
 +import type { BatchJob, BatchJobMode, BatchSubTask } from '@/lib/server/batch-generation/types';
 +import type { CourseScale } from '@/lib/types/course-scale';
++import type { InteractiveThemeStyle, SlideThemeStyle } from '@/lib/types/theme-style';
 +
 +export const runtime = 'nodejs';
 +export const maxDuration = 300;
@@ -890,6 +891,12 @@ index 00000000..e0ec2c41
 +    const rawCourseScale = formData.get('courseScale') as string;
 +    const courseScale: CourseScale =
 +      rawCourseScale === 'micro' || rawCourseScale === 'thematic' ? rawCourseScale : 'standard';
++    const rawInteractiveTheme = formData.get('interactiveTheme') as string;
++    const interactiveTheme: InteractiveThemeStyle =
++      rawInteractiveTheme === 'light' ? 'light' : 'dark';
++    const rawSlideTheme = formData.get('slideTheme') as string;
++    const slideTheme: SlideThemeStyle =
++      rawSlideTheme === 'dark' ? 'dark' : 'light';
 +
 +    const jobId = `batch_${nanoid(10)}`;
 +    const now = new Date().toISOString();
@@ -937,6 +944,8 @@ index 00000000..e0ec2c41
 +      enableImageGeneration,
 +      enableInteractiveMode,
 +      courseScale,
++      interactiveTheme,
++      slideTheme,
 +      totalTasks: tasks.length,
 +      completedTasks: 0,
 +      failedTasks: 0,
@@ -1224,30 +1233,55 @@ index 3cbf7790..06ae1d94 100644
      if (!classroom) {
        return apiError(API_ERROR_CODES.INVALID_REQUEST, 404, 'Classroom not found');
      }
+diff --git a/app/api/generate/scene-content/route.ts b/app/api/generate/scene-content/route.ts
+index e6121d5f..2f54e5e3 100644
+--- a/app/api/generate/scene-content/route.ts
++++ b/app/api/generate/scene-content/route.ts
+@@ -334,6 +334,8 @@ export async function POST(req: NextRequest) {
+       languageDirective,
+       targetLanguage: userLocale || undefined,
+       userRequirements: requirements,
++      interactiveTheme: requirements?.interactiveTheme,
++      slideTheme: requirements?.slideTheme,
+       allowProceduralSkill: vocationalActive,
+       ...(effectiveOutline.type === 'pbl'
+         ? {
 diff --git a/app/api/generate/scene-outlines-stream/route.ts b/app/api/generate/scene-outlines-stream/route.ts
-index a4648257..fbfa29c3 100644
+index a4648257..1598825c 100644
 --- a/app/api/generate/scene-outlines-stream/route.ts
 +++ b/app/api/generate/scene-outlines-stream/route.ts
-@@ -45,6 +45,7 @@ import { resolveModelFromRequest } from '@/lib/server/resolve-model';
+@@ -45,6 +45,8 @@ import { resolveModelFromRequest } from '@/lib/server/resolve-model';
  import { sortDocumentImagesForVision } from '@/lib/document/bundle';
  import { resolveVisionImagesForPrompt } from '@/lib/persistence/resolve-vision-images';
  import { resolveVocationalActive } from '@/lib/config/feature-flags';
 +import { buildCourseScaleInstruction } from '@/lib/types/course-scale';
++import { buildThemeStyleInstruction } from '@/lib/types/theme-style';
  const log = createLogger('Outlines Stream');
  
  export const maxDuration = 300;
-@@ -419,12 +420,22 @@ export async function POST(req: NextRequest) {
+@@ -419,12 +421,33 @@ export async function POST(req: NextRequest) {
      // Check if Interactive Mode or server-enabled Task Engine mode is enabled.
      const interactiveMode = requirements.interactiveMode ?? false;
      const taskEngineMode = resolveVocationalActive(requirements);
 +
-+    // Apply course scale instruction (if specified)
++    // Apply course scale and theme style instructions (if specified)
 +    const scaleInstruction = buildCourseScaleInstruction(requirements.courseScale, interactiveMode);
++    const themeInstruction = buildThemeStyleInstruction(
++      requirements.interactiveTheme ?? 'dark',
++      requirements.slideTheme ?? 'light',
++    );
++    let finalReq = requirements.requirement;
++    if (scaleInstruction && !finalReq.includes('【课程篇幅与教学结构规范')) {
++      finalReq += scaleInstruction;
++    }
++    if (themeInstruction && !finalReq.includes('【界面视觉风格强制规约')) {
++      finalReq += themeInstruction;
++    }
 +    const enrichedRequirements: UserRequirements = {
 +      ...requirements,
-+      requirement: scaleInstruction && !requirements.requirement.includes('【课程篇幅与教学结构规范')
-+        ? `${requirements.requirement}${scaleInstruction}`
-+        : requirements.requirement,
++      requirement: finalReq,
++      interactiveTheme: requirements.interactiveTheme ?? 'dark',
++      slideTheme: requirements.slideTheme ?? 'light',
 +    };
 +
      // Standard outline generation is byte-identical to the package path. The
@@ -1260,7 +1294,7 @@ index a4648257..fbfa29c3 100644
        pdfText,
        pdfImages: resolvedPdfImages ?? pdfImages,
        visionEnabled: hasVision,
-@@ -440,7 +451,7 @@ export async function POST(req: NextRequest) {
+@@ -440,7 +463,7 @@ export async function POST(req: NextRequest) {
          ? PROMPT_IDS.TASK_ENGINE_OUTLINES
          : PROMPT_IDS.INTERACTIVE_OUTLINES;
        prompts = buildPrompt(promptId, {
@@ -1812,10 +1846,10 @@ index 7f24e0ab..a29e5f77 100644
  }
 diff --git a/app/batch-studio/page.tsx b/app/batch-studio/page.tsx
 new file mode 100644
-index 00000000..40434c8f
+index 00000000..3b4e9fd6
 --- /dev/null
 +++ b/app/batch-studio/page.tsx
-@@ -0,0 +1,1025 @@
+@@ -0,0 +1,1183 @@
 +'use client';
 +
 +import React, { useState, useEffect, useRef } from 'react';
@@ -1843,6 +1877,12 @@ index 00000000..40434c8f
 +  Target,
 +  BookOpen,
 +  Gamepad2,
++  Palette,
++  Sun,
++  Moon,
++  MonitorPlay,
++  Presentation,
++  SlidersHorizontal,
 +} from 'lucide-react';
 +import { Button } from '@/components/ui/button';
 +import { Card } from '@/components/ui/card';
@@ -1852,6 +1892,12 @@ index 00000000..40434c8f
 +import { toast } from 'sonner';
 +import type { BatchJob, BatchJobMode, BatchSubTask } from '@/lib/server/batch-generation/types';
 +import { type CourseScale, COURSE_SCALES } from '@/lib/types/course-scale';
++import {
++  type InteractiveThemeStyle,
++  type SlideThemeStyle,
++  THEME_STYLE_PRESETS,
++  getThemeStyleSummary,
++} from '@/lib/types/theme-style';
 +
 +export const DEFAULT_PEDAGOGICAL_PROMPT = `# 教学角色与目标
 +你是一位顶尖的“交互式课程设计师兼智能体教学专家”，深度掌握 OpenMAIC 的多智能体协作与动态课件生成能力。请根据上传的课件内容，设计一堂高参与度、高互动性的优质沉浸式交互微课。
@@ -1878,6 +1924,8 @@ index 00000000..40434c8f
 +  const [enableImageGeneration, setEnableImageGeneration] = useState<boolean>(true);
 +  const [enableInteractiveMode, setEnableInteractiveMode] = useState<boolean>(false);
 +  const [courseScale, setCourseScale] = useState<CourseScale>('standard');
++  const [interactiveTheme, setInteractiveTheme] = useState<InteractiveThemeStyle>('dark');
++  const [slideTheme, setSlideTheme] = useState<SlideThemeStyle>('light');
 +
 +  const [submitting, setSubmitting] = useState<boolean>(false);
 +  const [cancellingJob, setCancellingJob] = useState<boolean>(false);
@@ -1935,6 +1983,8 @@ index 00000000..40434c8f
 +    formData.append('enableImageGeneration', enableImageGeneration ? 'true' : 'false');
 +    formData.append('enableInteractiveMode', enableInteractiveMode ? 'true' : 'false');
 +    formData.append('courseScale', courseScale);
++    formData.append('interactiveTheme', interactiveTheme);
++    formData.append('slideTheme', slideTheme);
 +
 +    try {
 +      const res = await fetch('/api/batch-generate', {
@@ -2427,6 +2477,135 @@ index 00000000..40434c8f
 +              </div>
 +            </div>
 +
++            {/* 视觉风格定制（交互深浅主题 & PPT深浅风格） */}
++            <div className="space-y-3 p-4 rounded-xl border border-slate-200 dark:border-slate-800 bg-white/70 dark:bg-slate-900/60">
++              <div className="flex items-center justify-between">
++                <label className="text-sm font-medium text-slate-700 dark:text-slate-300 flex items-center gap-1.5">
++                  <Palette className="w-4 h-4 text-indigo-500" />
++                  课件视觉风格与交互主题定制
++                </label>
++                <span className="text-xs text-slate-500 dark:text-slate-400 font-normal">
++                  根据授课环境（线下投影、线上网课或自主学习）自由搭配
++                </span>
++              </div>
++
++              {/* 4 大场景预设卡片 */}
++              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
++                {THEME_STYLE_PRESETS.map((preset) => {
++                  const isSelected =
++                    interactiveTheme === preset.interactiveTheme && slideTheme === preset.slideTheme;
++                  return (
++                    <div
++                      key={preset.id}
++                      onClick={() => {
++                        setInteractiveTheme(preset.interactiveTheme);
++                        setSlideTheme(preset.slideTheme);
++                      }}
++                      className={`cursor-pointer p-2.5 rounded-lg border text-left transition-all relative ${
++                        isSelected
++                          ? 'border-indigo-500 bg-indigo-50/70 dark:bg-indigo-950/40 shadow-xs ring-1 ring-indigo-500/40'
++                          : 'border-slate-200 dark:border-slate-800 bg-slate-50/50 dark:bg-slate-800/40 hover:border-slate-300 dark:hover:border-slate-700'
++                      }`}
++                    >
++                      <div className="flex items-center justify-between gap-1 mb-0.5">
++                        <span className="font-semibold text-xs text-slate-800 dark:text-slate-200">
++                          {preset.name}
++                        </span>
++                        {isSelected && <Check className="w-3.5 h-3.5 text-indigo-600 dark:text-indigo-400" />}
++                      </div>
++                      <div className="text-[10px] font-mono text-indigo-600 dark:text-indigo-400 font-medium">
++                        {preset.badge}
++                      </div>
++                      <p className="text-[10px] text-slate-500 dark:text-slate-400 mt-1 leading-snug line-clamp-2">
++                        {preset.description}
++                      </p>
++                    </div>
++                  );
++                })}
++              </div>
++
++              {/* 独立双开关调节 */}
++              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-2 border-t border-slate-100 dark:border-slate-800">
++                {/* 交互主题独立切换 */}
++                <div className="p-2.5 rounded-lg bg-slate-50 dark:bg-slate-800/50 border border-slate-200/60 dark:border-slate-700/60 space-y-1.5">
++                  <div className="flex items-center justify-between text-xs">
++                    <span className="font-semibold text-slate-700 dark:text-slate-300 flex items-center gap-1.5">
++                      <MonitorPlay className="w-3.5 h-3.5 text-blue-500" />
++                      交互场景主题 (仿真/游戏/图表/3D)
++                    </span>
++                    <span className="text-[10px] font-mono text-slate-500">
++                      {interactiveTheme === 'dark' ? '深色科技' : '浅色明亮'}
++                    </span>
++                  </div>
++                  <div className="grid grid-cols-2 gap-1.5 p-0.5 bg-slate-200/60 dark:bg-slate-900 rounded-md">
++                    <button
++                      type="button"
++                      onClick={() => setInteractiveTheme('dark')}
++                      className={`flex items-center justify-center gap-1.5 py-1 px-2 rounded text-xs font-medium transition-all ${
++                        interactiveTheme === 'dark'
++                          ? 'bg-white dark:bg-slate-800 text-slate-900 dark:text-white shadow-xs'
++                          : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
++                      }`}
++                    >
++                      <Moon className="w-3 h-3 text-indigo-400" />
++                      深色科技 (暗黑)
++                    </button>
++                    <button
++                      type="button"
++                      onClick={() => setInteractiveTheme('light')}
++                      className={`flex items-center justify-center gap-1.5 py-1 px-2 rounded text-xs font-medium transition-all ${
++                        interactiveTheme === 'light'
++                          ? 'bg-white dark:bg-slate-800 text-slate-900 dark:text-white shadow-xs'
++                          : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
++                      }`}
++                    >
++                      <Sun className="w-3 h-3 text-amber-500" />
++                      浅色护眼 (明亮)
++                    </button>
++                  </div>
++                </div>
++
++                {/* PPT文档主题独立切换 */}
++                <div className="p-2.5 rounded-lg bg-slate-50 dark:bg-slate-800/50 border border-slate-200/60 dark:border-slate-700/60 space-y-1.5">
++                  <div className="flex items-center justify-between text-xs">
++                    <span className="font-semibold text-slate-700 dark:text-slate-300 flex items-center gap-1.5">
++                      <Presentation className="w-3.5 h-3.5 text-teal-500" />
++                      PPT幻灯片主题 (讲义文档底色)
++                    </span>
++                    <span className="text-[10px] font-mono text-slate-500">
++                      {slideTheme === 'light' ? '浅色纯白' : '深色夜间'}
++                    </span>
++                  </div>
++                  <div className="grid grid-cols-2 gap-1.5 p-0.5 bg-slate-200/60 dark:bg-slate-900 rounded-md">
++                    <button
++                      type="button"
++                      onClick={() => setSlideTheme('light')}
++                      className={`flex items-center justify-center gap-1.5 py-1 px-2 rounded text-xs font-medium transition-all ${
++                        slideTheme === 'light'
++                          ? 'bg-white dark:bg-slate-800 text-slate-900 dark:text-white shadow-xs'
++                          : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
++                      }`}
++                    >
++                      <Sun className="w-3 h-3 text-amber-500" />
++                      浅色讲义 (纯白)
++                    </button>
++                    <button
++                      type="button"
++                      onClick={() => setSlideTheme('dark')}
++                      className={`flex items-center justify-center gap-1.5 py-1 px-2 rounded text-xs font-medium transition-all ${
++                        slideTheme === 'dark'
++                          ? 'bg-white dark:bg-slate-800 text-slate-900 dark:text-white shadow-xs'
++                          : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
++                      }`}
++                    >
++                      <Moon className="w-3 h-3 text-indigo-400" />
++                      深色幻灯 (暗夜)
++                    </button>
++                  </div>
++                </div>
++              </div>
++            </div>
++
 +            {/* 附加功能开关（包含深度交互、TTS、配图） */}
 +            <div className="p-4 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-100/70 dark:bg-slate-900/80 space-y-3">
 +              <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 text-xs">
@@ -2565,6 +2744,19 @@ index 00000000..40434c8f
 +                        >
 +                          {COURSE_SCALES[currentJob.courseScale]?.label || currentJob.courseScale} (
 +                          {COURSE_SCALES[currentJob.courseScale]?.badge || ''})
++                        </Badge>
++                      )}
++                      {(currentJob.interactiveTheme || currentJob.slideTheme) && (
++                        <Badge
++                          variant="outline"
++                          className="border-indigo-500/40 text-indigo-600 dark:text-indigo-400 bg-indigo-500/10"
++                        >
++                          {
++                            getThemeStyleSummary(
++                              currentJob.interactiveTheme || 'dark',
++                              currentJob.slideTheme || 'light',
++                            ).badge
++                          }
 +                        </Badge>
 +                      )}
 +                    </div>
@@ -4884,7 +5076,7 @@ index 00000000..8d1495df
 +  );
 +}
 diff --git a/app/page.tsx b/app/page.tsx
-index 41979efe..85ae2a93 100644
+index 41979efe..bc97f46b 100644
 --- a/app/page.tsx
 +++ b/app/page.tsx
 @@ -27,6 +27,8 @@ import {
@@ -4905,40 +5097,50 @@ index 41979efe..85ae2a93 100644
  import { GenerationToolbar } from '@/components/generation/generation-toolbar';
  import { AgentBar } from '@/components/agent/agent-bar';
  import { useTheme } from '@/lib/hooks/use-theme';
-@@ -90,6 +94,8 @@ import {
+@@ -90,6 +94,10 @@ import {
  } from '@/lib/config/feature-flags';
  import { useImportPptx } from '@/lib/import/use-import-pptx';
  import { InteractiveModeButton } from '@/components/generation/interactive-mode-button';
 +import { CourseScalePicker } from '@/components/generation/course-scale-picker';
 +import type { CourseScale } from '@/lib/types/course-scale';
++import { ThemeStylePicker } from '@/components/generation/theme-style-picker';
++import type { InteractiveThemeStyle, SlideThemeStyle } from '@/lib/types/theme-style';
  import { ProBadge } from '@/components/workbench/ProBadge';
  import { arrivedByProSwap, startProSwap } from '@/lib/workbench/pro-swap';
  import {
-@@ -101,6 +107,7 @@ const log = createLogger('Home');
+@@ -101,6 +109,9 @@ const log = createLogger('Home');
  
  const RECENT_OPEN_STORAGE_KEY = 'recentClassroomsOpen';
  const INTERACTIVE_MODE_STORAGE_KEY = 'interactiveModeEnabled';
 +const COURSE_SCALE_STORAGE_KEY = 'openmaic:courseScale';
++const INTERACTIVE_THEME_STORAGE_KEY = 'openmaic:interactiveTheme';
++const SLIDE_THEME_STORAGE_KEY = 'openmaic:slideTheme';
  
  // PPTX import is still scaffolding: `useImportPptx` has no `onImported` consumer
  // yet, so the flow only logs the parsed slides. Hide the entry point behind a
-@@ -113,6 +120,7 @@ let workbenchRuntimeCache: boolean | null = null;
+@@ -113,15 +124,21 @@ let workbenchRuntimeCache: boolean | null = null;
  interface FormState {
    courseMaterials: SelectedCourseMaterial[];
    requirement: string;
 +  courseScale: CourseScale;
    interactiveMode: boolean;
    vocationalTestMode: boolean;
++  interactiveTheme?: InteractiveThemeStyle;
++  slideTheme?: SlideThemeStyle;
  }
-@@ -120,6 +128,7 @@ interface FormState {
+ 
  const initialFormState: FormState = {
    courseMaterials: [],
    requirement: '',
 +  courseScale: 'standard',
    interactiveMode: false,
    vocationalTestMode: false,
++  interactiveTheme: 'dark',
++  slideTheme: 'light',
  };
-@@ -202,6 +211,19 @@ function HomePage() {
+ 
+ function HomePage() {
+@@ -202,6 +219,37 @@ function HomePage() {
      } catch {
        /* localStorage unavailable */
      }
@@ -4955,10 +5157,28 @@ index 41979efe..85ae2a93 100644
 +    } catch {
 +      /* localStorage unavailable */
 +    }
++    try {
++      const savedInteractiveTheme = localStorage.getItem(
++        INTERACTIVE_THEME_STORAGE_KEY,
++      ) as InteractiveThemeStyle;
++      if (savedInteractiveTheme === 'dark' || savedInteractiveTheme === 'light') {
++        setForm((prev) => ({ ...prev, interactiveTheme: savedInteractiveTheme }));
++      }
++    } catch {
++      /* localStorage unavailable */
++    }
++    try {
++      const savedSlideTheme = localStorage.getItem(SLIDE_THEME_STORAGE_KEY) as SlideThemeStyle;
++      if (savedSlideTheme === 'light' || savedSlideTheme === 'dark') {
++        setForm((prev) => ({ ...prev, slideTheme: savedSlideTheme }));
++      }
++    } catch {
++      /* localStorage unavailable */
++    }
    }, []);
  
    // Restore requirement draft from localStorage on mount. The previous derived-state
-@@ -218,6 +240,7 @@ function HomePage() {
+@@ -218,6 +266,7 @@ function HomePage() {
  
    const [themeOpen, setThemeOpen] = useState(false);
    const [error, setError] = useState<string | null>(null);
@@ -4966,24 +5186,30 @@ index 41979efe..85ae2a93 100644
    // True while the Generate click drains upload-time ingests and builds the
    // generation session. Doubles as the guard flag that freezes the course
    // material set for the duration of prep and as the switch that disables the
-@@ -513,6 +536,8 @@ function HomePage() {
+@@ -513,6 +562,12 @@ function HomePage() {
      try {
        if (field === 'interactiveMode')
          localStorage.setItem(INTERACTIVE_MODE_STORAGE_KEY, String(value));
 +      if (field === 'courseScale')
 +        localStorage.setItem(COURSE_SCALE_STORAGE_KEY, String(value));
++      if (field === 'interactiveTheme')
++        localStorage.setItem(INTERACTIVE_THEME_STORAGE_KEY, String(value));
++      if (field === 'slideTheme')
++        localStorage.setItem(SLIDE_THEME_STORAGE_KEY, String(value));
        if (field === 'requirement') updateRequirementCache(value as string);
      } catch {
        /* ignore */
-@@ -608,6 +633,7 @@ function HomePage() {
+@@ -608,6 +663,9 @@ function HomePage() {
        const userProfile = useUserProfileStore.getState();
        const requirements: UserRequirements = {
          requirement: form.requirement,
 +        courseScale: form.courseScale,
++        interactiveTheme: form.interactiveTheme ?? 'dark',
++        slideTheme: form.slideTheme ?? 'light',
          userNickname: userProfile.nickname || undefined,
          userBio: userProfile.bio || undefined,
          // Course-level web search now lives in settings (课程模型配置 → 联网调研)
-@@ -792,26 +818,67 @@ function HomePage() {
+@@ -792,26 +850,67 @@ function HomePage() {
            )}
          </div>
  
@@ -5068,7 +5294,7 @@ index 41979efe..85ae2a93 100644
  
        {/* ═══ Background Decor ═══ */}
        <div className="absolute inset-0 overflow-hidden pointer-events-none">
-@@ -913,6 +980,13 @@ function HomePage() {
+@@ -913,6 +1012,22 @@ function HomePage() {
                  />
                </div>
  
@@ -5076,6 +5302,15 @@ index 41979efe..85ae2a93 100644
 +              <CourseScalePicker
 +                value={form.courseScale}
 +                onChange={(scale) => updateForm('courseScale', scale)}
++                disabled={preparingGenerate}
++              />
++
++              {/* Theme style selector */}
++              <ThemeStylePicker
++                interactiveTheme={form.interactiveTheme}
++                slideTheme={form.slideTheme}
++                onChangeInteractiveTheme={(theme) => updateForm('interactiveTheme', theme)}
++                onChangeSlideTheme={(theme) => updateForm('slideTheme', theme)}
 +                disabled={preparingGenerate}
 +              />
 +
@@ -6434,6 +6669,254 @@ index 00000000..109853c8
 +    </DropdownMenu>
 +  );
 +}
+diff --git a/components/generation/theme-style-picker.tsx b/components/generation/theme-style-picker.tsx
+new file mode 100644
+index 00000000..3f19478b
+--- /dev/null
++++ b/components/generation/theme-style-picker.tsx
+@@ -0,0 +1,242 @@
++'use client';
++
++import * as React from 'react';
++import {
++  Palette,
++  Sun,
++  Moon,
++  MonitorPlay,
++  Presentation,
++  Check,
++  ChevronDown,
++  Sparkles,
++  SlidersHorizontal,
++} from 'lucide-react';
++import { cn } from '@/lib/utils';
++import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
++import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
++import {
++  type InteractiveThemeStyle,
++  type SlideThemeStyle,
++  type ThemePresetOption,
++  THEME_STYLE_PRESETS,
++  getThemeStyleSummary,
++} from '@/lib/types/theme-style';
++
++interface ThemeStylePickerProps {
++  interactiveTheme?: InteractiveThemeStyle;
++  slideTheme?: SlideThemeStyle;
++  onChangeInteractiveTheme: (value: InteractiveThemeStyle) => void;
++  onChangeSlideTheme: (value: SlideThemeStyle) => void;
++  onSelectPreset?: (preset: ThemePresetOption) => void;
++  disabled?: boolean;
++  className?: string;
++}
++
++export function ThemeStylePicker({
++  interactiveTheme = 'dark',
++  slideTheme = 'light',
++  onChangeInteractiveTheme,
++  onChangeSlideTheme,
++  onSelectPreset,
++  disabled = false,
++  className,
++}: ThemeStylePickerProps) {
++  const [open, setOpen] = React.useState(false);
++  const summary = getThemeStyleSummary(interactiveTheme, slideTheme);
++
++  const handleSelectPreset = (preset: ThemePresetOption) => {
++    onChangeInteractiveTheme(preset.interactiveTheme);
++    onChangeSlideTheme(preset.slideTheme);
++    onSelectPreset?.(preset);
++  };
++
++  return (
++    <Popover open={open} onOpenChange={setOpen}>
++      <Tooltip>
++        <TooltipTrigger asChild>
++          <PopoverTrigger asChild disabled={disabled}>
++            <button
++              type="button"
++              className={cn(
++                'relative inline-flex h-8 shrink-0 cursor-pointer select-none items-center gap-1.5 whitespace-nowrap rounded-full border px-3 py-1.5 text-xs font-medium transition-all active:scale-95 focus-visible:outline-2 focus-visible:outline-offset-2',
++                'border-border/60 bg-background/80 hover:bg-muted/70 text-foreground/90 shadow-xs hover:border-border',
++                disabled && 'opacity-50 cursor-not-allowed pointer-events-none',
++                className,
++              )}
++            >
++              <Palette className="size-3.5 text-indigo-500 shrink-0" />
++              <span className="font-medium">{summary.label}</span>
++              <span className="text-[10px] text-muted-foreground bg-muted px-1.5 py-0.5 rounded-full font-mono">
++                {interactiveTheme === 'dark' ? '深' : '浅'}交互·{slideTheme === 'dark' ? '深' : '浅'}PPT
++              </span>
++              <ChevronDown className="size-3 text-muted-foreground/70 -mr-0.5" />
++            </button>
++          </PopoverTrigger>
++        </TooltipTrigger>
++        <TooltipContent side="top" className="text-xs">
++          定制交互与PPT呈现风格（当前：{summary.badge}）
++        </TooltipContent>
++      </Tooltip>
++
++      <PopoverContent
++        align="end"
++        sideOffset={6}
++        className="w-84 p-3 space-y-3 text-xs bg-popover/95 backdrop-blur-md shadow-xl border-border/80"
++      >
++        <div className="flex items-center justify-between border-b border-border/40 pb-2">
++          <div className="flex items-center gap-1.5 font-semibold text-foreground">
++            <SlidersHorizontal className="size-3.5 text-indigo-500" />
++            <span>视觉与交互风格定制</span>
++          </div>
++          <span className="text-[10px] text-muted-foreground">独立可调</span>
++        </div>
++
++        {/* 快速场景预设 */}
++        <div className="space-y-1.5">
++          <div className="text-[11px] font-medium text-muted-foreground flex items-center gap-1">
++            <Sparkles className="size-3 text-amber-500" />
++            <span>快速应用教学场景</span>
++          </div>
++          <div className="grid grid-cols-2 gap-1.5">
++            {THEME_STYLE_PRESETS.map((preset) => {
++              const isMatch =
++                interactiveTheme === preset.interactiveTheme && slideTheme === preset.slideTheme;
++              return (
++                <button
++                  key={preset.id}
++                  type="button"
++                  onClick={() => handleSelectPreset(preset)}
++                  className={cn(
++                    'flex flex-col items-start p-2 rounded-lg border text-left transition-all relative cursor-pointer',
++                    isMatch
++                      ? 'border-indigo-500 bg-indigo-50/70 dark:bg-indigo-950/40 text-foreground font-medium ring-1 ring-indigo-500/50'
++                      : 'border-border/60 hover:bg-muted/70 hover:border-border text-muted-foreground hover:text-foreground',
++                  )}
++                >
++                  <div className="flex items-center justify-between w-full">
++                    <span className="text-xs font-semibold text-foreground">{preset.name}</span>
++                    {isMatch && <Check className="size-3 text-indigo-600 dark:text-indigo-400 shrink-0" />}
++                  </div>
++                  <span className="text-[10px] text-muted-foreground/90 mt-0.5 leading-tight font-mono">
++                    {preset.badge}
++                  </span>
++                </button>
++              );
++            })}
++          </div>
++        </div>
++
++        {/* 独立开关调节 */}
++        <div className="space-y-2.5 pt-1 border-t border-border/40">
++          {/* 交互主题切换 */}
++          <div className="space-y-1">
++            <div className="flex items-center justify-between">
++              <span className="text-[11px] font-medium text-foreground flex items-center gap-1">
++                <MonitorPlay className="size-3 text-blue-500" />
++                交互场景主题 (仿真/小游戏/图表/3D)
++              </span>
++              <span className="text-[10px] font-mono text-muted-foreground">
++                {interactiveTheme === 'dark' ? '深色科技' : '浅色明亮'}
++              </span>
++            </div>
++            <div className="grid grid-cols-2 p-0.5 bg-muted/80 rounded-lg gap-1 border border-border/40">
++              <button
++                type="button"
++                onClick={() => onChangeInteractiveTheme('dark')}
++                className={cn(
++                  'flex items-center justify-center gap-1.5 py-1.5 px-2 rounded-md font-medium transition-all text-xs cursor-pointer',
++                  interactiveTheme === 'dark'
++                    ? 'bg-background text-foreground shadow-xs'
++                    : 'text-muted-foreground hover:text-foreground',
++                )}
++              >
++                <Moon className="size-3 text-indigo-400" />
++                <span>深色科技 (暗黑)</span>
++              </button>
++              <button
++                type="button"
++                onClick={() => onChangeInteractiveTheme('light')}
++                className={cn(
++                  'flex items-center justify-center gap-1.5 py-1.5 px-2 rounded-md font-medium transition-all text-xs cursor-pointer',
++                  interactiveTheme === 'light'
++                    ? 'bg-background text-foreground shadow-xs'
++                    : 'text-muted-foreground hover:text-foreground',
++                )}
++              >
++                <Sun className="size-3 text-amber-500" />
++                <span>浅色护眼 (明亮)</span>
++              </button>
++            </div>
++          </div>
++
++          {/* PPT文档主题切换 */}
++          <div className="space-y-1">
++            <div className="flex items-center justify-between">
++              <span className="text-[11px] font-medium text-foreground flex items-center gap-1">
++                <Presentation className="size-3 text-teal-500" />
++                PPT文档主题 (讲义与幻灯片底色)
++              </span>
++              <span className="text-[10px] font-mono text-muted-foreground">
++                {slideTheme === 'light' ? '浅色纯白' : '深色夜间'}
++              </span>
++            </div>
++            <div className="grid grid-cols-2 p-0.5 bg-muted/80 rounded-lg gap-1 border border-border/40">
++              <button
++                type="button"
++                onClick={() => onChangeSlideTheme('light')}
++                className={cn(
++                  'flex items-center justify-center gap-1.5 py-1.5 px-2 rounded-md font-medium transition-all text-xs cursor-pointer',
++                  slideTheme === 'light'
++                    ? 'bg-background text-foreground shadow-xs'
++                    : 'text-muted-foreground hover:text-foreground',
++                )}
++              >
++                <Sun className="size-3 text-amber-500" />
++                <span>浅色讲义 (纯白)</span>
++              </button>
++              <button
++                type="button"
++                onClick={() => onChangeSlideTheme('dark')}
++                className={cn(
++                  'flex items-center justify-center gap-1.5 py-1.5 px-2 rounded-md font-medium transition-all text-xs cursor-pointer',
++                  slideTheme === 'dark'
++                    ? 'bg-background text-foreground shadow-xs'
++                    : 'text-muted-foreground hover:text-foreground',
++                )}
++              >
++                <Moon className="size-3 text-indigo-400" />
++                <span>深色幻灯 (暗夜)</span>
++              </button>
++            </div>
++          </div>
++        </div>
++
++        {/* 说明提示 */}
++        <div className="bg-muted/40 rounded-lg p-2 text-[10px] text-muted-foreground leading-relaxed border border-border/30">
++          💡{' '}
++          {interactiveTheme === 'dark' && slideTheme === 'light' && (
++            <span>
++              <strong>学生探究组合</strong>：仿真实验采用沉浸式暗黑科技风，幻灯片采用白底黑字便于阅读复习。
++            </span>
++          )}
++          {interactiveTheme === 'light' && slideTheme === 'light' && (
++            <span>
++              <strong>课堂讲授组合</strong>：全流程浅色高对比度排版，专为白天大屏投影与多媒体黑板讲授打造。
++            </span>
++          )}
++          {interactiveTheme === 'light' && slideTheme === 'dark' && (
++            <span>
++              <strong>网课直播组合</strong>：深色课件降低屏幕眩光与推流码率，浅色实验画布高亮操作细节。
++            </span>
++          )}
++          {interactiveTheme === 'dark' && slideTheme === 'dark' && (
++            <span>
++              <strong>全暗黑极客</strong>：课件与互动统一采用深邃暗夜科技风，适合计算机与科技前沿演播。
++            </span>
++          )}
++        </div>
++      </PopoverContent>
++    </Popover>
++  );
++}
 diff --git a/components/scene-renderers/classroom-complete.tsx b/components/scene-renderers/classroom-complete.tsx
 index a7dca80c..5e35c158 100644
 --- a/components/scene-renderers/classroom-complete.tsx
@@ -7643,10 +8126,10 @@ index 00000000..502e0168
 +}
 diff --git a/lib/server/batch-generation/runner.ts b/lib/server/batch-generation/runner.ts
 new file mode 100644
-index 00000000..7a9daafd
+index 00000000..09d9f3d4
 --- /dev/null
 +++ b/lib/server/batch-generation/runner.ts
-@@ -0,0 +1,683 @@
+@@ -0,0 +1,687 @@
 +import { promises as fs } from 'fs';
 +import { createLogger } from '@/lib/logger';
 +import { generateClassroom } from '@/lib/server/classroom-generation';
@@ -8039,6 +8522,8 @@ index 00000000..7a9daafd
 +      enableImageGeneration: job.enableImageGeneration,
 +      interactiveMode: job.enableInteractiveMode,
 +      courseScale: job.courseScale,
++      interactiveTheme: job.interactiveTheme,
++      slideTheme: job.slideTheme,
 +    },
 +    {
 +      baseUrl,
@@ -8182,6 +8667,8 @@ index 00000000..7a9daafd
 +          enableImageGeneration: initialJob.enableImageGeneration,
 +          interactiveMode: initialJob.enableInteractiveMode,
 +          courseScale: initialJob.courseScale,
++          interactiveTheme: initialJob.interactiveTheme,
++          slideTheme: initialJob.slideTheme,
 +        },
 +        {
 +          baseUrl,
@@ -8461,11 +8948,12 @@ index 00000000..e275cc08
 +
 diff --git a/lib/server/batch-generation/types.ts b/lib/server/batch-generation/types.ts
 new file mode 100644
-index 00000000..eb4881ce
+index 00000000..2f5b9874
 --- /dev/null
 +++ b/lib/server/batch-generation/types.ts
-@@ -0,0 +1,71 @@
+@@ -0,0 +1,74 @@
 +import type { CourseScale } from '@/lib/types/course-scale';
++import type { InteractiveThemeStyle, SlideThemeStyle } from '@/lib/types/theme-style';
 +
 +export type BatchJobMode = 'single_merged' | 'batch_independent';
 +
@@ -8519,6 +9007,8 @@ index 00000000..eb4881ce
 +  enableImageGeneration: boolean;
 +  enableInteractiveMode?: boolean;
 +  courseScale?: CourseScale;
++  interactiveTheme?: InteractiveThemeStyle;
++  slideTheme?: SlideThemeStyle;
 +  totalTasks: number;
 +  completedTasks: number;
 +  failedTasks: number;
@@ -8537,7 +9027,7 @@ index 00000000..eb4881ce
 +  error?: string;
 +}
 diff --git a/lib/server/classroom-generation.ts b/lib/server/classroom-generation.ts
-index 47e79cc9..9e2d6b73 100644
+index 47e79cc9..03a976e3 100644
 --- a/lib/server/classroom-generation.ts
 +++ b/lib/server/classroom-generation.ts
 @@ -1,6 +1,9 @@
@@ -8563,41 +9053,58 @@ index 47e79cc9..9e2d6b73 100644
  } from '@openmaic/generation';
  import { createSceneWithActions } from '@/lib/server/scene-generation';
  import { generatePBLV2Project } from '@/lib/pbl/v2/agents/planner';
-@@ -44,6 +51,7 @@ import {
+@@ -44,6 +51,12 @@ import {
  } from '@/lib/server/classroom-media-generation';
  import { buildVideoManifestFromOutlines } from '@/lib/media/video-manifest';
  import type { UserRequirements } from '@/lib/types/generation';
 +import { type CourseScale, buildCourseScaleInstruction } from '@/lib/types/course-scale';
++import {
++  type InteractiveThemeStyle,
++  type SlideThemeStyle,
++  buildThemeStyleInstruction,
++} from '@/lib/types/theme-style';
  import type { Scene, Stage } from '@/lib/types/stage';
  import { AGENT_COLOR_PALETTE, AGENT_DEFAULT_AVATARS } from '@/lib/constants/agent-defaults';
  
-@@ -67,6 +75,8 @@ export interface GenerateClassroomInput {
+@@ -67,6 +80,10 @@ export interface GenerateClassroomInput {
    enableVideoGeneration?: boolean;
    enableTTS?: boolean;
    agentMode?: 'default' | 'generate';
 +  interactiveMode?: boolean;
 +  courseScale?: CourseScale;
++  interactiveTheme?: InteractiveThemeStyle;
++  slideTheme?: SlideThemeStyle;
  }
  
  export type ClassroomGenerationStep =
-@@ -488,8 +498,15 @@ export async function generateClassroom(
+@@ -488,8 +505,25 @@ export async function generateClassroom(
      return result.text;
    };
  
 +  const scaleInstruction = buildCourseScaleInstruction(input.courseScale, input.interactiveMode);
-+  const effectiveRequirement = scaleInstruction && !requirement.includes('【课程篇幅与教学结构规范')
-+    ? `${requirement}${scaleInstruction}`
-+    : requirement;
++  const themeInstruction = buildThemeStyleInstruction(
++    input.interactiveTheme ?? 'dark',
++    input.slideTheme ?? 'light',
++  );
++  let effectiveRequirement = requirement;
++  if (scaleInstruction && !requirement.includes('【课程篇幅与教学结构规范')) {
++    effectiveRequirement += scaleInstruction;
++  }
++  if (themeInstruction && !requirement.includes('【界面视觉风格强制规约')) {
++    effectiveRequirement += themeInstruction;
++  }
 +
    const requirements: UserRequirements = {
 -    requirement,
 +    requirement: effectiveRequirement,
 +    ...(input.courseScale ? { courseScale: input.courseScale } : {}),
 +    ...(input.interactiveMode !== undefined ? { interactiveMode: input.interactiveMode } : {}),
++    interactiveTheme: input.interactiveTheme ?? 'dark',
++    slideTheme: input.slideTheme ?? 'light',
    };
    const vocationalActive = resolveVocationalActive(requirements);
    const pdfText = pdfContent?.text || undefined;
-@@ -562,18 +579,149 @@ export async function generateClassroom(
+@@ -562,18 +596,149 @@ export async function generateClassroom(
      scenesGenerated: 0,
    });
  
@@ -8759,7 +9266,7 @@ index 47e79cc9..9e2d6b73 100644
  
    if (!outlinesResult.success || !outlinesResult.data) {
      log.error('Failed to generate outlines:', outlinesResult.error);
-@@ -581,8 +729,11 @@ export async function generateClassroom(
+@@ -581,8 +746,11 @@ export async function generateClassroom(
    }
  
    const { languageDirective, courseTitle, outlines } = outlinesResult.data;
@@ -8772,7 +9279,7 @@ index 47e79cc9..9e2d6b73 100644
    );
  
    await options.onProgress?.({
-@@ -617,6 +768,7 @@ export async function generateClassroom(
+@@ -617,6 +785,7 @@ export async function generateClassroom(
      languageDirective,
      videoManifest: buildVideoManifestFromOutlines(outlines),
      style: 'interactive',
@@ -8780,7 +9287,7 @@ index 47e79cc9..9e2d6b73 100644
      createdAt: Date.now(),
      updatedAt: Date.now(),
      // For LLM-generated agents, embed full configs so the client can
-@@ -652,6 +804,12 @@ export async function generateClassroom(
+@@ -652,6 +821,12 @@ export async function generateClassroom(
      let generatedScenes = 0;
  
      for (const [index, outline] of outlines.entries()) {
@@ -8793,7 +9300,16 @@ index 47e79cc9..9e2d6b73 100644
        const safeOutline = applyOutlineFallbacks(outline, true, {
          allowProceduralSkill: vocationalActive,
        });
-@@ -761,6 +919,12 @@ export async function generateClassroom(
+@@ -693,6 +868,8 @@ export async function generateClassroom(
+                 agents,
+                 languageDirective,
+                 allowProceduralSkill: vocationalActive,
++                interactiveTheme: input.interactiveTheme ?? 'dark',
++                slideTheme: input.slideTheme ?? 'light',
+                 ...(safeOutline.type === 'pbl'
+                   ? {
+                       pblLoopFallback: (input) =>
+@@ -761,6 +938,12 @@ export async function generateClassroom(
  
      // Phase: Media generation (after all scenes generated)
      if (input.enableImageGeneration || input.enableVideoGeneration) {
@@ -10107,27 +10623,154 @@ index 00000000..cc1e82c4
 +  3. 最后一页必须是 type: "slide" 总结页。`;
 +}
 diff --git a/lib/types/generation.ts b/lib/types/generation.ts
-index f3e99e6b..4c6e0e6a 100644
+index f3e99e6b..d28471c7 100644
 --- a/lib/types/generation.ts
 +++ b/lib/types/generation.ts
-@@ -7,6 +7,9 @@
+@@ -7,6 +7,10 @@
  
  import type { ActionType } from './action';
  import type { MediaGenerationRequest } from '@/lib/media/types';
 +import type { CourseScale } from './course-scale';
++import type { InteractiveThemeStyle, SlideThemeStyle } from './theme-style';
 +
-+export type { CourseScale };
++export type { CourseScale, InteractiveThemeStyle, SlideThemeStyle };
  
  // ==================== PDF Image Types ====================
  
-@@ -100,6 +103,7 @@ export interface UploadedDocument {
+@@ -100,6 +104,9 @@ export interface UploadedDocument {
   */
  export interface UserRequirements {
    requirement: string; // Single free-form text for all user input
 +  courseScale?: CourseScale; // Scale / length profile of the course
++  interactiveTheme?: InteractiveThemeStyle; // Interactive scene visual theme
++  slideTheme?: SlideThemeStyle; // Slide presentation visual theme
    userNickname?: string; // Student nickname for personalization
    userBio?: string; // Student background for personalization
    webSearch?: boolean; // Enable web search for richer context
+diff --git a/lib/types/theme-style.ts b/lib/types/theme-style.ts
+new file mode 100644
+index 00000000..3e705fe1
+--- /dev/null
++++ b/lib/types/theme-style.ts
+@@ -0,0 +1,118 @@
++export type InteractiveThemeStyle = 'dark' | 'light';
++export type SlideThemeStyle = 'light' | 'dark';
++
++export interface ThemeStyleConfig {
++  interactiveTheme: InteractiveThemeStyle;
++  slideTheme: SlideThemeStyle;
++}
++
++export const DEFAULT_THEME_STYLE: ThemeStyleConfig = {
++  interactiveTheme: 'dark', // 默认深色科技交互（适合学生探索）
++  slideTheme: 'light',      // 默认浅色文档（适合常规展示）
++};
++
++export interface ThemePresetOption {
++  id: string;
++  name: string;
++  badge: string;
++  description: string;
++  interactiveTheme: InteractiveThemeStyle;
++  slideTheme: SlideThemeStyle;
++}
++
++export const THEME_STYLE_PRESETS: ThemePresetOption[] = [
++  {
++    id: 'student_study',
++    name: '学生自主探究',
++    badge: '深色交互 + 浅色文档',
++    description: '深色沉浸式仿真小游戏，搭配纯白清晰讲义。适合学生上机自学与动手实验。',
++    interactiveTheme: 'dark',
++    slideTheme: 'light',
++  },
++  {
++    id: 'offline_class',
++    name: '线下实体课堂',
++    badge: '浅色交互 + 浅色文档',
++    description: '明亮浅色护眼交互，搭配高清晰纯白幻灯片。适合白天教室大屏与投影仪讲授。',
++    interactiveTheme: 'light',
++    slideTheme: 'light',
++  },
++  {
++    id: 'online_course',
++    name: '线上网课直播',
++    badge: '浅色交互 + 深色文档',
++    description: '深邃暗夜科技风幻灯片，搭配明亮清晰的交互实操。适合夜间或网课屏幕演示。',
++    interactiveTheme: 'light',
++    slideTheme: 'dark',
++  },
++  {
++    id: 'all_dark',
++    name: '极客沉浸暗黑',
++    badge: '深色交互 + 深色文档',
++    description: '全黑客暗黑科技调性，高对比发光强调。适合计算机、极客或暗色演播室。',
++    interactiveTheme: 'dark',
++    slideTheme: 'dark',
++  },
++];
++
++/**
++ * 构造注入给大模型的大纲与场景视觉风格提示词规约
++ */
++export function buildThemeStyleInstruction(
++  interactiveTheme: InteractiveThemeStyle = 'dark',
++  slideTheme: SlideThemeStyle = 'light',
++): string {
++  const parts: string[] = [];
++
++  if (slideTheme === 'dark') {
++    parts.push(`1. 【PPT/讲义文档主题 - 深色科技模式（Dark Slide）】：
++   - 全课所有幻灯片页面（Slide）必须统一采用深色/暗夜背景：JSON 中的 background 必须设置为 {"type": "solid", "color": "#0f172a"}（或 "#111827" 等深邃底色）。
++   - 所有文本元素（标题、正文、列表、卡片等）必须采用高对比度浅色字体，例如 defaultColor 必须设置为 "#f8fafc" 或 "#e2e8f0"，次要文字使用 "#94a3b8"，严禁使用白底黑字。适合夜间或网课高对比度演播。`);
++  } else {
++    parts.push(`1. 【PPT/讲义文档主题 - 浅色明亮模式（Light Slide）】：
++   - 全课所有幻灯片页面（Slide）统一采用纯白/极简明亮背景：JSON 中的 background 必须设置为 {"type": "solid", "color": "#ffffff"}。
++   - 文本采用深色高清晰度排版：defaultColor 设为 "#1e293b" 或 "#333333"，次要文字 "#64748b"，适合白天教学与投影演示。`);
++  }
++
++  if (interactiveTheme === 'light') {
++    parts.push(`2. 【交互场景主题 - 浅色明亮/护眼模式（Light Interactive）】：
++   - 全课所有互动页面（仿真模拟 simulation、闯关游戏 game、交互图表 diagram、3D可视化 visualization3d、代码练习 code、实操 procedural-skill）的 HTML 页面，必须采用明亮、轻快的浅色护眼界面风格。
++   - 页面背景与画布主体统一采用纯白 "#ffffff"、浅暖灰 "#f8fafc" 或淡蓝灰 "#f1f5f9"；
++   - 控件、卡片、侧边栏使用浅色材质与清晰的深色文字（如 "#1e293b"）；
++   - 严禁默认使用黑底、暗黑仪表盘（Dark Dashboard）或太空暗夜背景！必须保证在公开课与课堂大屏投影时清晰、明快、护眼。`);
++  } else {
++    parts.push(`2. 【交互场景主题 - 深色科技/极客模式（Dark Interactive）】：
++   - 全课所有互动页面（仿真模拟 simulation、闯关游戏 game、交互图表 diagram、3D可视化 visualization3d、代码练习 code、实操 procedural-skill）的 HTML 页面，采用沉浸式深色科技主题。
++   - 页面背景与画布采用深色底色（如 "#0a0a1a"、"#0f172a"、"#1e293b"），搭配高对比度白色/发光彩色节点、霓虹轨迹高亮，适合学生个人端自主探索与沉浸式操作。`);
++  }
++
++  return `\n\n【界面视觉风格强制规约】：\n${parts.join('\n')}\n`;
++}
++
++/**
++ * 获取当前主题组合的简短标签与描述
++ */
++export function getThemeStyleSummary(
++  interactiveTheme: InteractiveThemeStyle = 'dark',
++  slideTheme: SlideThemeStyle = 'light',
++): { label: string; badge: string; isPreset: boolean; presetName?: string } {
++  const matched = THEME_STYLE_PRESETS.find(
++    (p) => p.interactiveTheme === interactiveTheme && p.slideTheme === slideTheme,
++  );
++  if (matched) {
++    return {
++      label: matched.name,
++      badge: matched.badge,
++      isPreset: true,
++      presetName: matched.name,
++    };
++  }
++
++  const slideLabel = slideTheme === 'dark' ? '深色讲义' : '浅色讲义';
++  const interactiveLabel = interactiveTheme === 'light' ? '浅色交互' : '深色交互';
++  return {
++    label: `${interactiveLabel} · ${slideLabel}`,
++    badge: `${interactiveLabel} + ${slideLabel}`,
++    isPreset: false,
++  };
++}
 diff --git a/lib/utils/model-config.ts b/lib/utils/model-config.ts
 index 1818c25f..9132d395 100644
 --- a/lib/utils/model-config.ts
@@ -10377,10 +11020,10 @@ index 25b0a801..22e5c187 100644
    } catch (error) {
      log.error('Failed to rename stage:', error);
 diff --git a/packages/@openmaic/generation/src/outline-types.ts b/packages/@openmaic/generation/src/outline-types.ts
-index 673b9d76..50543c36 100644
+index 673b9d76..f4fef3a0 100644
 --- a/packages/@openmaic/generation/src/outline-types.ts
 +++ b/packages/@openmaic/generation/src/outline-types.ts
-@@ -23,6 +23,7 @@ export type ImageMapping = Record<string, string>;
+@@ -23,11 +23,14 @@ export type ImageMapping = Record<string, string>;
  /** Free-form requirements accepted by outline generation. */
  export interface UserRequirements {
    requirement: string;
@@ -10388,6 +11031,191 @@ index 673b9d76..50543c36 100644
    userNickname?: string;
    userBio?: string;
    webSearch?: boolean;
+   interactiveMode?: boolean;
+   taskEngineMode?: boolean;
++  interactiveTheme?: 'dark' | 'light';
++  slideTheme?: 'light' | 'dark';
+ }
+ 
+ export interface WidgetOutline {
+diff --git a/packages/@openmaic/generation/src/scene-generator.ts b/packages/@openmaic/generation/src/scene-generator.ts
+index 36c089de..6b3c8645 100644
+--- a/packages/@openmaic/generation/src/scene-generator.ts
++++ b/packages/@openmaic/generation/src/scene-generator.ts
+@@ -113,6 +113,8 @@ export interface SceneContentOptions {
+    * Only consumed by the slide branch alongside `editDirective`.
+    */
+   baselineContent?: GeneratedSlideContent;
++  interactiveTheme?: 'dark' | 'light';
++  slideTheme?: 'light' | 'dark';
+   /** Optional host fallback for the app-only loop planner. */
+   pblLoopFallback?: (input: PBLPlannerV2Input) => Promise<PBLProject>;
+   onFailure?: (failure: SceneContentFailure) => void;
+@@ -250,6 +252,8 @@ export async function generateSceneContent(
+     allowProceduralSkill = false,
+     editDirective,
+     baselineContent,
++    interactiveTheme = userRequirements?.interactiveTheme ?? 'dark',
++    slideTheme = userRequirements?.slideTheme ?? 'light',
+   } = options;
+ 
+   // Unified path for interactive scenes (both normal and ultra mode)
+@@ -275,6 +279,7 @@ export async function generateSceneContent(
+     // Route to widget generation (handles all 5 types)
+     return generateWidgetContent(outline, aiCall, languageDirective, {
+       allowProceduralSkill,
++      interactiveTheme,
+       logger: log,
+       onFailure: options.onFailure,
+     });
+@@ -296,6 +301,7 @@ export async function generateSceneContent(
+         baselineContent,
+         log,
+         options.onFailure,
++        slideTheme,
+       );
+     case 'quiz':
+       return generateQuizContent(outline, aiCall, languageDirective, log, options.onFailure);
+@@ -614,6 +620,7 @@ async function generateSlideContent(
+   baselineContent?: GeneratedSlideContent,
+   log: GenerationLogger = noopGenerationLogger,
+   onFailure?: (failure: SceneContentFailure) => void,
++  slideTheme: 'light' | 'dark' = 'light',
+ ): Promise<GeneratedSlideContent | null> {
+   // Build assigned images description for the prompt
+   let assignedImagesText = '无可用图片，禁止插入任何 image 元素';
+@@ -772,6 +779,18 @@ async function generateSlideContent(
+       `Return the full updated slide content in the same schema.`;
+   }
+ 
++  if (slideTheme === 'dark') {
++    userPrompt += `\n\n## VISUAL THEME: DARK SLIDE (Mandatory)
++- Slide background MUST be dark: set JSON root "background": {"type": "solid", "color": "#0f172a"} (or dark slate/navy like "#111827", "#0a0f1d").
++- All text elements (titles, content, lists, card text) MUST use high-contrast light colors: set defaultColor to "#f8fafc" or "#e2e8f0" (secondary text "#94a3b8"). Do NOT use dark/black text.
++- Container/card shapes (if any) should use dark translucent or elevated backgrounds (e.g., "#1e293b" with subtle borders like "#334155").`;
++  } else {
++    userPrompt += `\n\n## VISUAL THEME: LIGHT SLIDE (Mandatory)
++- Slide background MUST be clean white: set JSON root "background": {"type": "solid", "color": "#ffffff"}.
++- Text elements MUST use clear dark colors: defaultColor "#1e293b" or "#333333" (secondary text "#64748b").
++- Container/card shapes (if any) should use light gray/pastel backgrounds (e.g., "#f8fafc", "#f1f5f9").`;
++  }
++
+   const response = await aiCall(prompts.system, userPrompt, visionImages);
+   const generatedData = parseJsonResponse<GeneratedSlideData>(response);
+ 
+@@ -842,6 +861,13 @@ async function generateSlideContent(
+     }
+   }
+ 
++  if (!background) {
++    background = {
++      type: 'solid',
++      color: slideTheme === 'dark' ? '#0f172a' : '#ffffff',
++    };
++  }
++
+   return {
+     elements: processedElements,
+     background,
+@@ -1207,11 +1233,13 @@ export async function generateWidgetContent(
+   languageDirective?: string,
+   options: {
+     allowProceduralSkill?: boolean;
++    interactiveTheme?: 'dark' | 'light';
+     logger?: GenerationLogger;
+     onFailure?: (failure: SceneContentFailure) => void;
+   } = {},
+ ): Promise<GeneratedInteractiveContent | null> {
+   const log = options.logger ?? noopGenerationLogger;
++  const interactiveTheme = options.interactiveTheme ?? 'dark';
+   const widgetType = outline.widgetType;
+   const widgetOutline = outline.widgetOutline;
+ 
+@@ -1232,7 +1260,10 @@ export async function generateWidgetContent(
+         conceptOverview: outline.description,
+         keyPoints: (outline.keyPoints || []).join('\n'),
+         variables: widgetOutline.keyVariables?.join(', ') || '',
+-        designIdea: '',
++        designIdea:
++          interactiveTheme === 'light'
++            ? 'Bright daylight educational lab aesthetic with clean white/light gray background (#f8fafc), crisp dark typography (#1e293b), and vibrant interactive controls'
++            : 'Dark immersive tech laboratory aesthetic with dark slate background and glowing neon accents',
+         languageDirective: languageDirective || '',
+       };
+       break;
+@@ -1325,8 +1356,27 @@ export async function generateWidgetContent(
+     return null;
+   }
+ 
+-  log.info(`Generating ${widgetType} widget for: ${outline.title}`);
+-  const response = await aiCall(prompts.system, prompts.user);
++  let userPrompt = prompts.user;
++  if (interactiveTheme === 'light') {
++    userPrompt += `\n\n## VISUAL THEME: LIGHT / BRIGHT THEME (CRITICAL MANDATORY REQUIREMENT)
++- The entire interactive widget UI MUST use a clean, modern, eye-friendly LIGHT theme (NOT dark!).
++- Body & Canvas Background: Must be pure white ("#ffffff"), clean light gray ("#f8fafc"), or soft light tint ("#f1f5f9"). DO NOT use black, dark slate ("#0a0a1a", "#0f172a"), or dark dashboards.
++- Text & Headings: Must use clear, readable dark colors (e.g., "#1e293b", "#0f172a", "#334155"). Secondary text: "#64748b".
++- Panels & Cards: Use white background ("#ffffff") with crisp subtle borders (border: 1px solid "#e2e8f0"), soft modern shadows, and rounded corners.
++- Controls & Buttons: Clean modern light UI buttons (e.g. primary button with vivid blue "#2563eb" / "#3b82f6" and white text; secondary button with white background "#ffffff", border "#cbd5e1", and dark text "#334155").
++- Charts/Nodes/Graphs/Canvas Elements: Nodes and diagrams must have light backgrounds with dark text, distinct outlines, and bright pastel or vibrant accent colors.
++- Perfect for daytime classroom projector displays and light educational portals.`;
++  } else {
++    userPrompt += `\n\n## VISUAL THEME: DARK / CYBER THEME (MANDATORY REQUIREMENT)
++- The interactive widget UI MUST use an immersive, modern DARK theme.
++- Body & Canvas Background: Deep dark tech background ("#0f172a", "#0a0a1a", or "#1e293b").
++- Text: High-contrast white/light text ("#f8fafc", "#e2e8f0").
++- Panels & Controls: Dark glassmorphism or elevated dark slate surfaces with glowing or vivid accent colors.
++- Perfect for student self-directed exploration and immersive experiments.`;
++  }
++
++  log.info(`Generating ${widgetType} widget for: ${outline.title} (${interactiveTheme} theme)`);
++  const response = await aiCall(prompts.system, userPrompt);
+   const html = extractHtml(response, log);
+ 
+   if (!html) {
+diff --git a/packages/@openmaic/generation/test/__snapshots__/scene-prompt-golden.test.ts.snap b/packages/@openmaic/generation/test/__snapshots__/scene-prompt-golden.test.ts.snap
+index a40ed38f..c3ed4af6 100644
+--- a/packages/@openmaic/generation/test/__snapshots__/scene-prompt-golden.test.ts.snap
++++ b/packages/@openmaic/generation/test/__snapshots__/scene-prompt-golden.test.ts.snap
+@@ -395,7 +395,7 @@ energy
+ 
+ ## Design Idea
+ 
+-
++Dark immersive tech laboratory aesthetic with dark slate background and glowing neon accents
+ 
+ ## Language
+ 
+@@ -442,7 +442,14 @@ Generate a complete, interactive HTML simulation with these MANDATORY features:
+ 1. Show current simulation state (running/paused/ended)
+ 2. Animate transitions
+ 3. Clear feedback when simulation ends
+-4. High contrast colors for visibility",
++4. High contrast colors for visibility
++
++## VISUAL THEME: DARK / CYBER THEME (MANDATORY REQUIREMENT)
++- The interactive widget UI MUST use an immersive, modern DARK theme.
++- Body & Canvas Background: Deep dark tech background ("#0f172a", "#0a0a1a", or "#1e293b").
++- Text: High-contrast white/light text ("#f8fafc", "#e2e8f0").
++- Panels & Controls: Dark glassmorphism or elevated dark slate surfaces with glowing or vivid accent colors.
++- Perfect for student self-directed exploration and immersive experiments.",
+   },
+   "pbl": {
+     "system": "You are the Planner of a Project-Based Learning (PBL) course module on the OpenMAIC platform.
+@@ -1740,7 +1747,12 @@ Teach in English.
+ 5. All TextElement \`height\` values must be selected from the quick reference table in the system prompt
+ 
+ **Output Structure Example**:
+-{"background":{"type":"solid","color":"#ffffff"},"elements":[{"id":"title_001","type":"text","left":60,"top":50,"width":880,"height":76,"content":"<p style=\\"font-size:32px;\\"><strong>Title Content</strong></p>","defaultFontName":"","defaultColor":"#333333"},{"id":"content_001","type":"text","left":60,"top":150,"width":880,"height":130,"content":"<p style=\\"font-size:18px;\\">• Point One</p><p style=\\"font-size:18px;\\">• Point Two</p><p style=\\"font-size:18px;\\">• Point Three</p>","defaultFontName":"","defaultColor":"#333333"}]}",
++{"background":{"type":"solid","color":"#ffffff"},"elements":[{"id":"title_001","type":"text","left":60,"top":50,"width":880,"height":76,"content":"<p style=\\"font-size:32px;\\"><strong>Title Content</strong></p>","defaultFontName":"","defaultColor":"#333333"},{"id":"content_001","type":"text","left":60,"top":150,"width":880,"height":130,"content":"<p style=\\"font-size:18px;\\">• Point One</p><p style=\\"font-size:18px;\\">• Point Two</p><p style=\\"font-size:18px;\\">• Point Three</p>","defaultFontName":"","defaultColor":"#333333"}]}
++
++## VISUAL THEME: LIGHT SLIDE (Mandatory)
++- Slide background MUST be clean white: set JSON root "background": {"type": "solid", "color": "#ffffff"}.
++- Text elements MUST use clear dark colors: defaultColor "#1e293b" or "#333333" (secondary text "#64748b").
++- Container/card shapes (if any) should use light gray/pastel backgrounds (e.g., "#f8fafc", "#f1f5f9").",
+   },
+ }
+ `;
 diff --git a/pro-workbench-guide/README.md b/pro-workbench-guide/README.md
 new file mode 100644
 index 00000000..9b94d133

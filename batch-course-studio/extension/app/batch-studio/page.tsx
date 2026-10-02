@@ -25,6 +25,12 @@ import {
   Target,
   BookOpen,
   Gamepad2,
+  Palette,
+  Sun,
+  Moon,
+  MonitorPlay,
+  Presentation,
+  SlidersHorizontal,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
@@ -34,6 +40,12 @@ import { Switch } from '@/components/ui/switch';
 import { toast } from 'sonner';
 import type { BatchJob, BatchJobMode, BatchSubTask } from '@/lib/server/batch-generation/types';
 import { type CourseScale, COURSE_SCALES } from '@/lib/types/course-scale';
+import {
+  type InteractiveThemeStyle,
+  type SlideThemeStyle,
+  THEME_STYLE_PRESETS,
+  getThemeStyleSummary,
+} from '@/lib/types/theme-style';
 
 export const DEFAULT_PEDAGOGICAL_PROMPT = `# 教学角色与目标
 你是一位顶尖的“交互式课程设计师兼智能体教学专家”，深度掌握 OpenMAIC 的多智能体协作与动态课件生成能力。请根据上传的课件内容，设计一堂高参与度、高互动性的优质沉浸式交互微课。
@@ -60,6 +72,8 @@ export default function BatchStudioPage() {
   const [enableImageGeneration, setEnableImageGeneration] = useState<boolean>(true);
   const [enableInteractiveMode, setEnableInteractiveMode] = useState<boolean>(false);
   const [courseScale, setCourseScale] = useState<CourseScale>('standard');
+  const [interactiveTheme, setInteractiveTheme] = useState<InteractiveThemeStyle>('dark');
+  const [slideTheme, setSlideTheme] = useState<SlideThemeStyle>('light');
 
   const [submitting, setSubmitting] = useState<boolean>(false);
   const [cancellingJob, setCancellingJob] = useState<boolean>(false);
@@ -117,6 +131,8 @@ export default function BatchStudioPage() {
     formData.append('enableImageGeneration', enableImageGeneration ? 'true' : 'false');
     formData.append('enableInteractiveMode', enableInteractiveMode ? 'true' : 'false');
     formData.append('courseScale', courseScale);
+    formData.append('interactiveTheme', interactiveTheme);
+    formData.append('slideTheme', slideTheme);
 
     try {
       const res = await fetch('/api/batch-generate', {
@@ -609,6 +625,135 @@ export default function BatchStudioPage() {
               </div>
             </div>
 
+            {/* 视觉风格定制（交互深浅主题 & PPT深浅风格） */}
+            <div className="space-y-3 p-4 rounded-xl border border-slate-200 dark:border-slate-800 bg-white/70 dark:bg-slate-900/60">
+              <div className="flex items-center justify-between">
+                <label className="text-sm font-medium text-slate-700 dark:text-slate-300 flex items-center gap-1.5">
+                  <Palette className="w-4 h-4 text-indigo-500" />
+                  课件视觉风格与交互主题定制
+                </label>
+                <span className="text-xs text-slate-500 dark:text-slate-400 font-normal">
+                  根据授课环境（线下投影、线上网课或自主学习）自由搭配
+                </span>
+              </div>
+
+              {/* 4 大场景预设卡片 */}
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
+                {THEME_STYLE_PRESETS.map((preset) => {
+                  const isSelected =
+                    interactiveTheme === preset.interactiveTheme && slideTheme === preset.slideTheme;
+                  return (
+                    <div
+                      key={preset.id}
+                      onClick={() => {
+                        setInteractiveTheme(preset.interactiveTheme);
+                        setSlideTheme(preset.slideTheme);
+                      }}
+                      className={`cursor-pointer p-2.5 rounded-lg border text-left transition-all relative ${
+                        isSelected
+                          ? 'border-indigo-500 bg-indigo-50/70 dark:bg-indigo-950/40 shadow-xs ring-1 ring-indigo-500/40'
+                          : 'border-slate-200 dark:border-slate-800 bg-slate-50/50 dark:bg-slate-800/40 hover:border-slate-300 dark:hover:border-slate-700'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between gap-1 mb-0.5">
+                        <span className="font-semibold text-xs text-slate-800 dark:text-slate-200">
+                          {preset.name}
+                        </span>
+                        {isSelected && <Check className="w-3.5 h-3.5 text-indigo-600 dark:text-indigo-400" />}
+                      </div>
+                      <div className="text-[10px] font-mono text-indigo-600 dark:text-indigo-400 font-medium">
+                        {preset.badge}
+                      </div>
+                      <p className="text-[10px] text-slate-500 dark:text-slate-400 mt-1 leading-snug line-clamp-2">
+                        {preset.description}
+                      </p>
+                    </div>
+                  );
+                })}
+              </div>
+
+              {/* 独立双开关调节 */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-2 border-t border-slate-100 dark:border-slate-800">
+                {/* 交互主题独立切换 */}
+                <div className="p-2.5 rounded-lg bg-slate-50 dark:bg-slate-800/50 border border-slate-200/60 dark:border-slate-700/60 space-y-1.5">
+                  <div className="flex items-center justify-between text-xs">
+                    <span className="font-semibold text-slate-700 dark:text-slate-300 flex items-center gap-1.5">
+                      <MonitorPlay className="w-3.5 h-3.5 text-blue-500" />
+                      交互场景主题 (仿真/游戏/图表/3D)
+                    </span>
+                    <span className="text-[10px] font-mono text-slate-500">
+                      {interactiveTheme === 'dark' ? '深色科技' : '浅色明亮'}
+                    </span>
+                  </div>
+                  <div className="grid grid-cols-2 gap-1.5 p-0.5 bg-slate-200/60 dark:bg-slate-900 rounded-md">
+                    <button
+                      type="button"
+                      onClick={() => setInteractiveTheme('dark')}
+                      className={`flex items-center justify-center gap-1.5 py-1 px-2 rounded text-xs font-medium transition-all ${
+                        interactiveTheme === 'dark'
+                          ? 'bg-white dark:bg-slate-800 text-slate-900 dark:text-white shadow-xs'
+                          : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
+                      }`}
+                    >
+                      <Moon className="w-3 h-3 text-indigo-400" />
+                      深色科技 (暗黑)
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setInteractiveTheme('light')}
+                      className={`flex items-center justify-center gap-1.5 py-1 px-2 rounded text-xs font-medium transition-all ${
+                        interactiveTheme === 'light'
+                          ? 'bg-white dark:bg-slate-800 text-slate-900 dark:text-white shadow-xs'
+                          : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
+                      }`}
+                    >
+                      <Sun className="w-3 h-3 text-amber-500" />
+                      浅色护眼 (明亮)
+                    </button>
+                  </div>
+                </div>
+
+                {/* PPT文档主题独立切换 */}
+                <div className="p-2.5 rounded-lg bg-slate-50 dark:bg-slate-800/50 border border-slate-200/60 dark:border-slate-700/60 space-y-1.5">
+                  <div className="flex items-center justify-between text-xs">
+                    <span className="font-semibold text-slate-700 dark:text-slate-300 flex items-center gap-1.5">
+                      <Presentation className="w-3.5 h-3.5 text-teal-500" />
+                      PPT幻灯片主题 (讲义文档底色)
+                    </span>
+                    <span className="text-[10px] font-mono text-slate-500">
+                      {slideTheme === 'light' ? '浅色纯白' : '深色夜间'}
+                    </span>
+                  </div>
+                  <div className="grid grid-cols-2 gap-1.5 p-0.5 bg-slate-200/60 dark:bg-slate-900 rounded-md">
+                    <button
+                      type="button"
+                      onClick={() => setSlideTheme('light')}
+                      className={`flex items-center justify-center gap-1.5 py-1 px-2 rounded text-xs font-medium transition-all ${
+                        slideTheme === 'light'
+                          ? 'bg-white dark:bg-slate-800 text-slate-900 dark:text-white shadow-xs'
+                          : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
+                      }`}
+                    >
+                      <Sun className="w-3 h-3 text-amber-500" />
+                      浅色讲义 (纯白)
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setSlideTheme('dark')}
+                      className={`flex items-center justify-center gap-1.5 py-1 px-2 rounded text-xs font-medium transition-all ${
+                        slideTheme === 'dark'
+                          ? 'bg-white dark:bg-slate-800 text-slate-900 dark:text-white shadow-xs'
+                          : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
+                      }`}
+                    >
+                      <Moon className="w-3 h-3 text-indigo-400" />
+                      深色幻灯 (暗夜)
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+
             {/* 附加功能开关（包含深度交互、TTS、配图） */}
             <div className="p-4 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-100/70 dark:bg-slate-900/80 space-y-3">
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 text-xs">
@@ -747,6 +892,19 @@ export default function BatchStudioPage() {
                         >
                           {COURSE_SCALES[currentJob.courseScale]?.label || currentJob.courseScale} (
                           {COURSE_SCALES[currentJob.courseScale]?.badge || ''})
+                        </Badge>
+                      )}
+                      {(currentJob.interactiveTheme || currentJob.slideTheme) && (
+                        <Badge
+                          variant="outline"
+                          className="border-indigo-500/40 text-indigo-600 dark:text-indigo-400 bg-indigo-500/10"
+                        >
+                          {
+                            getThemeStyleSummary(
+                              currentJob.interactiveTheme || 'dark',
+                              currentJob.slideTheme || 'light',
+                            ).badge
+                          }
                         </Badge>
                       )}
                     </div>
