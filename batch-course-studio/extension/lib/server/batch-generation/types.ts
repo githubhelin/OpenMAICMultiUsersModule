@@ -44,6 +44,8 @@ export interface BatchJob {
   ownerId: string;
   mode: BatchJobMode;
   status: BatchJobStatus;
+  baseUrl?: string;
+  queuePosition?: number;
   title: string;
   requirement: string;
   enableTTS: boolean;

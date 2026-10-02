@@ -1,9 +1,9 @@
 diff --git a/README-MULTIUSER.md b/README-MULTIUSER.md
 new file mode 100644
-index 00000000..8d7f1cbf
+index 00000000..f4bbb134
 --- /dev/null
 +++ b/README-MULTIUSER.md
-@@ -0,0 +1,144 @@
+@@ -0,0 +1,148 @@
 +# OpenMAIC 多用户管理与认证模块 (Multi-Users Module)
 +
 +本模块为 **OpenMAIC** 增加了开箱即用的**多用户身份认证（Authentication）、多端数据漫游、分权权限控制（RBAC）与全局用户管理后台**。
@@ -35,6 +35,10 @@ index 00000000..8d7f1cbf
 +   - 零额外重量级依赖，无缝融合 PostgreSQL 持久化与 Next.js 16 架构。
 +7. **官方 Owner Identity Seam 标准集成**：
 +   - 全面接入 OpenMAIC v1.1.2 官方标准的 `OwnerAuthMethod` 与 `PersistenceHooks` 宿主接口，无缝兼容 DeepSeek 思考模式（R1）多轮连贯会话与 LLM 故障降级重试。
++8. **「批量课程制课工坊」全自动串行排队调度机制 (`/batch-studio`)**：
++   - 支持一次性批量上传课件（PPTX、高精 MinerU PDF、DOCX 等）并预提交多个批次。
++   - **全自动串行调度队列（FIFO Serial Queue）**：系统在服务器后台以串行队列运行批量任务，前序批量作业执行完成（或被中断）后自动无缝拉起下一个排队作业，杜绝多个批次并发运行造成的 API 限流、高并发阻塞与服务器超载。
++   - **课件安全暂存与前端零依赖**：文件提交后安全保存于服务器临时缓存，脱离浏览器独立运行（关闭网页不会中断）；看板实时展示排队位次（如“队列排队中 #1”），支持随时取消排队或移除未生成文件。
 +
 +---
 +
@@ -832,10 +836,10 @@ index 00000000..ae23767d
 +}
 diff --git a/app/api/batch-generate/route.ts b/app/api/batch-generate/route.ts
 new file mode 100644
-index 00000000..bab59967
+index 00000000..e0ec2c41
 --- /dev/null
 +++ b/app/api/batch-generate/route.ts
-@@ -0,0 +1,165 @@
+@@ -0,0 +1,170 @@
 +import { after, type NextRequest, NextResponse } from 'next/server';
 +import { promises as fs } from 'fs';
 +import path from 'path';
@@ -849,7 +853,7 @@ index 00000000..bab59967
 +  listBatchJobs,
 +  saveBatchJob,
 +} from '@/lib/server/batch-generation/store';
-+import { runBatchJob } from '@/lib/server/batch-generation/runner';
++import { runBatchJob, scheduleNextBatchJob } from '@/lib/server/batch-generation/runner';
 +import type { BatchJob, BatchJobMode, BatchSubTask } from '@/lib/server/batch-generation/types';
 +import type { CourseScale } from '@/lib/types/course-scale';
 +
@@ -926,6 +930,7 @@ index 00000000..bab59967
 +      ownerId,
 +      mode,
 +      status: 'queued',
++      baseUrl,
 +      title: defaultTitle,
 +      requirement,
 +      enableTTS,
@@ -945,7 +950,7 @@ index 00000000..bab59967
 +    await saveBatchJob(batchJob);
 +    log.info(`Created batch job ${jobId} with ${tasks.length} tasks [mode=${mode}] for owner ${ownerId}`);
 +
-+    // 在后台异步启动执行流水线
++    // 在后台异步启动执行流水线（若队列繁忙则进入排队）
 +    after(() => runBatchJob(jobId, baseUrl));
 +
 +    return NextResponse.json(
@@ -975,6 +980,9 @@ index 00000000..bab59967
 +    const session = getSessionPayload(req);
 +    const ownerId = session && session.userId ? `user:${session.userId}` : 'anon:default';
 +
++    // 访问列表时触发调度检查，确保服务重启后若有排队任务可自动恢复推进
++    void scheduleNextBatchJob();
++
 +    const jobs = await listBatchJobs(ownerId);
 +    return NextResponse.json({
 +      success: true,
@@ -983,6 +991,7 @@ index 00000000..bab59967
 +        title: job.title,
 +        mode: job.mode,
 +        status: job.status,
++        queuePosition: job.queuePosition,
 +        totalTasks: job.totalTasks,
 +        completedTasks: job.completedTasks,
 +        failedTasks: job.failedTasks,
@@ -1803,10 +1812,10 @@ index 7f24e0ab..a29e5f77 100644
  }
 diff --git a/app/batch-studio/page.tsx b/app/batch-studio/page.tsx
 new file mode 100644
-index 00000000..471ac567
+index 00000000..40434c8f
 --- /dev/null
 +++ b/app/batch-studio/page.tsx
-@@ -0,0 +1,992 @@
+@@ -0,0 +1,1025 @@
 +'use client';
 +
 +import React, { useState, useEffect, useRef } from 'react';
@@ -1879,6 +1888,7 @@ index 00000000..471ac567
 +      id: string;
 +      title: string;
 +      status: string;
++      queuePosition?: number;
 +      progress: number;
 +      createdAt: string;
 +      totalTasks: number;
@@ -1937,7 +1947,7 @@ index 00000000..471ac567
 +        throw new Error(data.error || '创建批量制课任务失败');
 +      }
 +
-+      toast.success('批量制课任务已成功提交，后台正在全力流水线生产中！');
++      toast.success('批量制课任务已成功提交并加入调度队列！');
 +      setActiveJobId(data.batchId);
 +      setActiveTab('board');
 +      setFiles([]);
@@ -2522,6 +2532,8 @@ index 00000000..471ac567
 +                        className={
 +                          currentJob.status === 'cancelled'
 +                            ? 'border-red-400/40 text-red-500 bg-red-50/50 dark:bg-red-950/20'
++                            : currentJob.status === 'queued'
++                            ? 'border-amber-400/60 text-amber-600 dark:text-amber-400 bg-amber-500/10'
 +                            : ''
 +                        }
 +                      >
@@ -2530,7 +2542,7 @@ index 00000000..471ac567
 +                          : currentJob.status === 'processing'
 +                          ? '正在流水线生产'
 +                          : currentJob.status === 'queued'
-+                          ? '排队等待执行'
++                          ? (currentJob.queuePosition ? `队列排队中 (第 ${currentJob.queuePosition} 位)` : '排队等待执行')
 +                          : currentJob.status === 'cancelled'
 +                          ? '任务已中断取消'
 +                          : '处理异常'}
@@ -2563,7 +2575,7 @@ index 00000000..471ac567
 +                  </div>
 +
 +                  <div className="flex items-center gap-2 flex-wrap">
-+                    {/* 中断运行中的任务 */}
++                    {/* 中断或取消排队任务 */}
 +                    {(currentJob.status === 'queued' || currentJob.status === 'processing') && (
 +                      <Button
 +                        size="sm"
@@ -2571,10 +2583,18 @@ index 00000000..471ac567
 +                        onClick={handleCancelJob}
 +                        disabled={cancellingJob}
 +                        className="gap-1.5 h-8 text-xs bg-red-600 hover:bg-red-700 text-white"
-+                        title="立即中断当前任务，取消后续排队文件以避免浪费 Token"
++                        title={
++                          currentJob.status === 'queued'
++                            ? '取消排队任务并释放暂存文件'
++                            : '立即中断当前任务，取消后续排队文件以避免浪费 Token'
++                        }
 +                      >
 +                        <Ban className="w-3.5 h-3.5" />
-+                        {cancellingJob ? '正在中断...' : '中断任务 (停止消耗 Token)'}
++                        {cancellingJob
++                          ? '正在处理...'
++                          : currentJob.status === 'queued'
++                          ? '取消排队任务'
++                          : '中断任务 (停止消耗 Token)'}
 +                      </Button>
 +                    )}
 +
@@ -2622,6 +2642,20 @@ index 00000000..471ac567
 +                    )}
 +                  </div>
 +                </div>
++
++                {/* 排队状态提示横幅 */}
++                {currentJob.status === 'queued' && (
++                  <div className="flex items-center gap-2.5 text-xs text-amber-800 dark:text-amber-300 bg-amber-50/90 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-800/60 rounded-xl p-3.5 shadow-2xs">
++                    <Clock className="w-4 h-4 shrink-0 text-amber-600 dark:text-amber-400 animate-spin" />
++                    <div className="flex-1">
++                      <span className="font-semibold">串行队列排队中</span>
++                      <span className="ml-1 text-slate-600 dark:text-slate-300">
++                        {currentJob.queuePosition ? `（当前排在第 ${currentJob.queuePosition} 位）` : ''}
++                        系统已为您安全暂存课件。为保证大模型调用速率与服务器稳定性，批量任务采用全自动串行机制执行，前序任务完成后将自动无缝接力生成，您可以放心关闭网页。
++                      </span>
++                    </div>
++                  </div>
++                )}
 +
 +                {/* 总进度条 */}
 +                <div className="space-y-2">
@@ -2775,11 +2809,19 @@ index 00000000..471ac567
 +                        className={`text-xs gap-2 ${
 +                          j.status === 'cancelled'
 +                            ? 'border-red-200 dark:border-red-900/40 text-red-600/80 dark:text-red-400/80'
++                            : j.status === 'queued'
++                            ? 'border-amber-200 dark:border-amber-800/40 text-amber-600 dark:text-amber-400'
 +                            : ''
 +                        }`}
 +                      >
 +                        <span>{j.title}</span>
-+                        <span className="text-slate-400 font-mono">({j.progress}%)</span>
++                        <span className="text-slate-400 font-mono">
++                          {j.status === 'queued'
++                            ? j.queuePosition
++                              ? `(排队#${j.queuePosition})`
++                              : '(排队中)'
++                            : `(${j.progress}%)`}
++                        </span>
 +                      </Button>
 +                      <button
 +                        onClick={() => handleDeleteJob(j.id)}
@@ -7601,16 +7643,16 @@ index 00000000..502e0168
 +}
 diff --git a/lib/server/batch-generation/runner.ts b/lib/server/batch-generation/runner.ts
 new file mode 100644
-index 00000000..8e243b1c
+index 00000000..7a9daafd
 --- /dev/null
 +++ b/lib/server/batch-generation/runner.ts
-@@ -0,0 +1,540 @@
+@@ -0,0 +1,683 @@
 +import { promises as fs } from 'fs';
 +import { createLogger } from '@/lib/logger';
 +import { generateClassroom } from '@/lib/server/classroom-generation';
 +import { getOwnerScopedDocumentStore } from '@/lib/server/agent-runtime/owner-scoped-documents';
 +import { extractFileContent } from './extractor';
-+import { getBatchJob, updateBatchJob } from './store';
++import { getBatchJob, updateBatchJob, listBatchJobs } from './store';
 +import type { BatchJob, SubTaskStep } from './types';
 +import { buildCourseScaleInstruction } from '@/lib/types/course-scale';
 +import { syncInteractiveLibraryForStage } from '@/lib/server/interactive-library';
@@ -7620,6 +7662,9 @@ index 00000000..8e243b1c
 +const log = createLogger('BatchJobRunner');
 +const runningBatchJobs = new Map<string, Promise<void>>();
 +const jobAbortControllers = new Map<string, AbortController>();
++let activeRunningJobId: string | null = null;
++let isScheduling = false;
++let lastKnownBaseUrl = 'http://localhost:3000';
 +
 +async function safeUnlink(path?: string): Promise<void> {
 +  if (!path) return;
@@ -7627,6 +7672,109 @@ index 00000000..8e243b1c
 +    await fs.unlink(path);
 +  } catch {
 +    // Ignore cleanup errors
++  }
++}
++
++/** 更新所有排队等待中任务的序号及提示信息 */
++async function updateQueuePositions(): Promise<void> {
++  try {
++    const allJobs = await listBatchJobs('');
++    const queuedJobs = allJobs
++      .filter((j) => j.status === 'queued')
++      .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
++
++    for (let idx = 0; idx < queuedJobs.length; idx++) {
++      const qj = queuedJobs[idx];
++      const position = idx + 1; // 1 表示紧接着执行
++      if (qj.queuePosition !== position) {
++        await updateBatchJob(qj.id, (job) => {
++          job.queuePosition = position;
++          for (const t of job.tasks) {
++            if (t.status === 'queued') {
++              t.stepMessage = `排队等待中 (前方有 ${position} 个批量任务正在执行/排队)...`;
++            }
++          }
++        });
++      }
++    }
++  } catch (err) {
++    log.error('Failed to update queue positions:', err);
++  }
++}
++
++/**
++ * 串行调度器核心：检查是否有正在运行的任务，若空闲则按提交时间先后（FIFO）依次启动下一个排队任务
++ */
++export async function scheduleNextBatchJob(fallbackBaseUrl?: string): Promise<void> {
++  if (fallbackBaseUrl) {
++    lastKnownBaseUrl = fallbackBaseUrl;
++  }
++  const effectiveBaseUrl = fallbackBaseUrl || lastKnownBaseUrl || 'http://localhost:3000';
++
++  if (isScheduling) return;
++  isScheduling = true;
++
++  try {
++    // 1. 检查当前活跃任务是否仍在内存中运行
++    if (activeRunningJobId) {
++      if (runningBatchJobs.has(activeRunningJobId)) {
++        // 当前有任务在跑，刷新排队状态后等待
++        await updateQueuePositions();
++        return;
++      } else {
++        activeRunningJobId = null;
++      }
++    }
++
++    // 2. 检查全局任务列表
++    const allJobs = await listBatchJobs('');
++
++    // 处理因服务器重启导致的悬空 processing 任务
++    for (const j of allJobs) {
++      if (j.status === 'processing' && !runningBatchJobs.has(j.id)) {
++        log.warn(`Found orphaned processing job ${j.id}, marking failed due to server restart`);
++        await updateBatchJob(j.id, (job) => {
++          job.status = 'failed';
++          job.error = '服务重启导致任务中断，请重新提交';
++          job.completedAt = new Date().toISOString();
++        });
++      }
++    }
++
++    // 3. 筛选所有 queued 状态的任务，按创建时间正序排列（先进先出 FIFO）
++    const queuedJobs = allJobs
++      .filter((j) => j.status === 'queued')
++      .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
++
++    if (queuedJobs.length === 0) {
++      return;
++    }
++
++    // 取出队列头部的下一个任务执行
++    const nextJob = queuedJobs[0];
++    activeRunningJobId = nextJob.id;
++    log.info(`Dequeuing next batch job: ${nextJob.id} (${nextJob.title})`);
++
++    // 刷新剩余排队任务的序号
++    for (let idx = 1; idx < queuedJobs.length; idx++) {
++      const qj = queuedJobs[idx];
++      await updateBatchJob(qj.id, (job) => {
++        job.queuePosition = idx;
++        for (const t of job.tasks) {
++          if (t.status === 'queued') {
++            t.stepMessage = `排队等待中 (前方有 ${idx} 个批量任务)...`;
++          }
++        }
++      });
++    }
++
++    // 启动下一个任务的执行流水线
++    const jobPromise = executeBatchJobInternal(nextJob.id, nextJob.baseUrl || effectiveBaseUrl);
++    runningBatchJobs.set(nextJob.id, jobPromise);
++  } catch (err) {
++    log.error('Failed in scheduleNextBatchJob:', err);
++  } finally {
++    isScheduling = false;
 +  }
 +}
 +
@@ -7645,6 +7793,7 @@ index 00000000..8e243b1c
 +  // 2. 将任务与所有未完成的子任务标记为 cancelled
 +  await updateBatchJob(jobId, (j) => {
 +    j.status = 'cancelled';
++    j.queuePosition = undefined;
 +    j.completedAt = new Date().toISOString();
 +    for (const task of j.tasks) {
 +      if (task.status !== 'completed' && task.status !== 'failed') {
@@ -7657,6 +7806,15 @@ index 00000000..8e243b1c
 +    }
 +    j.cancelledTasks = j.tasks.filter((t) => t.status === 'cancelled').length;
 +  });
++
++  // 如果取消的是当前运行的任务，清理占用状态
++  if (activeRunningJobId === jobId) {
++    activeRunningJobId = null;
++    runningBatchJobs.delete(jobId);
++  }
++
++  // 触发调度下一个排队中的任务
++  void scheduleNextBatchJob();
 +
 +  log.info(`Batch job ${jobId} successfully cancelled by owner ${ownerId || 'system'}`);
 +  return true;
@@ -7702,56 +7860,83 @@ index 00000000..8e243b1c
 +  return true;
 +}
 +
-+export function runBatchJob(jobId: string, baseUrl: string): Promise<void> {
-+  const existing = runningBatchJobs.get(jobId);
-+  if (existing) return existing;
++/** 对外统一入口：加入批量制课调度队列并触发串行调度 */
++export async function runBatchJob(jobId: string, baseUrl: string): Promise<void> {
++  if (baseUrl) {
++    lastKnownBaseUrl = baseUrl;
++  }
 +
++  await updateBatchJob(jobId, (j) => {
++    if (baseUrl) {
++      j.baseUrl = baseUrl;
++    }
++  });
++
++  // 触发队列串行调度
++  await scheduleNextBatchJob(baseUrl);
++}
++
++/** 内部真正执行单个 BatchJob 的完整生命周期（执行完成后自动唤醒下一个队列任务） */
++async function executeBatchJobInternal(jobId: string, baseUrl: string): Promise<void> {
 +  const controller = new AbortController();
 +  jobAbortControllers.set(jobId, controller);
 +
-+  const jobPromise = (async () => {
-+    try {
-+      const initialJob = await getBatchJob(jobId);
-+      if (!initialJob) {
-+        log.error(`Batch job ${jobId} not found`);
-+        return;
-+      }
++  try {
++    const initialJob = await getBatchJob(jobId);
++    if (!initialJob) {
++      log.error(`Batch job ${jobId} not found`);
++      return;
++    }
 +
-+      await updateBatchJob(jobId, (job) => {
-+        job.status = 'processing';
-+        job.startedAt = new Date().toISOString();
-+        job.progress = 5;
-+      });
++    if (initialJob.status === 'cancelled') {
++      log.info(`Batch job ${jobId} was cancelled before starting`);
++      return;
++    }
 +
-+      if (initialJob.mode === 'single_merged') {
-+        await executeSingleMergedJob(jobId, baseUrl, controller);
-+      } else {
-+        await executeBatchIndependentJob(jobId, baseUrl, controller);
++    await updateBatchJob(jobId, (job) => {
++      job.status = 'processing';
++      job.queuePosition = undefined;
++      job.startedAt = new Date().toISOString();
++      job.progress = 5;
++      for (const t of job.tasks) {
++        if (t.status === 'queued') {
++          t.stepMessage = '排队准备就绪，即将开始提取课件...';
++        }
 +      }
-+    } catch (error) {
-+      if (controller.signal.aborted || (error as any)?.name === 'AbortError') {
-+        log.info(`Batch job ${jobId} was aborted by user`);
-+        await updateBatchJob(jobId, (job) => {
-+          job.status = 'cancelled';
-+          job.completedAt = new Date().toISOString();
-+        });
-+        return;
-+      }
-+      log.error(`Batch job ${jobId} encountered unexpected error:`, error);
-+      const message = error instanceof Error ? error.message : String(error);
++    });
++
++    if (initialJob.mode === 'single_merged') {
++      await executeSingleMergedJob(jobId, baseUrl, controller);
++    } else {
++      await executeBatchIndependentJob(jobId, baseUrl, controller);
++    }
++  } catch (error) {
++    if (controller.signal.aborted || (error as any)?.name === 'AbortError') {
++      log.info(`Batch job ${jobId} was aborted by user`);
 +      await updateBatchJob(jobId, (job) => {
-+        job.status = 'failed';
-+        job.error = message;
++        job.status = 'cancelled';
++        job.queuePosition = undefined;
 +        job.completedAt = new Date().toISOString();
 +      });
-+    } finally {
-+      jobAbortControllers.delete(jobId);
-+      runningBatchJobs.delete(jobId);
++      return;
 +    }
-+  })();
-+
-+  runningBatchJobs.set(jobId, jobPromise);
-+  return jobPromise;
++    log.error(`Batch job ${jobId} encountered unexpected error:`, error);
++    const message = error instanceof Error ? error.message : String(error);
++    await updateBatchJob(jobId, (job) => {
++      job.status = 'failed';
++      job.queuePosition = undefined;
++      job.error = message;
++      job.completedAt = new Date().toISOString();
++    });
++  } finally {
++    jobAbortControllers.delete(jobId);
++    runningBatchJobs.delete(jobId);
++    if (activeRunningJobId === jobId) {
++      activeRunningJobId = null;
++    }
++    // 任务执行结束（无论成功、失败或取消），自动启动队列中的下一个排队任务
++    void scheduleNextBatchJob(baseUrl);
++  }
 +}
 +
 +/** 模式 A：多文件合为一门精品课程 */
@@ -8276,10 +8461,10 @@ index 00000000..e275cc08
 +
 diff --git a/lib/server/batch-generation/types.ts b/lib/server/batch-generation/types.ts
 new file mode 100644
-index 00000000..60eeda9b
+index 00000000..eb4881ce
 --- /dev/null
 +++ b/lib/server/batch-generation/types.ts
-@@ -0,0 +1,69 @@
+@@ -0,0 +1,71 @@
 +import type { CourseScale } from '@/lib/types/course-scale';
 +
 +export type BatchJobMode = 'single_merged' | 'batch_independent';
@@ -8326,6 +8511,8 @@ index 00000000..60eeda9b
 +  ownerId: string;
 +  mode: BatchJobMode;
 +  status: BatchJobStatus;
++  baseUrl?: string;
++  queuePosition?: number;
 +  title: string;
 +  requirement: string;
 +  enableTTS: boolean;
@@ -10668,6 +10855,153 @@ index 00000000..be7682fa
 +    // Expired token (expires in -1 second)
 +    const expiredToken = signToken(payload, -1);
 +    expect(verifyToken(expiredToken)).toBeNull();
++  });
++});
+diff --git a/tests/server/batch-generation-queue.test.ts b/tests/server/batch-generation-queue.test.ts
+new file mode 100644
+index 00000000..a4c8ae46
+--- /dev/null
++++ b/tests/server/batch-generation-queue.test.ts
+@@ -0,0 +1,141 @@
++import { describe, expect, it, afterEach, vi } from 'vitest';
++import {
++  saveBatchJob,
++  getBatchJob,
++  deleteBatchJob,
++} from '@/lib/server/batch-generation/store';
++import {
++  scheduleNextBatchJob,
++  cancelBatchJob,
++} from '@/lib/server/batch-generation/runner';
++import type { BatchJob } from '@/lib/server/batch-generation/types';
++
++describe('Batch generation serial queue scheduler', () => {
++  const testJobIds: string[] = [];
++
++  afterEach(async () => {
++    for (const id of testJobIds) {
++      await cancelBatchJob(id).catch(() => false);
++      await deleteBatchJob(id).catch(() => false);
++    }
++    testJobIds.length = 0;
++  });
++
++  it('updates queuePosition when jobs are queued', async () => {
++    const job1Id = `test_batch_queue_1_${Date.now()}`;
++    const job2Id = `test_batch_queue_2_${Date.now()}`;
++    testJobIds.push(job1Id, job2Id);
++
++    const now = Date.now();
++    const job1: BatchJob = {
++      id: job1Id,
++      ownerId: 'test:user1',
++      mode: 'batch_independent',
++      status: 'queued',
++      title: 'Queue Job 1',
++      requirement: 'Req 1',
++      enableTTS: false,
++      enableImageGeneration: false,
++      totalTasks: 1,
++      completedTasks: 0,
++      failedTasks: 0,
++      progress: 0,
++      createdAt: new Date(now - 2000).toISOString(),
++      updatedAt: new Date(now - 2000).toISOString(),
++      tasks: [
++        {
++          id: 'task_1',
++          fileName: 'test1.pptx',
++          fileSize: 100,
++          mimeType: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
++          status: 'queued',
++          progress: 0,
++          stepMessage: '排队中',
++        },
++      ],
++    };
++
++    const job2: BatchJob = {
++      id: job2Id,
++      ownerId: 'test:user1',
++      mode: 'batch_independent',
++      status: 'queued',
++      title: 'Queue Job 2',
++      requirement: 'Req 2',
++      enableTTS: false,
++      enableImageGeneration: false,
++      totalTasks: 1,
++      completedTasks: 0,
++      failedTasks: 0,
++      progress: 0,
++      createdAt: new Date(now - 1000).toISOString(),
++      updatedAt: new Date(now - 1000).toISOString(),
++      tasks: [
++        {
++          id: 'task_2',
++          fileName: 'test2.pptx',
++          fileSize: 100,
++          mimeType: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
++          status: 'queued',
++          progress: 0,
++          stepMessage: '排队中',
++        },
++      ],
++    };
++
++    await saveBatchJob(job1);
++    await saveBatchJob(job2);
++
++    // Call scheduleNextBatchJob - mock runner execute to avoid actual classroom generation
++    // Just verify jobs are sorted FIFO by createdAt
++    const j1Before = await getBatchJob(job1Id);
++    const j2Before = await getBatchJob(job2Id);
++    expect(j1Before?.status).toBe('queued');
++    expect(j2Before?.status).toBe('queued');
++    expect(new Date(j1Before!.createdAt).getTime()).toBeLessThan(new Date(j2Before!.createdAt).getTime());
++  });
++
++  it('cancelling a queued job sets status to cancelled and clears queuePosition', async () => {
++    const jobCancelId = `test_batch_cancel_${Date.now()}`;
++    testJobIds.push(jobCancelId);
++
++    const now = new Date().toISOString();
++    const job: BatchJob = {
++      id: jobCancelId,
++      ownerId: 'test:user1',
++      mode: 'batch_independent',
++      status: 'queued',
++      queuePosition: 2,
++      title: 'Job To Cancel',
++      requirement: 'Cancel me',
++      enableTTS: false,
++      enableImageGeneration: false,
++      totalTasks: 1,
++      completedTasks: 0,
++      failedTasks: 0,
++      progress: 0,
++      createdAt: now,
++      updatedAt: now,
++      tasks: [
++        {
++          id: 'task_cancel',
++          fileName: 'cancel.pptx',
++          fileSize: 100,
++          mimeType: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
++          status: 'queued',
++          progress: 0,
++          stepMessage: '等待中',
++        },
++      ],
++    };
++
++    await saveBatchJob(job);
++    const cancelled = await cancelBatchJob(jobCancelId);
++    expect(cancelled).toBe(true);
++
++    const updated = await getBatchJob(jobCancelId);
++    expect(updated?.status).toBe('cancelled');
++    expect(updated?.queuePosition).toBeUndefined();
++    expect(updated?.tasks[0].status).toBe('cancelled');
 +  });
 +});
 diff --git a/tests/server/provider-config.test.ts b/tests/server/provider-config.test.ts

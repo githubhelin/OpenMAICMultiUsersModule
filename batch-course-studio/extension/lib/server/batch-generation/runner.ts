@@ -3,7 +3,7 @@ import { createLogger } from '@/lib/logger';
 import { generateClassroom } from '@/lib/server/classroom-generation';
 import { getOwnerScopedDocumentStore } from '@/lib/server/agent-runtime/owner-scoped-documents';
 import { extractFileContent } from './extractor';
-import { getBatchJob, updateBatchJob } from './store';
+import { getBatchJob, updateBatchJob, listBatchJobs } from './store';
 import type { BatchJob, SubTaskStep } from './types';
 import { buildCourseScaleInstruction } from '@/lib/types/course-scale';
 import { syncInteractiveLibraryForStage } from '@/lib/server/interactive-library';
@@ -13,6 +13,9 @@ import { markStageGenerationComplete } from '@/lib/persistence/stage-meta';
 const log = createLogger('BatchJobRunner');
 const runningBatchJobs = new Map<string, Promise<void>>();
 const jobAbortControllers = new Map<string, AbortController>();
+let activeRunningJobId: string | null = null;
+let isScheduling = false;
+let lastKnownBaseUrl = 'http://localhost:3000';
 
 async function safeUnlink(path?: string): Promise<void> {
   if (!path) return;
@@ -20,6 +23,109 @@ async function safeUnlink(path?: string): Promise<void> {
     await fs.unlink(path);
   } catch {
     // Ignore cleanup errors
+  }
+}
+
+/** 更新所有排队等待中任务的序号及提示信息 */
+async function updateQueuePositions(): Promise<void> {
+  try {
+    const allJobs = await listBatchJobs('');
+    const queuedJobs = allJobs
+      .filter((j) => j.status === 'queued')
+      .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
+
+    for (let idx = 0; idx < queuedJobs.length; idx++) {
+      const qj = queuedJobs[idx];
+      const position = idx + 1; // 1 表示紧接着执行
+      if (qj.queuePosition !== position) {
+        await updateBatchJob(qj.id, (job) => {
+          job.queuePosition = position;
+          for (const t of job.tasks) {
+            if (t.status === 'queued') {
+              t.stepMessage = `排队等待中 (前方有 ${position} 个批量任务正在执行/排队)...`;
+            }
+          }
+        });
+      }
+    }
+  } catch (err) {
+    log.error('Failed to update queue positions:', err);
+  }
+}
+
+/**
+ * 串行调度器核心：检查是否有正在运行的任务，若空闲则按提交时间先后（FIFO）依次启动下一个排队任务
+ */
+export async function scheduleNextBatchJob(fallbackBaseUrl?: string): Promise<void> {
+  if (fallbackBaseUrl) {
+    lastKnownBaseUrl = fallbackBaseUrl;
+  }
+  const effectiveBaseUrl = fallbackBaseUrl || lastKnownBaseUrl || 'http://localhost:3000';
+
+  if (isScheduling) return;
+  isScheduling = true;
+
+  try {
+    // 1. 检查当前活跃任务是否仍在内存中运行
+    if (activeRunningJobId) {
+      if (runningBatchJobs.has(activeRunningJobId)) {
+        // 当前有任务在跑，刷新排队状态后等待
+        await updateQueuePositions();
+        return;
+      } else {
+        activeRunningJobId = null;
+      }
+    }
+
+    // 2. 检查全局任务列表
+    const allJobs = await listBatchJobs('');
+
+    // 处理因服务器重启导致的悬空 processing 任务
+    for (const j of allJobs) {
+      if (j.status === 'processing' && !runningBatchJobs.has(j.id)) {
+        log.warn(`Found orphaned processing job ${j.id}, marking failed due to server restart`);
+        await updateBatchJob(j.id, (job) => {
+          job.status = 'failed';
+          job.error = '服务重启导致任务中断，请重新提交';
+          job.completedAt = new Date().toISOString();
+        });
+      }
+    }
+
+    // 3. 筛选所有 queued 状态的任务，按创建时间正序排列（先进先出 FIFO）
+    const queuedJobs = allJobs
+      .filter((j) => j.status === 'queued')
+      .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime());
+
+    if (queuedJobs.length === 0) {
+      return;
+    }
+
+    // 取出队列头部的下一个任务执行
+    const nextJob = queuedJobs[0];
+    activeRunningJobId = nextJob.id;
+    log.info(`Dequeuing next batch job: ${nextJob.id} (${nextJob.title})`);
+
+    // 刷新剩余排队任务的序号
+    for (let idx = 1; idx < queuedJobs.length; idx++) {
+      const qj = queuedJobs[idx];
+      await updateBatchJob(qj.id, (job) => {
+        job.queuePosition = idx;
+        for (const t of job.tasks) {
+          if (t.status === 'queued') {
+            t.stepMessage = `排队等待中 (前方有 ${idx} 个批量任务)...`;
+          }
+        }
+      });
+    }
+
+    // 启动下一个任务的执行流水线
+    const jobPromise = executeBatchJobInternal(nextJob.id, nextJob.baseUrl || effectiveBaseUrl);
+    runningBatchJobs.set(nextJob.id, jobPromise);
+  } catch (err) {
+    log.error('Failed in scheduleNextBatchJob:', err);
+  } finally {
+    isScheduling = false;
   }
 }
 
@@ -38,6 +144,7 @@ export async function cancelBatchJob(jobId: string, ownerId?: string): Promise<b
   // 2. 将任务与所有未完成的子任务标记为 cancelled
   await updateBatchJob(jobId, (j) => {
     j.status = 'cancelled';
+    j.queuePosition = undefined;
     j.completedAt = new Date().toISOString();
     for (const task of j.tasks) {
       if (task.status !== 'completed' && task.status !== 'failed') {
@@ -50,6 +157,15 @@ export async function cancelBatchJob(jobId: string, ownerId?: string): Promise<b
     }
     j.cancelledTasks = j.tasks.filter((t) => t.status === 'cancelled').length;
   });
+
+  // 如果取消的是当前运行的任务，清理占用状态
+  if (activeRunningJobId === jobId) {
+    activeRunningJobId = null;
+    runningBatchJobs.delete(jobId);
+  }
+
+  // 触发调度下一个排队中的任务
+  void scheduleNextBatchJob();
 
   log.info(`Batch job ${jobId} successfully cancelled by owner ${ownerId || 'system'}`);
   return true;
@@ -95,56 +211,83 @@ export async function cancelBatchSubTask(
   return true;
 }
 
-export function runBatchJob(jobId: string, baseUrl: string): Promise<void> {
-  const existing = runningBatchJobs.get(jobId);
-  if (existing) return existing;
+/** 对外统一入口：加入批量制课调度队列并触发串行调度 */
+export async function runBatchJob(jobId: string, baseUrl: string): Promise<void> {
+  if (baseUrl) {
+    lastKnownBaseUrl = baseUrl;
+  }
 
+  await updateBatchJob(jobId, (j) => {
+    if (baseUrl) {
+      j.baseUrl = baseUrl;
+    }
+  });
+
+  // 触发队列串行调度
+  await scheduleNextBatchJob(baseUrl);
+}
+
+/** 内部真正执行单个 BatchJob 的完整生命周期（执行完成后自动唤醒下一个队列任务） */
+async function executeBatchJobInternal(jobId: string, baseUrl: string): Promise<void> {
   const controller = new AbortController();
   jobAbortControllers.set(jobId, controller);
 
-  const jobPromise = (async () => {
-    try {
-      const initialJob = await getBatchJob(jobId);
-      if (!initialJob) {
-        log.error(`Batch job ${jobId} not found`);
-        return;
-      }
+  try {
+    const initialJob = await getBatchJob(jobId);
+    if (!initialJob) {
+      log.error(`Batch job ${jobId} not found`);
+      return;
+    }
 
-      await updateBatchJob(jobId, (job) => {
-        job.status = 'processing';
-        job.startedAt = new Date().toISOString();
-        job.progress = 5;
-      });
+    if (initialJob.status === 'cancelled') {
+      log.info(`Batch job ${jobId} was cancelled before starting`);
+      return;
+    }
 
-      if (initialJob.mode === 'single_merged') {
-        await executeSingleMergedJob(jobId, baseUrl, controller);
-      } else {
-        await executeBatchIndependentJob(jobId, baseUrl, controller);
+    await updateBatchJob(jobId, (job) => {
+      job.status = 'processing';
+      job.queuePosition = undefined;
+      job.startedAt = new Date().toISOString();
+      job.progress = 5;
+      for (const t of job.tasks) {
+        if (t.status === 'queued') {
+          t.stepMessage = '排队准备就绪，即将开始提取课件...';
+        }
       }
-    } catch (error) {
-      if (controller.signal.aborted || (error as any)?.name === 'AbortError') {
-        log.info(`Batch job ${jobId} was aborted by user`);
-        await updateBatchJob(jobId, (job) => {
-          job.status = 'cancelled';
-          job.completedAt = new Date().toISOString();
-        });
-        return;
-      }
-      log.error(`Batch job ${jobId} encountered unexpected error:`, error);
-      const message = error instanceof Error ? error.message : String(error);
+    });
+
+    if (initialJob.mode === 'single_merged') {
+      await executeSingleMergedJob(jobId, baseUrl, controller);
+    } else {
+      await executeBatchIndependentJob(jobId, baseUrl, controller);
+    }
+  } catch (error) {
+    if (controller.signal.aborted || (error as any)?.name === 'AbortError') {
+      log.info(`Batch job ${jobId} was aborted by user`);
       await updateBatchJob(jobId, (job) => {
-        job.status = 'failed';
-        job.error = message;
+        job.status = 'cancelled';
+        job.queuePosition = undefined;
         job.completedAt = new Date().toISOString();
       });
-    } finally {
-      jobAbortControllers.delete(jobId);
-      runningBatchJobs.delete(jobId);
+      return;
     }
-  })();
-
-  runningBatchJobs.set(jobId, jobPromise);
-  return jobPromise;
+    log.error(`Batch job ${jobId} encountered unexpected error:`, error);
+    const message = error instanceof Error ? error.message : String(error);
+    await updateBatchJob(jobId, (job) => {
+      job.status = 'failed';
+      job.queuePosition = undefined;
+      job.error = message;
+      job.completedAt = new Date().toISOString();
+    });
+  } finally {
+    jobAbortControllers.delete(jobId);
+    runningBatchJobs.delete(jobId);
+    if (activeRunningJobId === jobId) {
+      activeRunningJobId = null;
+    }
+    // 任务执行结束（无论成功、失败或取消），自动启动队列中的下一个排队任务
+    void scheduleNextBatchJob(baseUrl);
+  }
 }
 
 /** 模式 A：多文件合为一门精品课程 */

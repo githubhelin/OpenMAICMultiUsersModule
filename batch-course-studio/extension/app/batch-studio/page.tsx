@@ -70,6 +70,7 @@ export default function BatchStudioPage() {
       id: string;
       title: string;
       status: string;
+      queuePosition?: number;
       progress: number;
       createdAt: string;
       totalTasks: number;
@@ -128,7 +129,7 @@ export default function BatchStudioPage() {
         throw new Error(data.error || '创建批量制课任务失败');
       }
 
-      toast.success('批量制课任务已成功提交，后台正在全力流水线生产中！');
+      toast.success('批量制课任务已成功提交并加入调度队列！');
       setActiveJobId(data.batchId);
       setActiveTab('board');
       setFiles([]);
@@ -713,6 +714,8 @@ export default function BatchStudioPage() {
                         className={
                           currentJob.status === 'cancelled'
                             ? 'border-red-400/40 text-red-500 bg-red-50/50 dark:bg-red-950/20'
+                            : currentJob.status === 'queued'
+                            ? 'border-amber-400/60 text-amber-600 dark:text-amber-400 bg-amber-500/10'
                             : ''
                         }
                       >
@@ -721,7 +724,7 @@ export default function BatchStudioPage() {
                           : currentJob.status === 'processing'
                           ? '正在流水线生产'
                           : currentJob.status === 'queued'
-                          ? '排队等待执行'
+                          ? (currentJob.queuePosition ? `队列排队中 (第 ${currentJob.queuePosition} 位)` : '排队等待执行')
                           : currentJob.status === 'cancelled'
                           ? '任务已中断取消'
                           : '处理异常'}
@@ -754,7 +757,7 @@ export default function BatchStudioPage() {
                   </div>
 
                   <div className="flex items-center gap-2 flex-wrap">
-                    {/* 中断运行中的任务 */}
+                    {/* 中断或取消排队任务 */}
                     {(currentJob.status === 'queued' || currentJob.status === 'processing') && (
                       <Button
                         size="sm"
@@ -762,10 +765,18 @@ export default function BatchStudioPage() {
                         onClick={handleCancelJob}
                         disabled={cancellingJob}
                         className="gap-1.5 h-8 text-xs bg-red-600 hover:bg-red-700 text-white"
-                        title="立即中断当前任务，取消后续排队文件以避免浪费 Token"
+                        title={
+                          currentJob.status === 'queued'
+                            ? '取消排队任务并释放暂存文件'
+                            : '立即中断当前任务，取消后续排队文件以避免浪费 Token'
+                        }
                       >
                         <Ban className="w-3.5 h-3.5" />
-                        {cancellingJob ? '正在中断...' : '中断任务 (停止消耗 Token)'}
+                        {cancellingJob
+                          ? '正在处理...'
+                          : currentJob.status === 'queued'
+                          ? '取消排队任务'
+                          : '中断任务 (停止消耗 Token)'}
                       </Button>
                     )}
 
@@ -813,6 +824,20 @@ export default function BatchStudioPage() {
                     )}
                   </div>
                 </div>
+
+                {/* 排队状态提示横幅 */}
+                {currentJob.status === 'queued' && (
+                  <div className="flex items-center gap-2.5 text-xs text-amber-800 dark:text-amber-300 bg-amber-50/90 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-800/60 rounded-xl p-3.5 shadow-2xs">
+                    <Clock className="w-4 h-4 shrink-0 text-amber-600 dark:text-amber-400 animate-spin" />
+                    <div className="flex-1">
+                      <span className="font-semibold">串行队列排队中</span>
+                      <span className="ml-1 text-slate-600 dark:text-slate-300">
+                        {currentJob.queuePosition ? `（当前排在第 ${currentJob.queuePosition} 位）` : ''}
+                        系统已为您安全暂存课件。为保证大模型调用速率与服务器稳定性，批量任务采用全自动串行机制执行，前序任务完成后将自动无缝接力生成，您可以放心关闭网页。
+                      </span>
+                    </div>
+                  </div>
+                )}
 
                 {/* 总进度条 */}
                 <div className="space-y-2">
@@ -966,11 +991,19 @@ export default function BatchStudioPage() {
                         className={`text-xs gap-2 ${
                           j.status === 'cancelled'
                             ? 'border-red-200 dark:border-red-900/40 text-red-600/80 dark:text-red-400/80'
+                            : j.status === 'queued'
+                            ? 'border-amber-200 dark:border-amber-800/40 text-amber-600 dark:text-amber-400'
                             : ''
                         }`}
                       >
                         <span>{j.title}</span>
-                        <span className="text-slate-400 font-mono">({j.progress}%)</span>
+                        <span className="text-slate-400 font-mono">
+                          {j.status === 'queued'
+                            ? j.queuePosition
+                              ? `(排队#${j.queuePosition})`
+                              : '(排队中)'
+                            : `(${j.progress}%)`}
+                        </span>
                       </Button>
                       <button
                         onClick={() => handleDeleteJob(j.id)}

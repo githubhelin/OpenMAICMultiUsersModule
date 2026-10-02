@@ -11,7 +11,7 @@ import {
   listBatchJobs,
   saveBatchJob,
 } from '@/lib/server/batch-generation/store';
-import { runBatchJob } from '@/lib/server/batch-generation/runner';
+import { runBatchJob, scheduleNextBatchJob } from '@/lib/server/batch-generation/runner';
 import type { BatchJob, BatchJobMode, BatchSubTask } from '@/lib/server/batch-generation/types';
 import type { CourseScale } from '@/lib/types/course-scale';
 
@@ -88,6 +88,7 @@ export async function POST(req: NextRequest) {
       ownerId,
       mode,
       status: 'queued',
+      baseUrl,
       title: defaultTitle,
       requirement,
       enableTTS,
@@ -107,7 +108,7 @@ export async function POST(req: NextRequest) {
     await saveBatchJob(batchJob);
     log.info(`Created batch job ${jobId} with ${tasks.length} tasks [mode=${mode}] for owner ${ownerId}`);
 
-    // 在后台异步启动执行流水线
+    // 在后台异步启动执行流水线（若队列繁忙则进入排队）
     after(() => runBatchJob(jobId, baseUrl));
 
     return NextResponse.json(
@@ -137,6 +138,9 @@ export async function GET(req: NextRequest) {
     const session = getSessionPayload(req);
     const ownerId = session && session.userId ? `user:${session.userId}` : 'anon:default';
 
+    // 访问列表时触发调度检查，确保服务重启后若有排队任务可自动恢复推进
+    void scheduleNextBatchJob();
+
     const jobs = await listBatchJobs(ownerId);
     return NextResponse.json({
       success: true,
@@ -145,6 +149,7 @@ export async function GET(req: NextRequest) {
         title: job.title,
         mode: job.mode,
         status: job.status,
+        queuePosition: job.queuePosition,
         totalTasks: job.totalTasks,
         completedTasks: job.completedTasks,
         failedTasks: job.failedTasks,
