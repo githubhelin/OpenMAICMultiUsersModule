@@ -10,6 +10,8 @@ import {
   ensureBatchDirs,
   listBatchJobs,
   saveBatchJob,
+  getBatchJob,
+  updateBatchJob,
 } from '@/lib/server/batch-generation/store';
 import { runBatchJob, scheduleNextBatchJob } from '@/lib/server/batch-generation/runner';
 import type { BatchJob, BatchJobMode, BatchSubTask } from '@/lib/server/batch-generation/types';
@@ -29,6 +31,170 @@ export async function POST(req: NextRequest) {
     await ensureBatchDirs();
 
     const formData = await req.formData();
+    const action = (formData.get('action') as string) || '';
+
+    // 分支 1：初始化分步批量上传草稿 (create_draft)
+    if (action === 'create_draft') {
+      const rawMode = formData.get('mode') as string;
+      const mode: BatchJobMode = rawMode === 'single_merged' ? 'single_merged' : 'batch_independent';
+      const requirement = (formData.get('prompt') as string) || '';
+      const enableTTS = formData.get('enableTTS') !== 'false';
+      const enableImageGeneration = formData.get('enableImageGeneration') !== 'false';
+      const enableInteractiveMode =
+        formData.get('enableInteractiveMode') === 'true' ||
+        formData.get('interactiveMode') === 'true';
+      const rawCourseScale = formData.get('courseScale') as string;
+      const courseScale: CourseScale =
+        rawCourseScale === 'micro' || rawCourseScale === 'thematic' ? rawCourseScale : 'standard';
+      const rawInteractiveTheme = formData.get('interactiveTheme') as string;
+      const interactiveTheme: InteractiveThemeStyle =
+        rawInteractiveTheme === 'light' ? 'light' : 'dark';
+      const rawSlideTheme = formData.get('slideTheme') as string;
+      const slideTheme: SlideThemeStyle =
+        rawSlideTheme === 'dark' ? 'dark' : 'light';
+      const expectedTotal = parseInt((formData.get('totalTasks') as string) || '0', 10);
+
+      const jobId = `batch_${nanoid(10)}`;
+      const now = new Date().toISOString();
+      const baseUrl = buildRequestOrigin(req);
+
+      const defaultTitle =
+        mode === 'single_merged'
+          ? `多资料合成课件 (${expectedTotal || 0} 个资料)`
+          : `批量课程生成 (${expectedTotal || 0} 门课)`;
+
+      const batchJob: BatchJob = {
+        id: jobId,
+        ownerId,
+        mode,
+        status: 'uploading',
+        baseUrl,
+        title: defaultTitle,
+        requirement,
+        enableTTS,
+        enableImageGeneration,
+        enableInteractiveMode,
+        courseScale,
+        interactiveTheme,
+        slideTheme,
+        totalTasks: expectedTotal,
+        completedTasks: 0,
+        failedTasks: 0,
+        cancelledTasks: 0,
+        progress: 0,
+        createdAt: now,
+        updatedAt: now,
+        tasks: [],
+      };
+
+      await saveBatchJob(batchJob);
+      log.info(`Initialized draft batch job ${jobId} (expecting ${expectedTotal} tasks) for ${ownerId}`);
+      return NextResponse.json({ success: true, batchId: jobId });
+    }
+
+    // 分支 2：单文件逐个上传并更新数量计数 (upload_task)
+    if (action === 'upload_task') {
+      const batchId = formData.get('batchId') as string;
+      const file = formData.get('file') as File | null;
+
+      if (!batchId || !file) {
+        return NextResponse.json(
+          { success: false, error: '缺少 batchId 或上传文件' },
+          { status: 400 },
+        );
+      }
+
+      const job = await getBatchJob(batchId, ownerId);
+      if (!job) {
+        return NextResponse.json(
+          { success: false, error: '未找到对应的批量制课草稿任务' },
+          { status: 404 },
+        );
+      }
+
+      const taskId = `task_${nanoid(8)}`;
+      const safeName = file.name || `file_${job.tasks.length + 1}.pptx`;
+      const tempFileName = `${batchId}_${taskId}_${safeName}`;
+      const tempFilePath = path.join(BATCH_TEMP_DIR, tempFileName);
+
+      const buffer = Buffer.from(await file.arrayBuffer());
+      await fs.writeFile(tempFilePath, buffer);
+
+      const ext = safeName.toLowerCase().split('.').pop() || '';
+      const guessedExtractor =
+        ext === 'pptx'
+          ? 'PPTX 原生解析器'
+          : ext === 'txt' || ext === 'md'
+            ? '纯文本解析器'
+            : 'MinerU 文档解析';
+
+      const task: BatchSubTask = {
+        id: taskId,
+        fileName: safeName,
+        fileSize: file.size,
+        mimeType: file.type || 'application/octet-stream',
+        tempFilePath,
+        status: 'queued',
+        progress: 0,
+        stepMessage: '等待调度中...',
+        extractorName: guessedExtractor,
+      };
+
+      await updateBatchJob(batchId, (j) => {
+        j.tasks.push(task);
+        j.totalTasks = j.tasks.length;
+        if (j.mode === 'single_merged') {
+          j.title = `多资料合成课件 (${j.tasks.length} 个资料)`;
+        } else {
+          j.title = `批量课程生成 (${j.tasks.length} 门课)`;
+        }
+      });
+
+      return NextResponse.json({
+        success: true,
+        taskId,
+        uploadedCount: job.tasks.length + 1,
+      });
+    }
+
+    // 分支 3：上传就绪，正式加入执行队列 (start_job)
+    if (action === 'start_job') {
+      const batchId = formData.get('batchId') as string;
+      if (!batchId) {
+        return NextResponse.json(
+          { success: false, error: '缺少 batchId' },
+          { status: 400 },
+        );
+      }
+
+      const job = await getBatchJob(batchId, ownerId);
+      if (!job || job.tasks.length === 0) {
+        return NextResponse.json(
+          { success: false, error: '任务不存在或未包含任何有效课件' },
+          { status: 400 },
+        );
+      }
+
+      const baseUrl = job.baseUrl || buildRequestOrigin(req);
+
+      await updateBatchJob(batchId, (j) => {
+        j.status = 'queued';
+        for (const t of j.tasks) {
+          t.stepMessage = '排队等待处理中...';
+        }
+      });
+
+      after(() => runBatchJob(batchId, baseUrl));
+
+      return NextResponse.json({
+        success: true,
+        batchId,
+        status: 'queued',
+        totalTasks: job.tasks.length,
+      });
+    }
+
+    // 分支 4：常规单次全量上传 (原模式向后兼容)
     const files = formData.getAll('files') as File[];
 
     if (!files || files.length === 0) {
@@ -73,6 +239,14 @@ export async function POST(req: NextRequest) {
       const buffer = Buffer.from(await file.arrayBuffer());
       await fs.writeFile(tempFilePath, buffer);
 
+      const ext = safeName.toLowerCase().split('.').pop() || '';
+      const guessedExtractor =
+        ext === 'pptx'
+          ? 'PPTX 原生解析器'
+          : ext === 'txt' || ext === 'md'
+            ? '纯文本解析器'
+            : 'MinerU 文档解析';
+
       tasks.push({
         id: taskId,
         fileName: safeName,
@@ -82,6 +256,7 @@ export async function POST(req: NextRequest) {
         status: 'queued',
         progress: 0,
         stepMessage: '排队等待处理中...',
+        extractorName: guessedExtractor,
       });
     }
 

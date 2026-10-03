@@ -315,13 +315,19 @@ async function executeSingleMergedJob(
     const task = job.tasks[i];
     const progress = Math.round(5 + (i / job.tasks.length) * 20);
 
+    const ext = task.fileName.toLowerCase().split('.').pop() || '';
+    const guessedExtractor =
+      task.extractorName ||
+      (ext === 'pptx' ? 'PPTX 原生解析器' : ext === 'txt' || ext === 'md' ? '纯文本解析器' : 'MinerU 文档解析');
+
     await updateBatchJob(jobId, (j) => {
       j.progress = progress;
       const target = j.tasks.find((t) => t.id === task.id);
       if (target) {
         target.status = 'extracting';
+        target.extractorName = guessedExtractor;
         target.progress = 50;
-        target.stepMessage = `正在使用 MinerU / 课件解析器提取内容...`;
+        target.stepMessage = `正在使用 ${guessedExtractor} 提取内容...`;
       }
     });
 
@@ -331,12 +337,15 @@ async function executeSingleMergedJob(
         extractedTexts.push(`### 教学参考资料 [${i + 1}]: ${task.fileName}\n${extracted.text}`);
         extractedImages.push(...extracted.images);
 
+        const activeExtractor = extracted.extractorName || guessedExtractor;
+
         await updateBatchJob(jobId, (j) => {
           const target = j.tasks.find((t) => t.id === task.id);
           if (target) {
             target.status = 'completed';
+            target.extractorName = activeExtractor;
             target.progress = 100;
-            target.stepMessage = `提取完成 (${extracted.text.length} 字)`;
+            target.stepMessage = `[${activeExtractor}] 提取完成 (${extracted.text.length} 字)`;
           }
         });
       }
@@ -478,13 +487,19 @@ async function executeBatchIndependentJob(
 
     log.info(`[${i + 1}/${totalTasks}] Starting task: ${task.fileName}`);
 
+    const ext = task.fileName.toLowerCase().split('.').pop() || '';
+    const guessedExtractor =
+      task.extractorName ||
+      (ext === 'pptx' ? 'PPTX 原生解析器' : ext === 'txt' || ext === 'md' ? '纯文本解析器' : 'MinerU 文档解析');
+
     await updateBatchJob(jobId, (j) => {
       const target = j.tasks[taskIndex];
       if (target) {
         target.status = 'extracting';
+        target.extractorName = guessedExtractor;
         target.startedAt = new Date().toISOString();
         target.progress = 10;
-        target.stepMessage = '正在提取课件与知识点...';
+        target.stepMessage = `正在使用 ${guessedExtractor} 提取课件与知识点...`;
       }
     });
 
@@ -502,12 +517,15 @@ async function executeBatchIndependentJob(
         throw err;
       }
 
+      const activeExtractor = extracted.extractorName || guessedExtractor;
+
       await updateBatchJob(jobId, (j) => {
         const target = j.tasks[taskIndex];
         if (target) {
           target.status = 'planning_outline';
+          target.extractorName = activeExtractor;
           target.progress = 25;
-          target.stepMessage = '正在规划课程大纲与交互流程...';
+          target.stepMessage = `[${activeExtractor}] 内容提取完成 (${extracted.slideCount ? extracted.slideCount + ' 页' : extracted.text.length + ' 字'})，正在规划课程大纲...`;
         }
       });
 

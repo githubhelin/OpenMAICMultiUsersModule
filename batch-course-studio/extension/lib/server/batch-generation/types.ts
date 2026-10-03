@@ -4,6 +4,7 @@ import type { InteractiveThemeStyle, SlideThemeStyle } from '@/lib/types/theme-s
 export type BatchJobMode = 'single_merged' | 'batch_independent';
 
 export type BatchJobStatus =
+  | 'uploading'
   | 'queued'
   | 'processing'
   | 'completed'
@@ -31,6 +32,7 @@ export interface BatchSubTask {
   status: SubTaskStep;
   progress: number; // 0 - 100
   stepMessage: string;
+  extractorName?: string; // 实际调用的解析组件，如 "PPTX 原生解析器"、"MinerU 文档解析"
   classroomId?: string;
   classroomUrl?: string;
   stageId?: string;

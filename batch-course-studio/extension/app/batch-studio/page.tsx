@@ -94,6 +94,12 @@ export default function BatchStudioPage() {
     }>
   >([]);
 
+  const [uploadCount, setUploadCount] = useState<{
+    current: number;
+    total: number;
+    activeFileName?: string;
+  } | null>(null);
+
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   // 格式化文件大小
@@ -132,7 +138,7 @@ export default function BatchStudioPage() {
     setSubmitError(null);
   };
 
-  // 提交任务
+  // 提交任务 (支持多文件逐个增量上传与完成数量精准进度呈现)
   const handleSubmit = async () => {
     if (files.length === 0) {
       toast.error('请至少上传一个课件文件！');
@@ -146,36 +152,87 @@ export default function BatchStudioPage() {
       return;
     }
 
+    const totalFiles = files.length;
     setSubmitting(true);
     setSubmitError(null);
-    const formData = new FormData();
-    files.forEach((file) => formData.append('files', file));
-    formData.append('mode', mode);
-    formData.append('prompt', prompt);
-    formData.append('enableTTS', enableTTS ? 'true' : 'false');
-    formData.append('enableImageGeneration', enableImageGeneration ? 'true' : 'false');
-    formData.append('enableInteractiveMode', enableInteractiveMode ? 'true' : 'false');
-    formData.append('courseScale', courseScale);
-    formData.append('interactiveTheme', interactiveTheme);
-    formData.append('slideTheme', slideTheme);
+    setUploadCount({ current: 0, total: totalFiles, activeFileName: '' });
 
     try {
-      const res = await fetch('/api/batch-generate', {
-        method: 'POST',
-        body: formData,
-      });
-      const data = await res.json().catch(() => null);
+      // 1. 初始化批量制课草稿任务
+      const initFormData = new FormData();
+      initFormData.append('action', 'create_draft');
+      initFormData.append('mode', mode);
+      initFormData.append('prompt', prompt);
+      initFormData.append('enableTTS', enableTTS ? 'true' : 'false');
+      initFormData.append('enableImageGeneration', enableImageGeneration ? 'true' : 'false');
+      initFormData.append('enableInteractiveMode', enableInteractiveMode ? 'true' : 'false');
+      initFormData.append('courseScale', courseScale);
+      initFormData.append('interactiveTheme', interactiveTheme);
+      initFormData.append('slideTheme', slideTheme);
+      initFormData.append('totalTasks', String(totalFiles));
 
-      if (!res.ok || !data?.success) {
-        throw new Error(data?.error || `服务器请求失败 (HTTP ${res.status})`);
+      const initRes = await fetch('/api/batch-generate', {
+        method: 'POST',
+        body: initFormData,
+      });
+      const initData = await initRes.json().catch(() => null);
+      if (!initRes.ok || !initData?.success || !initData?.batchId) {
+        throw new Error(initData?.error || '初始化任务失败');
+      }
+      const batchId = initData.batchId;
+
+      // 2. 逐个上传各个课件，准确呈现完成数量进度 (例如 1/30, 2/30...)
+      for (let i = 0; i < totalFiles; i++) {
+        const file = files[i];
+        setUploadCount({
+          current: i,
+          total: totalFiles,
+          activeFileName: file.name,
+        });
+
+        const uploadFormData = new FormData();
+        uploadFormData.append('action', 'upload_task');
+        uploadFormData.append('batchId', batchId);
+        uploadFormData.append('file', file);
+
+        const uploadRes = await fetch('/api/batch-generate', {
+          method: 'POST',
+          body: uploadFormData,
+        });
+        const uploadData = await uploadRes.json().catch(() => null);
+        if (!uploadRes.ok || !uploadData?.success) {
+          throw new Error(uploadData?.error || `上传第 ${i + 1} 个课件 (${file.name}) 失败`);
+        }
+
+        // 文件上传完成，递增完成数
+        setUploadCount({
+          current: i + 1,
+          total: totalFiles,
+          activeFileName: file.name,
+        });
       }
 
-      toast.success('批量制课任务已成功提交并加入调度队列！');
-      setActiveJobId(data.batchId);
+      // 3. 全部文件上传就绪，正式加入生成排队队列
+      const startFormData = new FormData();
+      startFormData.append('action', 'start_job');
+      startFormData.append('batchId', batchId);
+
+      const startRes = await fetch('/api/batch-generate', {
+        method: 'POST',
+        body: startFormData,
+      });
+      const startData = await startRes.json().catch(() => null);
+      if (!startRes.ok || !startData?.success) {
+        throw new Error(startData?.error || '启动批量制课调度队列失败');
+      }
+
+      toast.success(`成功上传全部 ${totalFiles} 个课件，批量制课任务已加入调度队列！`);
+      setActiveJobId(batchId);
       setActiveTab('board');
       setFiles([]);
       setSubmitError(null);
-      loadJobDetails(data.batchId);
+      setUploadCount(null);
+      loadJobDetails(batchId);
       loadRecentJobs();
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : '提交任务失败';
@@ -183,6 +240,7 @@ export default function BatchStudioPage() {
       toast.error(errMsg);
     } finally {
       setSubmitting(false);
+      setUploadCount(null);
     }
   };
 
@@ -325,12 +383,17 @@ export default function BatchStudioPage() {
 
   const getStepBadge = (task: BatchSubTask) => {
     switch (task.status) {
-      case 'extracting':
+      case 'extracting': {
+        const comp =
+          task.extractorName ||
+          (task.fileName.toLowerCase().endsWith('.pptx') ? 'PPTX 原生解析器' : 'MinerU 解析');
         return (
-          <Badge className="bg-amber-500/15 text-amber-600 dark:text-amber-400 border-amber-500/30">
-            MinerU 解析提取中
+          <Badge className="bg-amber-500/15 text-amber-600 dark:text-amber-400 border-amber-500/30 flex items-center gap-1">
+            <RefreshCw className="w-3 h-3 animate-spin" />
+            {comp} 提取中
           </Badge>
         );
+      }
       case 'planning_outline':
         return (
           <Badge className="bg-blue-500/15 text-blue-600 dark:text-blue-400 border-blue-500/30">
@@ -912,7 +975,11 @@ export default function BatchStudioPage() {
                 {submitting ? (
                   <>
                     <RefreshCw className="w-4 h-4 animate-spin" />
-                    正在上传课件 ({files.length} 个文件 · {formatFileSize(totalFileSize)})...
+                    {uploadCount ? (
+                      <span>正在上传课件 (已完成 {uploadCount.current}/{uploadCount.total})...</span>
+                    ) : (
+                      <span>正在准备上传...</span>
+                    )}
                   </>
                 ) : (
                   <>
@@ -923,11 +990,30 @@ export default function BatchStudioPage() {
               </Button>
 
               {submitting && (
-                <div className="p-3 rounded-lg bg-amber-50 dark:bg-amber-950/40 border border-amber-300 dark:border-amber-800 text-amber-800 dark:text-amber-200 text-xs flex items-center gap-2 animate-pulse">
-                  <RefreshCw className="w-4 h-4 animate-spin shrink-0 text-amber-600" />
-                  <span>
-                    正在向服务器分发上传 <strong>{files.length}</strong> 个课件（总体积 <strong>{formatFileSize(totalFileSize)}</strong>），请保持页面打开，数据上传完毕后即可关闭网页离开...
-                  </span>
+                <div className="p-3.5 rounded-lg bg-amber-50 dark:bg-amber-950/40 border border-amber-300 dark:border-amber-800 text-amber-900 dark:text-amber-100 text-xs space-y-2">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <RefreshCw className="w-4 h-4 animate-spin text-amber-600 dark:text-amber-400 shrink-0" />
+                      <span className="font-semibold text-sm">
+                        {uploadCount
+                          ? `课件上传进度：已完成 ${uploadCount.current} / ${uploadCount.total}`
+                          : '正在初始化批量制课任务...'}
+                      </span>
+                    </div>
+                    {uploadCount && (
+                      <Badge variant="outline" className="border-amber-500/40 text-amber-700 dark:text-amber-300 font-mono text-xs">
+                        {uploadCount.current}/{uploadCount.total}
+                      </Badge>
+                    )}
+                  </div>
+                  {uploadCount?.activeFileName && (
+                    <p className="text-[11px] text-amber-700 dark:text-amber-300 truncate font-mono">
+                      当前传输：{uploadCount.activeFileName}
+                    </p>
+                  )}
+                  <p className="text-[11px] text-slate-500 dark:text-slate-400">
+                    请保持页面打开，全部课件上传完成后将自动加入生成队列并可放心离开...
+                  </p>
                 </div>
               )}
             </div>
@@ -1140,6 +1226,11 @@ export default function BatchStudioPage() {
                           <span className="text-xs font-mono text-slate-400">#{idx + 1}</span>
                           <span className="font-medium text-sm truncate">{task.fileName}</span>
                           {getStepBadge(task)}
+                          {task.extractorName && task.status !== 'extracting' && (
+                            <span className="text-[11px] px-1.5 py-0.5 rounded bg-slate-100 dark:bg-slate-800 text-slate-500 dark:text-slate-400 border border-slate-200 dark:border-slate-700 font-medium">
+                              {task.extractorName}
+                            </span>
+                          )}
                         </div>
                         <p className="text-xs text-slate-500 dark:text-slate-400">
                           {task.stepMessage || '等待调度中...'}
