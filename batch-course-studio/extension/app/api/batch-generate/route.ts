@@ -132,10 +132,14 @@ export async function POST(req: NextRequest) {
     );
   } catch (error) {
     log.error('Batch generation initiation failed:', error);
+    let message = error instanceof Error ? error.message : '服务器内部处理失败';
+    if (message.includes('Failed to parse body as FormData')) {
+      message = '上传课件数据流解析失败（可能因网络中断或数据流超限切断）。请尝试检查网络或分批提交。';
+    }
     return NextResponse.json(
       {
         success: false,
-        error: error instanceof Error ? error.message : '服务器内部处理失败',
+        error: message,
       },
       { status: 500 },
     );

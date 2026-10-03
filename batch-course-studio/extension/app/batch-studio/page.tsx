@@ -76,6 +76,7 @@ export default function BatchStudioPage() {
   const [slideTheme, setSlideTheme] = useState<SlideThemeStyle>('light');
 
   const [submitting, setSubmitting] = useState<boolean>(false);
+  const [submitError, setSubmitError] = useState<string | null>(null);
   const [cancellingJob, setCancellingJob] = useState<boolean>(false);
   const [activeJobId, setActiveJobId] = useState<string | null>(null);
   const [currentJob, setCurrentJob] = useState<BatchJob | null>(null);
@@ -95,11 +96,25 @@ export default function BatchStudioPage() {
 
   const fileInputRef = useRef<HTMLInputElement>(null);
 
+  // 格式化文件大小
+  const formatFileSize = (bytes: number): string => {
+    if (!bytes || bytes === 0) return '0 B';
+    const k = 1024;
+    const sizes = ['B', 'KB', 'MB', 'GB'];
+    const i = Math.floor(Math.log(bytes) / Math.log(k));
+    return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
+  };
+
+  const totalFileSize = files.reduce((acc, f) => acc + (f.size || 0), 0);
+  const MAX_BATCH_UPLOAD_BYTES = 1024 * 1024 * 1024; // 1GB
+  const isOverSizeLimit = totalFileSize > MAX_BATCH_UPLOAD_BYTES;
+
   // 文件选择与拖拽
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files) {
       const selected = Array.from(e.target.files);
       setFiles((prev) => [...prev, ...selected]);
+      setSubmitError(null);
     }
   };
 
@@ -108,11 +123,13 @@ export default function BatchStudioPage() {
     if (e.dataTransfer.files) {
       const dropped = Array.from(e.dataTransfer.files);
       setFiles((prev) => [...prev, ...dropped]);
+      setSubmitError(null);
     }
   };
 
   const removeFile = (index: number) => {
     setFiles((prev) => prev.filter((_, i) => i !== index));
+    setSubmitError(null);
   };
 
   // 提交任务
@@ -122,7 +139,15 @@ export default function BatchStudioPage() {
       return;
     }
 
+    if (isOverSizeLimit) {
+      const err = `已选课件总体积 (${formatFileSize(totalFileSize)}) 超出 1GB 上限，请减少文件数量分批提交！`;
+      setSubmitError(err);
+      toast.error(err);
+      return;
+    }
+
     setSubmitting(true);
+    setSubmitError(null);
     const formData = new FormData();
     files.forEach((file) => formData.append('files', file));
     formData.append('mode', mode);
@@ -139,20 +164,23 @@ export default function BatchStudioPage() {
         method: 'POST',
         body: formData,
       });
-      const data = await res.json();
+      const data = await res.json().catch(() => null);
 
-      if (!res.ok || !data.success) {
-        throw new Error(data.error || '创建批量制课任务失败');
+      if (!res.ok || !data?.success) {
+        throw new Error(data?.error || `服务器请求失败 (HTTP ${res.status})`);
       }
 
       toast.success('批量制课任务已成功提交并加入调度队列！');
       setActiveJobId(data.batchId);
       setActiveTab('board');
       setFiles([]);
+      setSubmitError(null);
       loadJobDetails(data.batchId);
       loadRecentJobs();
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : '提交任务失败');
+      const errMsg = err instanceof Error ? err.message : '提交任务失败';
+      setSubmitError(errMsg);
+      toast.error(errMsg);
     } finally {
       setSubmitting(false);
     }
@@ -456,34 +484,66 @@ export default function BatchStudioPage() {
               </p>
             </div>
 
-            {/* 已选文件列表 */}
+            {/* 已选文件列表与体积统计 */}
             {files.length > 0 && (
               <div className="space-y-2">
                 <div className="flex items-center justify-between text-xs text-slate-500">
-                  <span>已选择 {files.length} 个课件文件：</span>
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className="font-semibold text-slate-700 dark:text-slate-200">
+                      已选择 {files.length} 个课件文件
+                    </span>
+                    <span
+                      className={`font-mono px-2 py-0.5 rounded-full text-[11px] font-medium border ${
+                        isOverSizeLimit
+                          ? 'border-red-500/40 bg-red-500/10 text-red-600 dark:text-red-400'
+                          : totalFileSize > 500 * 1024 * 1024
+                          ? 'border-amber-500/40 bg-amber-500/10 text-amber-600 dark:text-amber-400'
+                          : 'border-slate-200 dark:border-slate-800 bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300'
+                      }`}
+                    >
+                      总体积: {formatFileSize(totalFileSize)} / 上限 1GB
+                    </span>
+                  </div>
                   <button
-                    onClick={() => setFiles([])}
-                    className="text-red-500 hover:underline hover:text-red-600"
+                    onClick={() => {
+                      setFiles([]);
+                      setSubmitError(null);
+                    }}
+                    className="text-red-500 hover:underline hover:text-red-600 cursor-pointer"
                   >
                     清空列表
                   </button>
                 </div>
+
+                {/* 超过 1GB 上限强警示 */}
+                {isOverSizeLimit && (
+                  <div className="p-2.5 rounded-lg bg-red-50 dark:bg-red-950/30 border border-red-300 dark:border-red-800 text-red-700 dark:text-red-300 text-xs flex items-center gap-2">
+                    <AlertCircle className="w-4 h-4 shrink-0 text-red-500" />
+                    <span>
+                      已选课件总体积 ({formatFileSize(totalFileSize)}) 已超出 1GB 上限！请删减部分课件分批提交，系统支持全自动串行排队。
+                    </span>
+                  </div>
+                )}
+
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 max-h-48 overflow-y-auto pr-1">
                   {files.map((file, idx) => (
                     <div
                       key={idx}
                       className="flex items-center justify-between p-2.5 rounded-lg border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 text-xs shadow-xs"
                     >
-                      <div className="flex items-center gap-2 truncate pr-2">
+                      <div className="flex items-center gap-2 truncate pr-2 min-w-0">
                         <FileText className="w-4 h-4 text-amber-500 shrink-0" />
                         <span className="truncate font-medium">{file.name}</span>
+                        <span className="text-[10px] text-slate-400 shrink-0 font-mono">
+                          {formatFileSize(file.size)}
+                        </span>
                       </div>
                       <button
                         onClick={(e) => {
                           e.stopPropagation();
                           removeFile(idx);
                         }}
-                        className="text-slate-400 hover:text-red-500 p-1 shrink-0"
+                        className="text-slate-400 hover:text-red-500 p-1 shrink-0 cursor-pointer"
                       >
                         ✕
                       </button>
@@ -817,24 +877,60 @@ export default function BatchStudioPage() {
               </div>
             </div>
 
-            {/* 提交按钮 */}
-            <Button
-              onClick={handleSubmit}
-              disabled={submitting || files.length === 0}
-              className="w-full h-11 bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-600 hover:to-orange-600 text-white font-medium text-sm gap-2 shadow-md shadow-orange-500/20"
-            >
-              {submitting ? (
-                <>
-                  <RefreshCw className="w-4 h-4 animate-spin" />
-                  正在分发上传与解析...
-                </>
-              ) : (
-                <>
-                  <Play className="w-4 h-4 fill-current" />
-                  提交批量制课任务 {files.length > 0 && `(共 ${files.length} 个课件)`}
-                </>
+            {/* 提交异常持久化报警提示 */}
+            {submitError && (
+              <div className="p-3.5 rounded-xl bg-red-50 dark:bg-red-950/40 border border-red-300 dark:border-red-800 text-red-800 dark:text-red-200 text-xs space-y-1.5 shadow-xs">
+                <div className="flex items-center justify-between font-semibold">
+                  <span className="flex items-center gap-1.5 text-red-600 dark:text-red-400">
+                    <AlertCircle className="w-4 h-4 shrink-0" />
+                    任务提交未成功
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => setSubmitError(null)}
+                    className="text-red-400 hover:text-red-600 font-bold px-1.5 py-0.5 rounded cursor-pointer"
+                  >
+                    ✕
+                  </button>
+                </div>
+                <p className="text-slate-700 dark:text-slate-300 leading-relaxed font-mono">
+                  {submitError}
+                </p>
+                <p className="text-[11px] text-red-500/90 pt-0.5">
+                  提示：当前服务器单次上传上限已提升至 1GB。若网络耗时过长或文件过多，建议适当分批提交（系统后台会自动无缝排队执行）。
+                </p>
+              </div>
+            )}
+
+            {/* 提交按钮与上传状态 */}
+            <div className="space-y-2">
+              <Button
+                onClick={handleSubmit}
+                disabled={submitting || files.length === 0 || isOverSizeLimit}
+                className="w-full h-11 bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-600 hover:to-orange-600 text-white font-medium text-sm gap-2 shadow-md shadow-orange-500/20"
+              >
+                {submitting ? (
+                  <>
+                    <RefreshCw className="w-4 h-4 animate-spin" />
+                    正在上传课件 ({files.length} 个文件 · {formatFileSize(totalFileSize)})...
+                  </>
+                ) : (
+                  <>
+                    <Play className="w-4 h-4 fill-current" />
+                    提交批量制课任务 {files.length > 0 && `(共 ${files.length} 个课件 · ${formatFileSize(totalFileSize)})`}
+                  </>
+                )}
+              </Button>
+
+              {submitting && (
+                <div className="p-3 rounded-lg bg-amber-50 dark:bg-amber-950/40 border border-amber-300 dark:border-amber-800 text-amber-800 dark:text-amber-200 text-xs flex items-center gap-2 animate-pulse">
+                  <RefreshCw className="w-4 h-4 animate-spin shrink-0 text-amber-600" />
+                  <span>
+                    正在向服务器分发上传 <strong>{files.length}</strong> 个课件（总体积 <strong>{formatFileSize(totalFileSize)}</strong>），请保持页面打开，数据上传完毕后即可关闭网页离开...
+                  </span>
+                </div>
               )}
-            </Button>
+            </div>
           </div>
         ) : (
           /* 任务看板 */
