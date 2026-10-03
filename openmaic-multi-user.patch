@@ -7260,7 +7260,7 @@ index 00000000..ad2c5414
 +}
 diff --git a/ecosystem.config.cjs b/ecosystem.config.cjs
 new file mode 100644
-index 00000000..90d79220
+index 00000000..25cd34fa
 --- /dev/null
 +++ b/ecosystem.config.cjs
 @@ -0,0 +1,18 @@
@@ -7276,7 +7276,7 @@ index 00000000..90d79220
 +        PORT: '3000',
 +        HOSTNAME: '0.0.0.0',
 +      },
-+      max_memory_restart: '2G',
++      max_memory_restart: '8G',
 +      autorestart: true,
 +      restart_delay: 2000,
 +    },

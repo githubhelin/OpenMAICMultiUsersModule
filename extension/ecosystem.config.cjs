@@ -10,7 +10,7 @@ module.exports = {
         PORT: '3000',
         HOSTNAME: '0.0.0.0',
       },
-      max_memory_restart: '2G',
+      max_memory_restart: '8G',
       autorestart: true,
       restart_delay: 2000,
     },
