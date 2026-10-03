@@ -6,7 +6,7 @@ import type { User, SafeUser, UserRole } from './types';
 let authPool: Pool | null = null;
 let schemaInitPromise: Promise<void> | null = null;
 
-function getPool(): Pool {
+export function getPool(): Pool {
   if (!authPool) {
     const connectionString = process.env.DATABASE_URL;
     if (!connectionString) {
@@ -44,6 +44,16 @@ export async function ensureUserSchema(): Promise<void> {
       );
       CREATE INDEX IF NOT EXISTS idx_users_username ON users(username);
       CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
+
+      CREATE TABLE IF NOT EXISTS user_kv_store (
+        user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        key TEXT NOT NULL,
+        value JSONB NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        PRIMARY KEY (user_id, key)
+      );
+      CREATE INDEX IF NOT EXISTS idx_user_kv_store_user_id ON user_kv_store(user_id);
     `);
 
     // Ensure default initial admin exists

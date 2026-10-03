@@ -53,6 +53,16 @@ export async function POST(req: NextRequest) {
       const slideTheme: SlideThemeStyle =
         rawSlideTheme === 'dark' ? 'dark' : 'light';
       const expectedTotal = parseInt((formData.get('totalTasks') as string) || '0', 10);
+      const pdfProviderId = (formData.get('pdfProviderId') as string) || undefined;
+      const rawPdfProviderConfig = formData.get('pdfProviderConfig') as string;
+      let pdfProviderConfig: BatchJob['pdfProviderConfig'] = undefined;
+      if (rawPdfProviderConfig) {
+        try {
+          pdfProviderConfig = JSON.parse(rawPdfProviderConfig);
+        } catch {
+          // Ignore parse errors
+        }
+      }
 
       const jobId = `batch_${nanoid(10)}`;
       const now = new Date().toISOString();
@@ -77,6 +87,8 @@ export async function POST(req: NextRequest) {
         courseScale,
         interactiveTheme,
         slideTheme,
+        pdfProviderId,
+        pdfProviderConfig,
         totalTasks: expectedTotal,
         completedTasks: 0,
         failedTasks: 0,
@@ -121,12 +133,20 @@ export async function POST(req: NextRequest) {
       await fs.writeFile(tempFilePath, buffer);
 
       const ext = safeName.toLowerCase().split('.').pop() || '';
+      const docLabel =
+        job.pdfProviderId === 'mineru'
+          ? 'MinerU 文档解析'
+          : job.pdfProviderId === 'unpdf'
+            ? 'unpdf 轻量解析器'
+            : job.pdfProviderId === 'alidocmind'
+              ? '阿里文档智能'
+              : 'MinerU 文档解析';
       const guessedExtractor =
         ext === 'pptx'
           ? 'PPTX 原生解析器'
           : ext === 'txt' || ext === 'md'
             ? '纯文本解析器'
-            : 'MinerU 文档解析';
+            : docLabel;
 
       const task: BatchSubTask = {
         id: taskId,
@@ -221,10 +241,29 @@ export async function POST(req: NextRequest) {
     const rawSlideTheme = formData.get('slideTheme') as string;
     const slideTheme: SlideThemeStyle =
       rawSlideTheme === 'dark' ? 'dark' : 'light';
+    const pdfProviderId = (formData.get('pdfProviderId') as string) || undefined;
+    const rawPdfProviderConfig = formData.get('pdfProviderConfig') as string;
+    let pdfProviderConfig: BatchJob['pdfProviderConfig'] = undefined;
+    if (rawPdfProviderConfig) {
+      try {
+        pdfProviderConfig = JSON.parse(rawPdfProviderConfig);
+      } catch {
+        // Ignore parse errors
+      }
+    }
 
     const jobId = `batch_${nanoid(10)}`;
     const now = new Date().toISOString();
     const baseUrl = buildRequestOrigin(req);
+
+    const docLabel =
+      pdfProviderId === 'mineru'
+        ? 'MinerU 文档解析'
+        : pdfProviderId === 'unpdf'
+          ? 'unpdf 轻量解析器'
+          : pdfProviderId === 'alidocmind'
+            ? '阿里文档智能'
+            : 'MinerU 文档解析';
 
     const tasks: BatchSubTask[] = [];
 
@@ -245,7 +284,7 @@ export async function POST(req: NextRequest) {
           ? 'PPTX 原生解析器'
           : ext === 'txt' || ext === 'md'
             ? '纯文本解析器'
-            : 'MinerU 文档解析';
+            : docLabel;
 
       tasks.push({
         id: taskId,
@@ -279,6 +318,8 @@ export async function POST(req: NextRequest) {
       courseScale,
       interactiveTheme,
       slideTheme,
+      pdfProviderId,
+      pdfProviderConfig,
       totalTasks: tasks.length,
       completedTasks: 0,
       failedTasks: 0,

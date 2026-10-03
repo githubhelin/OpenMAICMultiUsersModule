@@ -57,6 +57,13 @@ export interface BatchJob {
   courseScale?: CourseScale;
   interactiveTheme?: InteractiveThemeStyle;
   slideTheme?: SlideThemeStyle;
+  pdfProviderId?: string;
+  pdfProviderConfig?: {
+    baseUrl?: string;
+    apiKey?: string;
+    accessKeyId?: string;
+    accessKeySecret?: string;
+  };
   totalTasks: number;
   completedTasks: number;
   failedTasks: number;

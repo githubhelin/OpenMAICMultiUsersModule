@@ -9,6 +9,7 @@ import { buildCourseScaleInstruction } from '@/lib/types/course-scale';
 import { syncInteractiveLibraryForStage } from '@/lib/server/interactive-library';
 import { getStageAccessDb } from '@/lib/server/stage-access';
 import { markStageGenerationComplete } from '@/lib/persistence/stage-meta';
+import { getUserKV } from '@/lib/server/kv/user-kv';
 
 const log = createLogger('BatchJobRunner');
 const runningBatchJobs = new Map<string, Promise<void>>();
@@ -256,6 +257,32 @@ async function executeBatchJobInternal(jobId: string, baseUrl: string): Promise<
       }
     });
 
+    // 自动继承用户服务端存储的设置 (MinerU / 阿里 / unpdf 等)
+    let inheritedPdfProviderId = initialJob.pdfProviderId;
+    let inheritedPdfProviderConfig = initialJob.pdfProviderConfig;
+
+    if (!inheritedPdfProviderId && initialJob.ownerId?.startsWith('user:')) {
+      try {
+        const userId = initialJob.ownerId.replace('user:', '');
+        const userSettings = await getUserKV<any>(userId, 'openmaic-settings');
+        const pid = userSettings?.pdfProviderId;
+        if (pid) {
+          inheritedPdfProviderId = pid;
+          inheritedPdfProviderConfig = userSettings.pdfProvidersConfig?.[pid];
+          log.info(`Batch job ${jobId} automatically inherited PDF extractor from user ${userId}: ${pid}`);
+        }
+      } catch (err) {
+        log.warn(`Failed to inspect user settings for job ${jobId}:`, err);
+      }
+    }
+
+    if (inheritedPdfProviderId && (!initialJob.pdfProviderId || !initialJob.pdfProviderConfig)) {
+      await updateBatchJob(jobId, (j) => {
+        j.pdfProviderId = inheritedPdfProviderId;
+        j.pdfProviderConfig = inheritedPdfProviderConfig;
+      });
+    }
+
     if (initialJob.mode === 'single_merged') {
       await executeSingleMergedJob(jobId, baseUrl, controller);
     } else {
@@ -316,9 +343,17 @@ async function executeSingleMergedJob(
     const progress = Math.round(5 + (i / job.tasks.length) * 20);
 
     const ext = task.fileName.toLowerCase().split('.').pop() || '';
+    const defaultDocExtractor =
+      job.pdfProviderId === 'mineru'
+        ? 'MinerU 文档解析'
+        : job.pdfProviderId === 'unpdf'
+          ? 'unpdf 轻量解析器'
+          : job.pdfProviderId === 'alidocmind'
+            ? '阿里文档智能'
+            : 'MinerU 文档解析';
     const guessedExtractor =
       task.extractorName ||
-      (ext === 'pptx' ? 'PPTX 原生解析器' : ext === 'txt' || ext === 'md' ? '纯文本解析器' : 'MinerU 文档解析');
+      (ext === 'pptx' ? 'PPTX 原生解析器' : ext === 'txt' || ext === 'md' ? '纯文本解析器' : defaultDocExtractor);
 
     await updateBatchJob(jobId, (j) => {
       j.progress = progress;
@@ -333,7 +368,10 @@ async function executeSingleMergedJob(
 
     try {
       if (task.tempFilePath) {
-        const extracted = await extractFileContent(task.tempFilePath, task.fileName, task.mimeType);
+        const extracted = await extractFileContent(task.tempFilePath, task.fileName, task.mimeType, {
+          providerId: job.pdfProviderId,
+          config: job.pdfProviderConfig,
+        });
         extractedTexts.push(`### 教学参考资料 [${i + 1}]: ${task.fileName}\n${extracted.text}`);
         extractedImages.push(...extracted.images);
 
@@ -488,9 +526,17 @@ async function executeBatchIndependentJob(
     log.info(`[${i + 1}/${totalTasks}] Starting task: ${task.fileName}`);
 
     const ext = task.fileName.toLowerCase().split('.').pop() || '';
+    const defaultDocExtractor =
+      currentJob.pdfProviderId === 'mineru'
+        ? 'MinerU 文档解析'
+        : currentJob.pdfProviderId === 'unpdf'
+          ? 'unpdf 轻量解析器'
+          : currentJob.pdfProviderId === 'alidocmind'
+            ? '阿里文档智能'
+            : 'MinerU 文档解析';
     const guessedExtractor =
       task.extractorName ||
-      (ext === 'pptx' ? 'PPTX 原生解析器' : ext === 'txt' || ext === 'md' ? '纯文本解析器' : 'MinerU 文档解析');
+      (ext === 'pptx' ? 'PPTX 原生解析器' : ext === 'txt' || ext === 'md' ? '纯文本解析器' : defaultDocExtractor);
 
     await updateBatchJob(jobId, (j) => {
       const target = j.tasks[taskIndex];
@@ -509,7 +555,10 @@ async function executeBatchIndependentJob(
       }
 
       // 1. 提取当前文件内容
-      const extracted = await extractFileContent(task.tempFilePath, task.fileName, task.mimeType);
+      const extracted = await extractFileContent(task.tempFilePath, task.fileName, task.mimeType, {
+        providerId: currentJob.pdfProviderId,
+        config: currentJob.pdfProviderConfig,
+      });
 
       if (controller.signal.aborted) {
         const err = new Error('Batch job cancelled by user');

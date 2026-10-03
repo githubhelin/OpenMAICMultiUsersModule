@@ -76,12 +76,21 @@ export async function extractFileContent(
   filePath: string,
   fileName: string,
   declaredMime?: string,
+  pdfOptions?: {
+    providerId?: string;
+    config?: {
+      baseUrl?: string;
+      apiKey?: string;
+      accessKeyId?: string;
+      accessKeySecret?: string;
+    };
+  },
 ): Promise<ExtractedContent> {
   const buffer = await fs.readFile(filePath);
   const ext = fileName.toLowerCase().split('.').pop() || '';
   const mimeType = normalizeDocumentMimeType({ fileName, mimeType: declaredMime });
 
-  log.info(`Extracting content for ${fileName} [ext=${ext}, mime=${mimeType}, size=${buffer.length} bytes]`);
+  log.info(`Extracting content for ${fileName} [ext=${ext}, mime=${mimeType}, size=${buffer.length} bytes, preferredExtractor=${pdfOptions?.providerId || 'auto'}]`);
 
   let isFallback = false;
 
@@ -114,10 +123,22 @@ export async function extractFileContent(
     };
   }
 
-  // 3. PDF / DOCX 等利用 OpenMAIC 的底层提取器（自动使用 MinerU / AliDocMind）
-  let providerLabel = 'MinerU 文档解析';
+  // 3. PDF / DOCX 等利用 OpenMAIC 的底层提取器（精准匹配 MinerU / AliDocMind / unpdf）
+  const preferredProviderId = (pdfOptions?.providerId || undefined) as any;
+  let providerLabel =
+    preferredProviderId === 'mineru'
+      ? 'MinerU 文档解析'
+      : preferredProviderId === 'unpdf'
+        ? 'unpdf 轻量解析器'
+        : preferredProviderId === 'alidocmind'
+          ? '阿里文档智能'
+          : '文档解析器';
+
   try {
-    const provider = selectDocumentExtractorProvider({ mimeType });
+    const provider = selectDocumentExtractorProvider({
+      mimeType,
+      preferredProviderId,
+    });
     if (provider?.displayName) {
       providerLabel = provider.displayName;
     }
@@ -132,7 +153,11 @@ export async function extractFileContent(
       fileName,
       mimeType,
       config: {
-        providerId: '',
+        providerId: preferredProviderId || '',
+        baseUrl: pdfOptions?.config?.baseUrl,
+        apiKey: pdfOptions?.config?.apiKey,
+        accessKeyId: pdfOptions?.config?.accessKeyId,
+        accessKeySecret: pdfOptions?.config?.accessKeySecret,
         allowEnvFallback: true,
       },
     });

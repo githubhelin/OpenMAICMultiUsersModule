@@ -1,6 +1,6 @@
 import { promises as fs } from 'fs';
 import { parsePptxIsolated } from '@/lib/server/agent-runtime/import-pptx';
-import { extractDocument, documentArtifactToParsedPdfContent } from '@/lib/document';
+import { extractDocument, documentArtifactToParsedPdfContent, selectDocumentExtractorProvider } from '@/lib/document';
 import { normalizeDocumentMimeType } from '@/lib/document/mime';
 import { createLogger } from '@/lib/logger';
 import type { Slide } from '@openmaic/dsl';
@@ -12,6 +12,7 @@ export interface ExtractedContent {
   images: string[];
   title?: string;
   slideCount?: number;
+  extractorName?: string;
 }
 
 function stripHtml(html: string): string {
@@ -75,12 +76,23 @@ export async function extractFileContent(
   filePath: string,
   fileName: string,
   declaredMime?: string,
+  pdfOptions?: {
+    providerId?: string;
+    config?: {
+      baseUrl?: string;
+      apiKey?: string;
+      accessKeyId?: string;
+      accessKeySecret?: string;
+    };
+  },
 ): Promise<ExtractedContent> {
   const buffer = await fs.readFile(filePath);
   const ext = fileName.toLowerCase().split('.').pop() || '';
   const mimeType = normalizeDocumentMimeType({ fileName, mimeType: declaredMime });
 
-  log.info(`Extracting content for ${fileName} [ext=${ext}, mime=${mimeType}, size=${buffer.length} bytes]`);
+  log.info(`Extracting content for ${fileName} [ext=${ext}, mime=${mimeType}, size=${buffer.length} bytes, preferredExtractor=${pdfOptions?.providerId || 'auto'}]`);
+
+  let isFallback = false;
 
   // 1. PPTX 文件处理（原汁原味抽取每一页与批注讲解）
   if (ext === 'pptx' || mimeType.includes('presentationml')) {
@@ -88,9 +100,14 @@ export async function extractFileContent(
       const slides = await parsePptxIsolated(buffer.buffer);
       if (slides && slides.length > 0) {
         log.info(`Parsed ${slides.length} slides from PPTX: ${fileName}`);
-        return extractFromPptxSlides(slides);
+        const parsed = extractFromPptxSlides(slides);
+        return {
+          ...parsed,
+          extractorName: 'PPTX 原生解析器',
+        };
       }
     } catch (err) {
+      isFallback = true;
       log.warn(`Isolated PPTX parse failed for ${fileName}, attempting fallback document extractor:`, err);
     }
   }
@@ -102,17 +119,45 @@ export async function extractFileContent(
       text,
       images: [],
       title: fileName.replace(/\.[^/.]+$/, ''),
+      extractorName: '纯文本轻量解析器',
     };
   }
 
-  // 3. PDF / DOCX 等利用 OpenMAIC 的底层提取器（自动使用 MinerU / AliDocMind）
+  // 3. PDF / DOCX 等利用 OpenMAIC 的底层提取器（精准匹配 MinerU / AliDocMind / unpdf）
+  const preferredProviderId = (pdfOptions?.providerId || undefined) as any;
+  let providerLabel =
+    preferredProviderId === 'mineru'
+      ? 'MinerU 文档解析'
+      : preferredProviderId === 'unpdf'
+        ? 'unpdf 轻量解析器'
+        : preferredProviderId === 'alidocmind'
+          ? '阿里文档智能'
+          : '文档解析器';
+
+  try {
+    const provider = selectDocumentExtractorProvider({
+      mimeType,
+      preferredProviderId,
+    });
+    if (provider?.displayName) {
+      providerLabel = provider.displayName;
+    }
+  } catch {
+    // 保持默认
+  }
+  const extractorName = isFallback ? `${providerLabel} (降级解析)` : providerLabel;
+
   try {
     const artifact = await extractDocument({
       buffer,
       fileName,
       mimeType,
       config: {
-        providerId: '',
+        providerId: preferredProviderId || '',
+        baseUrl: pdfOptions?.config?.baseUrl,
+        apiKey: pdfOptions?.config?.apiKey,
+        accessKeyId: pdfOptions?.config?.accessKeyId,
+        accessKeySecret: pdfOptions?.config?.accessKeySecret,
         allowEnvFallback: true,
       },
     });
@@ -121,15 +166,16 @@ export async function extractFileContent(
     const text = parsed.text || '';
     const images = (parsed.images || []).slice(0, 15);
 
-    log.info(`Document extracted successfully: ${fileName} (${text.length} chars, ${images.length} images)`);
+    log.info(`Document extracted successfully with ${extractorName}: ${fileName} (${text.length} chars, ${images.length} images)`);
 
     return {
       text,
       images,
       title: fileName.replace(/\.[^/.]+$/, ''),
+      extractorName,
     };
   } catch (err) {
-    log.error(`Document extraction failed for ${fileName}:`, err);
+    log.error(`Document extraction failed for ${fileName} via ${extractorName}:`, err);
     // 即使高级解析失败，若含有可读文本，做兜底容灾
     const rawText = buffer.toString('utf-8').replace(/[^\x20-\x7E\u4e00-\u9fa5\n\r\t]/g, '');
     if (rawText.length > 100) {
@@ -137,6 +183,7 @@ export async function extractFileContent(
         text: rawText.slice(0, 20000),
         images: [],
         title: fileName.replace(/\.[^/.]+$/, ''),
+        extractorName: '纯文本容灾提取',
       };
     }
     throw new Error(`无法解析课件文件 "${fileName}": ${err instanceof Error ? err.message : String(err)}`);

@@ -147,10 +147,10 @@ index 00000000..ae23767d
 +}
 diff --git a/app/api/batch-generate/route.ts b/app/api/batch-generate/route.ts
 new file mode 100644
-index 00000000..003b5ceb
+index 00000000..34c12568
 --- /dev/null
 +++ b/app/api/batch-generate/route.ts
-@@ -0,0 +1,358 @@
+@@ -0,0 +1,399 @@
 +import { after, type NextRequest, NextResponse } from 'next/server';
 +import { promises as fs } from 'fs';
 +import path from 'path';
@@ -206,6 +206,16 @@ index 00000000..003b5ceb
 +      const slideTheme: SlideThemeStyle =
 +        rawSlideTheme === 'dark' ? 'dark' : 'light';
 +      const expectedTotal = parseInt((formData.get('totalTasks') as string) || '0', 10);
++      const pdfProviderId = (formData.get('pdfProviderId') as string) || undefined;
++      const rawPdfProviderConfig = formData.get('pdfProviderConfig') as string;
++      let pdfProviderConfig: BatchJob['pdfProviderConfig'] = undefined;
++      if (rawPdfProviderConfig) {
++        try {
++          pdfProviderConfig = JSON.parse(rawPdfProviderConfig);
++        } catch {
++          // Ignore parse errors
++        }
++      }
 +
 +      const jobId = `batch_${nanoid(10)}`;
 +      const now = new Date().toISOString();
@@ -230,6 +240,8 @@ index 00000000..003b5ceb
 +        courseScale,
 +        interactiveTheme,
 +        slideTheme,
++        pdfProviderId,
++        pdfProviderConfig,
 +        totalTasks: expectedTotal,
 +        completedTasks: 0,
 +        failedTasks: 0,
@@ -274,12 +286,20 @@ index 00000000..003b5ceb
 +      await fs.writeFile(tempFilePath, buffer);
 +
 +      const ext = safeName.toLowerCase().split('.').pop() || '';
++      const docLabel =
++        job.pdfProviderId === 'mineru'
++          ? 'MinerU 文档解析'
++          : job.pdfProviderId === 'unpdf'
++            ? 'unpdf 轻量解析器'
++            : job.pdfProviderId === 'alidocmind'
++              ? '阿里文档智能'
++              : 'MinerU 文档解析';
 +      const guessedExtractor =
 +        ext === 'pptx'
 +          ? 'PPTX 原生解析器'
 +          : ext === 'txt' || ext === 'md'
 +            ? '纯文本解析器'
-+            : 'MinerU 文档解析';
++            : docLabel;
 +
 +      const task: BatchSubTask = {
 +        id: taskId,
@@ -374,10 +394,29 @@ index 00000000..003b5ceb
 +    const rawSlideTheme = formData.get('slideTheme') as string;
 +    const slideTheme: SlideThemeStyle =
 +      rawSlideTheme === 'dark' ? 'dark' : 'light';
++    const pdfProviderId = (formData.get('pdfProviderId') as string) || undefined;
++    const rawPdfProviderConfig = formData.get('pdfProviderConfig') as string;
++    let pdfProviderConfig: BatchJob['pdfProviderConfig'] = undefined;
++    if (rawPdfProviderConfig) {
++      try {
++        pdfProviderConfig = JSON.parse(rawPdfProviderConfig);
++      } catch {
++        // Ignore parse errors
++      }
++    }
 +
 +    const jobId = `batch_${nanoid(10)}`;
 +    const now = new Date().toISOString();
 +    const baseUrl = buildRequestOrigin(req);
++
++    const docLabel =
++      pdfProviderId === 'mineru'
++        ? 'MinerU 文档解析'
++        : pdfProviderId === 'unpdf'
++          ? 'unpdf 轻量解析器'
++          : pdfProviderId === 'alidocmind'
++            ? '阿里文档智能'
++            : 'MinerU 文档解析';
 +
 +    const tasks: BatchSubTask[] = [];
 +
@@ -398,7 +437,7 @@ index 00000000..003b5ceb
 +          ? 'PPTX 原生解析器'
 +          : ext === 'txt' || ext === 'md'
 +            ? '纯文本解析器'
-+            : 'MinerU 文档解析';
++            : docLabel;
 +
 +      tasks.push({
 +        id: taskId,
@@ -432,6 +471,8 @@ index 00000000..003b5ceb
 +      courseScale,
 +      interactiveTheme,
 +      slideTheme,
++      pdfProviderId,
++      pdfProviderConfig,
 +      totalTasks: tasks.length,
 +      completedTasks: 0,
 +      failedTasks: 0,
@@ -511,10 +552,10 @@ index 00000000..003b5ceb
 +}
 diff --git a/app/batch-studio/page.tsx b/app/batch-studio/page.tsx
 new file mode 100644
-index 00000000..9f808a2d
+index 00000000..1073a3b4
 --- /dev/null
 +++ b/app/batch-studio/page.tsx
-@@ -0,0 +1,1370 @@
+@@ -0,0 +1,1488 @@
 +'use client';
 +
 +import React, { useState, useEffect, useRef } from 'react';
@@ -563,6 +604,8 @@ index 00000000..9f808a2d
 +  THEME_STYLE_PRESETS,
 +  getThemeStyleSummary,
 +} from '@/lib/types/theme-style';
++import { useSettingsStore } from '@/lib/store/settings';
++import type { PDFProviderId } from '@/lib/pdf/types';
 +
 +export const DEFAULT_PEDAGOGICAL_PROMPT = `# 教学角色与目标
 +你是一位顶尖的“交互式课程设计师兼智能体教学专家”，深度掌握 OpenMAIC 的多智能体协作与动态课件生成能力。请根据上传的课件内容，设计一堂高参与度、高互动性的优质沉浸式交互微课。
@@ -579,6 +622,11 @@ index 00000000..9f808a2d
 +
 +export default function BatchStudioPage() {
 +  const router = useRouter();
++
++  // 系统全局设置同步
++  const currentPdfProviderId = useSettingsStore((s) => s.pdfProviderId);
++  const pdfProvidersConfig = useSettingsStore((s) => s.pdfProvidersConfig);
++  const setPDFProvider = useSettingsStore((s) => s.setPDFProvider);
 +
 +  // 状态
 +  const [activeTab, setActiveTab] = useState<'create' | 'board'>('create');
@@ -687,6 +735,25 @@ index 00000000..9f808a2d
 +      initFormData.append('interactiveTheme', interactiveTheme);
 +      initFormData.append('slideTheme', slideTheme);
 +      initFormData.append('totalTasks', String(totalFiles));
++
++      const settingsSnapshot = useSettingsStore.getState();
++      const effectivePdfProviderId = settingsSnapshot.pdfProviderId;
++      const effectivePdfProviderConfig = settingsSnapshot.pdfProvidersConfig?.[effectivePdfProviderId];
++
++      if (effectivePdfProviderId) {
++        initFormData.append('pdfProviderId', effectivePdfProviderId);
++      }
++      if (effectivePdfProviderConfig) {
++        initFormData.append(
++          'pdfProviderConfig',
++          JSON.stringify({
++            baseUrl: effectivePdfProviderConfig.baseUrl,
++            apiKey: effectivePdfProviderConfig.apiKey,
++            accessKeyId: effectivePdfProviderConfig.accessKeyId,
++            accessKeySecret: effectivePdfProviderConfig.accessKeySecret,
++          })
++        );
++      }
 +
 +      const initRes = await fetch('/api/batch-generate', {
 +        method: 'POST',
@@ -1389,6 +1456,98 @@ index 00000000..9f808a2d
 +                      <Moon className="w-3 h-3 text-indigo-400" />
 +                      深色幻灯 (暗夜)
 +                    </button>
++                  </div>
++                </div>
++              </div>
++            </div>
++
++            {/* 文档解析引擎选择 (MinerU / unpdf / 阿里文档智能) */}
++            <div className="space-y-3 p-4 rounded-xl border border-slate-200 dark:border-slate-800 bg-white/70 dark:bg-slate-900/60">
++              <div className="flex items-center justify-between">
++                <label className="text-sm font-medium text-slate-700 dark:text-slate-300 flex items-center gap-1.5">
++                  <FileText className="w-4 h-4 text-emerald-500" />
++                  PDF / 资料解析引擎
++                </label>
++                <button
++                  type="button"
++                  onClick={() => router.push('/settings')}
++                  className="text-xs text-amber-600 dark:text-amber-400 hover:underline flex items-center gap-1 cursor-pointer"
++                  title="前往系统设置修改 MinerU 服务地址与凭据"
++                >
++                  <SlidersHorizontal className="w-3 h-3" />
++                  配置解析服务与地址
++                </button>
++              </div>
++
++              <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
++                {/* 1. MinerU */}
++                <div
++                  onClick={() => setPDFProvider('mineru')}
++                  className={`cursor-pointer p-3 rounded-lg border text-left transition-all ${
++                    currentPdfProviderId === 'mineru'
++                      ? 'border-emerald-500 bg-emerald-50/60 dark:bg-emerald-950/30 shadow-xs ring-1 ring-emerald-500/40'
++                      : 'border-slate-200 dark:border-slate-800 bg-slate-50/50 dark:bg-slate-800/40 hover:border-slate-300 dark:hover:border-slate-700'
++                  }`}
++                >
++                  <div className="flex items-center justify-between mb-1">
++                    <span className="font-semibold text-xs text-slate-800 dark:text-slate-200 flex items-center gap-1.5">
++                      MinerU (推荐)
++                    </span>
++                    {currentPdfProviderId === 'mineru' && <Check className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400" />}
++                  </div>
++                  <p className="text-[11px] text-slate-500 dark:text-slate-400 leading-snug">
++                    深度版面分析，支持正文、复杂表格、数学公式与高清插图智能提取。
++                  </p>
++                  <div className="mt-1.5 text-[10px] font-mono text-emerald-600 dark:text-emerald-400 truncate">
++                    {pdfProvidersConfig?.mineru?.baseUrl
++                      ? `已接入: ${pdfProvidersConfig.mineru.baseUrl}`
++                      : '已启用默认 MinerU 服务'}
++                  </div>
++                </div>
++
++                {/* 2. unpdf */}
++                <div
++                  onClick={() => setPDFProvider('unpdf')}
++                  className={`cursor-pointer p-3 rounded-lg border text-left transition-all ${
++                    currentPdfProviderId === 'unpdf'
++                      ? 'border-emerald-500 bg-emerald-50/60 dark:bg-emerald-950/30 shadow-xs ring-1 ring-emerald-500/40'
++                      : 'border-slate-200 dark:border-slate-800 bg-slate-50/50 dark:bg-slate-800/40 hover:border-slate-300 dark:hover:border-slate-700'
++                  }`}
++                >
++                  <div className="flex items-center justify-between mb-1">
++                    <span className="font-semibold text-xs text-slate-800 dark:text-slate-200 flex items-center gap-1.5">
++                      unpdf 轻量解析器
++                    </span>
++                    {currentPdfProviderId === 'unpdf' && <Check className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400" />}
++                  </div>
++                  <p className="text-[11px] text-slate-500 dark:text-slate-400 leading-snug">
++                    纯文本快速提取，极速轻量，不提取复杂图表与插图。
++                  </p>
++                  <div className="mt-1.5 text-[10px] font-mono text-slate-400">
++                    无需任何第三方服务，原生秒级解析
++                  </div>
++                </div>
++
++                {/* 3. AliDocMind */}
++                <div
++                  onClick={() => setPDFProvider('alidocmind')}
++                  className={`cursor-pointer p-3 rounded-lg border text-left transition-all ${
++                    currentPdfProviderId === 'alidocmind'
++                      ? 'border-emerald-500 bg-emerald-50/60 dark:bg-emerald-950/30 shadow-xs ring-1 ring-emerald-500/40'
++                      : 'border-slate-200 dark:border-slate-800 bg-slate-50/50 dark:bg-slate-800/40 hover:border-slate-300 dark:hover:border-slate-700'
++                  }`}
++                >
++                  <div className="flex items-center justify-between mb-1">
++                    <span className="font-semibold text-xs text-slate-800 dark:text-slate-200 flex items-center gap-1.5">
++                      阿里文档智能
++                    </span>
++                    {currentPdfProviderId === 'alidocmind' && <Check className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400" />}
++                  </div>
++                  <p className="text-[11px] text-slate-500 dark:text-slate-400 leading-snug">
++                    阿里云文档智能服务，支持高精度 OCR、表格与版面识别。
++                  </p>
++                  <div className="mt-1.5 text-[10px] font-mono text-slate-400 truncate">
++                    {pdfProvidersConfig?.alidocmind?.accessKeyId ? '已配置阿里云 AK/SK' : '需在设置中配置 AK/SK'}
 +                  </div>
 +                </div>
 +              </div>
@@ -2250,10 +2409,10 @@ index 00000000..3f19478b
 +}
 diff --git a/lib/server/batch-generation/extractor.ts b/lib/server/batch-generation/extractor.ts
 new file mode 100644
-index 00000000..7c4e9bd0
+index 00000000..f5104f6b
 --- /dev/null
 +++ b/lib/server/batch-generation/extractor.ts
-@@ -0,0 +1,166 @@
+@@ -0,0 +1,191 @@
 +import { promises as fs } from 'fs';
 +import { parsePptxIsolated } from '@/lib/server/agent-runtime/import-pptx';
 +import { extractDocument, documentArtifactToParsedPdfContent, selectDocumentExtractorProvider } from '@/lib/document';
@@ -2332,12 +2491,21 @@ index 00000000..7c4e9bd0
 +  filePath: string,
 +  fileName: string,
 +  declaredMime?: string,
++  pdfOptions?: {
++    providerId?: string;
++    config?: {
++      baseUrl?: string;
++      apiKey?: string;
++      accessKeyId?: string;
++      accessKeySecret?: string;
++    };
++  },
 +): Promise<ExtractedContent> {
 +  const buffer = await fs.readFile(filePath);
 +  const ext = fileName.toLowerCase().split('.').pop() || '';
 +  const mimeType = normalizeDocumentMimeType({ fileName, mimeType: declaredMime });
 +
-+  log.info(`Extracting content for ${fileName} [ext=${ext}, mime=${mimeType}, size=${buffer.length} bytes]`);
++  log.info(`Extracting content for ${fileName} [ext=${ext}, mime=${mimeType}, size=${buffer.length} bytes, preferredExtractor=${pdfOptions?.providerId || 'auto'}]`);
 +
 +  let isFallback = false;
 +
@@ -2370,10 +2538,22 @@ index 00000000..7c4e9bd0
 +    };
 +  }
 +
-+  // 3. PDF / DOCX 等利用 OpenMAIC 的底层提取器（自动使用 MinerU / AliDocMind）
-+  let providerLabel = 'MinerU 文档解析';
++  // 3. PDF / DOCX 等利用 OpenMAIC 的底层提取器（精准匹配 MinerU / AliDocMind / unpdf）
++  const preferredProviderId = (pdfOptions?.providerId || undefined) as any;
++  let providerLabel =
++    preferredProviderId === 'mineru'
++      ? 'MinerU 文档解析'
++      : preferredProviderId === 'unpdf'
++        ? 'unpdf 轻量解析器'
++        : preferredProviderId === 'alidocmind'
++          ? '阿里文档智能'
++          : '文档解析器';
++
 +  try {
-+    const provider = selectDocumentExtractorProvider({ mimeType });
++    const provider = selectDocumentExtractorProvider({
++      mimeType,
++      preferredProviderId,
++    });
 +    if (provider?.displayName) {
 +      providerLabel = provider.displayName;
 +    }
@@ -2388,7 +2568,11 @@ index 00000000..7c4e9bd0
 +      fileName,
 +      mimeType,
 +      config: {
-+        providerId: '',
++        providerId: preferredProviderId || '',
++        baseUrl: pdfOptions?.config?.baseUrl,
++        apiKey: pdfOptions?.config?.apiKey,
++        accessKeyId: pdfOptions?.config?.accessKeyId,
++        accessKeySecret: pdfOptions?.config?.accessKeySecret,
 +        allowEnvFallback: true,
 +      },
 +    });
@@ -2422,10 +2606,10 @@ index 00000000..7c4e9bd0
 +}
 diff --git a/lib/server/batch-generation/runner.ts b/lib/server/batch-generation/runner.ts
 new file mode 100644
-index 00000000..7048ce88
+index 00000000..f3ea8d76
 --- /dev/null
 +++ b/lib/server/batch-generation/runner.ts
-@@ -0,0 +1,705 @@
+@@ -0,0 +1,754 @@
 +import { promises as fs } from 'fs';
 +import { createLogger } from '@/lib/logger';
 +import { generateClassroom } from '@/lib/server/classroom-generation';
@@ -2437,6 +2621,7 @@ index 00000000..7048ce88
 +import { syncInteractiveLibraryForStage } from '@/lib/server/interactive-library';
 +import { getStageAccessDb } from '@/lib/server/stage-access';
 +import { markStageGenerationComplete } from '@/lib/persistence/stage-meta';
++import { getUserKV } from '@/lib/server/kv/user-kv';
 +
 +const log = createLogger('BatchJobRunner');
 +const runningBatchJobs = new Map<string, Promise<void>>();
@@ -2684,6 +2869,32 @@ index 00000000..7048ce88
 +      }
 +    });
 +
++    // 自动继承用户服务端存储的设置 (MinerU / 阿里 / unpdf 等)
++    let inheritedPdfProviderId = initialJob.pdfProviderId;
++    let inheritedPdfProviderConfig = initialJob.pdfProviderConfig;
++
++    if (!inheritedPdfProviderId && initialJob.ownerId?.startsWith('user:')) {
++      try {
++        const userId = initialJob.ownerId.replace('user:', '');
++        const userSettings = await getUserKV<any>(userId, 'openmaic-settings');
++        const pid = userSettings?.pdfProviderId;
++        if (pid) {
++          inheritedPdfProviderId = pid;
++          inheritedPdfProviderConfig = userSettings.pdfProvidersConfig?.[pid];
++          log.info(`Batch job ${jobId} automatically inherited PDF extractor from user ${userId}: ${pid}`);
++        }
++      } catch (err) {
++        log.warn(`Failed to inspect user settings for job ${jobId}:`, err);
++      }
++    }
++
++    if (inheritedPdfProviderId && (!initialJob.pdfProviderId || !initialJob.pdfProviderConfig)) {
++      await updateBatchJob(jobId, (j) => {
++        j.pdfProviderId = inheritedPdfProviderId;
++        j.pdfProviderConfig = inheritedPdfProviderConfig;
++      });
++    }
++
 +    if (initialJob.mode === 'single_merged') {
 +      await executeSingleMergedJob(jobId, baseUrl, controller);
 +    } else {
@@ -2744,9 +2955,17 @@ index 00000000..7048ce88
 +    const progress = Math.round(5 + (i / job.tasks.length) * 20);
 +
 +    const ext = task.fileName.toLowerCase().split('.').pop() || '';
++    const defaultDocExtractor =
++      job.pdfProviderId === 'mineru'
++        ? 'MinerU 文档解析'
++        : job.pdfProviderId === 'unpdf'
++          ? 'unpdf 轻量解析器'
++          : job.pdfProviderId === 'alidocmind'
++            ? '阿里文档智能'
++            : 'MinerU 文档解析';
 +    const guessedExtractor =
 +      task.extractorName ||
-+      (ext === 'pptx' ? 'PPTX 原生解析器' : ext === 'txt' || ext === 'md' ? '纯文本解析器' : 'MinerU 文档解析');
++      (ext === 'pptx' ? 'PPTX 原生解析器' : ext === 'txt' || ext === 'md' ? '纯文本解析器' : defaultDocExtractor);
 +
 +    await updateBatchJob(jobId, (j) => {
 +      j.progress = progress;
@@ -2761,7 +2980,10 @@ index 00000000..7048ce88
 +
 +    try {
 +      if (task.tempFilePath) {
-+        const extracted = await extractFileContent(task.tempFilePath, task.fileName, task.mimeType);
++        const extracted = await extractFileContent(task.tempFilePath, task.fileName, task.mimeType, {
++          providerId: job.pdfProviderId,
++          config: job.pdfProviderConfig,
++        });
 +        extractedTexts.push(`### 教学参考资料 [${i + 1}]: ${task.fileName}\n${extracted.text}`);
 +        extractedImages.push(...extracted.images);
 +
@@ -2916,9 +3138,17 @@ index 00000000..7048ce88
 +    log.info(`[${i + 1}/${totalTasks}] Starting task: ${task.fileName}`);
 +
 +    const ext = task.fileName.toLowerCase().split('.').pop() || '';
++    const defaultDocExtractor =
++      currentJob.pdfProviderId === 'mineru'
++        ? 'MinerU 文档解析'
++        : currentJob.pdfProviderId === 'unpdf'
++          ? 'unpdf 轻量解析器'
++          : currentJob.pdfProviderId === 'alidocmind'
++            ? '阿里文档智能'
++            : 'MinerU 文档解析';
 +    const guessedExtractor =
 +      task.extractorName ||
-+      (ext === 'pptx' ? 'PPTX 原生解析器' : ext === 'txt' || ext === 'md' ? '纯文本解析器' : 'MinerU 文档解析');
++      (ext === 'pptx' ? 'PPTX 原生解析器' : ext === 'txt' || ext === 'md' ? '纯文本解析器' : defaultDocExtractor);
 +
 +    await updateBatchJob(jobId, (j) => {
 +      const target = j.tasks[taskIndex];
@@ -2937,7 +3167,10 @@ index 00000000..7048ce88
 +      }
 +
 +      // 1. 提取当前文件内容
-+      const extracted = await extractFileContent(task.tempFilePath, task.fileName, task.mimeType);
++      const extracted = await extractFileContent(task.tempFilePath, task.fileName, task.mimeType, {
++        providerId: currentJob.pdfProviderId,
++        config: currentJob.pdfProviderConfig,
++      });
 +
 +      if (controller.signal.aborted) {
 +        const err = new Error('Batch job cancelled by user');
@@ -3262,10 +3495,10 @@ index 00000000..e275cc08
 +
 diff --git a/lib/server/batch-generation/types.ts b/lib/server/batch-generation/types.ts
 new file mode 100644
-index 00000000..99ff068d
+index 00000000..5a9a7977
 --- /dev/null
 +++ b/lib/server/batch-generation/types.ts
-@@ -0,0 +1,76 @@
+@@ -0,0 +1,83 @@
 +import type { CourseScale } from '@/lib/types/course-scale';
 +import type { InteractiveThemeStyle, SlideThemeStyle } from '@/lib/types/theme-style';
 +
@@ -3325,6 +3558,13 @@ index 00000000..99ff068d
 +  courseScale?: CourseScale;
 +  interactiveTheme?: InteractiveThemeStyle;
 +  slideTheme?: SlideThemeStyle;
++  pdfProviderId?: string;
++  pdfProviderConfig?: {
++    baseUrl?: string;
++    apiKey?: string;
++    accessKeyId?: string;
++    accessKeySecret?: string;
++  };
 +  totalTasks: number;
 +  completedTasks: number;
 +  failedTasks: number;

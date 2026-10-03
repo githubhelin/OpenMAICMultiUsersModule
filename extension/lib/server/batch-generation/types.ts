@@ -1,8 +1,10 @@
 import type { CourseScale } from '@/lib/types/course-scale';
+import type { InteractiveThemeStyle, SlideThemeStyle } from '@/lib/types/theme-style';
 
 export type BatchJobMode = 'single_merged' | 'batch_independent';
 
 export type BatchJobStatus =
+  | 'uploading'
   | 'queued'
   | 'processing'
   | 'completed'
@@ -30,6 +32,7 @@ export interface BatchSubTask {
   status: SubTaskStep;
   progress: number; // 0 - 100
   stepMessage: string;
+  extractorName?: string; // 实际调用的解析组件，如 "PPTX 原生解析器"、"MinerU 文档解析"
   classroomId?: string;
   classroomUrl?: string;
   stageId?: string;
@@ -44,12 +47,23 @@ export interface BatchJob {
   ownerId: string;
   mode: BatchJobMode;
   status: BatchJobStatus;
+  baseUrl?: string;
+  queuePosition?: number;
   title: string;
   requirement: string;
   enableTTS: boolean;
   enableImageGeneration: boolean;
   enableInteractiveMode?: boolean;
   courseScale?: CourseScale;
+  interactiveTheme?: InteractiveThemeStyle;
+  slideTheme?: SlideThemeStyle;
+  pdfProviderId?: string;
+  pdfProviderConfig?: {
+    baseUrl?: string;
+    apiKey?: string;
+    accessKeyId?: string;
+    accessKeySecret?: string;
+  };
   totalTasks: number;
   completedTasks: number;
   failedTasks: number;

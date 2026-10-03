@@ -46,6 +46,8 @@ import {
   THEME_STYLE_PRESETS,
   getThemeStyleSummary,
 } from '@/lib/types/theme-style';
+import { useSettingsStore } from '@/lib/store/settings';
+import type { PDFProviderId } from '@/lib/pdf/types';
 
 export const DEFAULT_PEDAGOGICAL_PROMPT = `# 教学角色与目标
 你是一位顶尖的“交互式课程设计师兼智能体教学专家”，深度掌握 OpenMAIC 的多智能体协作与动态课件生成能力。请根据上传的课件内容，设计一堂高参与度、高互动性的优质沉浸式交互微课。
@@ -62,6 +64,11 @@ export const DEFAULT_PEDAGOGICAL_PROMPT = `# 教学角色与目标
 
 export default function BatchStudioPage() {
   const router = useRouter();
+
+  // 系统全局设置同步
+  const currentPdfProviderId = useSettingsStore((s) => s.pdfProviderId);
+  const pdfProvidersConfig = useSettingsStore((s) => s.pdfProvidersConfig);
+  const setPDFProvider = useSettingsStore((s) => s.setPDFProvider);
 
   // 状态
   const [activeTab, setActiveTab] = useState<'create' | 'board'>('create');
@@ -170,6 +177,25 @@ export default function BatchStudioPage() {
       initFormData.append('interactiveTheme', interactiveTheme);
       initFormData.append('slideTheme', slideTheme);
       initFormData.append('totalTasks', String(totalFiles));
+
+      const settingsSnapshot = useSettingsStore.getState();
+      const effectivePdfProviderId = settingsSnapshot.pdfProviderId;
+      const effectivePdfProviderConfig = settingsSnapshot.pdfProvidersConfig?.[effectivePdfProviderId];
+
+      if (effectivePdfProviderId) {
+        initFormData.append('pdfProviderId', effectivePdfProviderId);
+      }
+      if (effectivePdfProviderConfig) {
+        initFormData.append(
+          'pdfProviderConfig',
+          JSON.stringify({
+            baseUrl: effectivePdfProviderConfig.baseUrl,
+            apiKey: effectivePdfProviderConfig.apiKey,
+            accessKeyId: effectivePdfProviderConfig.accessKeyId,
+            accessKeySecret: effectivePdfProviderConfig.accessKeySecret,
+          })
+        );
+      }
 
       const initRes = await fetch('/api/batch-generate', {
         method: 'POST',
@@ -872,6 +898,98 @@ export default function BatchStudioPage() {
                       <Moon className="w-3 h-3 text-indigo-400" />
                       深色幻灯 (暗夜)
                     </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* 文档解析引擎选择 (MinerU / unpdf / 阿里文档智能) */}
+            <div className="space-y-3 p-4 rounded-xl border border-slate-200 dark:border-slate-800 bg-white/70 dark:bg-slate-900/60">
+              <div className="flex items-center justify-between">
+                <label className="text-sm font-medium text-slate-700 dark:text-slate-300 flex items-center gap-1.5">
+                  <FileText className="w-4 h-4 text-emerald-500" />
+                  PDF / 资料解析引擎
+                </label>
+                <button
+                  type="button"
+                  onClick={() => router.push('/settings')}
+                  className="text-xs text-amber-600 dark:text-amber-400 hover:underline flex items-center gap-1 cursor-pointer"
+                  title="前往系统设置修改 MinerU 服务地址与凭据"
+                >
+                  <SlidersHorizontal className="w-3 h-3" />
+                  配置解析服务与地址
+                </button>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+                {/* 1. MinerU */}
+                <div
+                  onClick={() => setPDFProvider('mineru')}
+                  className={`cursor-pointer p-3 rounded-lg border text-left transition-all ${
+                    currentPdfProviderId === 'mineru'
+                      ? 'border-emerald-500 bg-emerald-50/60 dark:bg-emerald-950/30 shadow-xs ring-1 ring-emerald-500/40'
+                      : 'border-slate-200 dark:border-slate-800 bg-slate-50/50 dark:bg-slate-800/40 hover:border-slate-300 dark:hover:border-slate-700'
+                  }`}
+                >
+                  <div className="flex items-center justify-between mb-1">
+                    <span className="font-semibold text-xs text-slate-800 dark:text-slate-200 flex items-center gap-1.5">
+                      MinerU (推荐)
+                    </span>
+                    {currentPdfProviderId === 'mineru' && <Check className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400" />}
+                  </div>
+                  <p className="text-[11px] text-slate-500 dark:text-slate-400 leading-snug">
+                    深度版面分析，支持正文、复杂表格、数学公式与高清插图智能提取。
+                  </p>
+                  <div className="mt-1.5 text-[10px] font-mono text-emerald-600 dark:text-emerald-400 truncate">
+                    {pdfProvidersConfig?.mineru?.baseUrl
+                      ? `已接入: ${pdfProvidersConfig.mineru.baseUrl}`
+                      : '已启用默认 MinerU 服务'}
+                  </div>
+                </div>
+
+                {/* 2. unpdf */}
+                <div
+                  onClick={() => setPDFProvider('unpdf')}
+                  className={`cursor-pointer p-3 rounded-lg border text-left transition-all ${
+                    currentPdfProviderId === 'unpdf'
+                      ? 'border-emerald-500 bg-emerald-50/60 dark:bg-emerald-950/30 shadow-xs ring-1 ring-emerald-500/40'
+                      : 'border-slate-200 dark:border-slate-800 bg-slate-50/50 dark:bg-slate-800/40 hover:border-slate-300 dark:hover:border-slate-700'
+                  }`}
+                >
+                  <div className="flex items-center justify-between mb-1">
+                    <span className="font-semibold text-xs text-slate-800 dark:text-slate-200 flex items-center gap-1.5">
+                      unpdf 轻量解析器
+                    </span>
+                    {currentPdfProviderId === 'unpdf' && <Check className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400" />}
+                  </div>
+                  <p className="text-[11px] text-slate-500 dark:text-slate-400 leading-snug">
+                    纯文本快速提取，极速轻量，不提取复杂图表与插图。
+                  </p>
+                  <div className="mt-1.5 text-[10px] font-mono text-slate-400">
+                    无需任何第三方服务，原生秒级解析
+                  </div>
+                </div>
+
+                {/* 3. AliDocMind */}
+                <div
+                  onClick={() => setPDFProvider('alidocmind')}
+                  className={`cursor-pointer p-3 rounded-lg border text-left transition-all ${
+                    currentPdfProviderId === 'alidocmind'
+                      ? 'border-emerald-500 bg-emerald-50/60 dark:bg-emerald-950/30 shadow-xs ring-1 ring-emerald-500/40'
+                      : 'border-slate-200 dark:border-slate-800 bg-slate-50/50 dark:bg-slate-800/40 hover:border-slate-300 dark:hover:border-slate-700'
+                  }`}
+                >
+                  <div className="flex items-center justify-between mb-1">
+                    <span className="font-semibold text-xs text-slate-800 dark:text-slate-200 flex items-center gap-1.5">
+                      阿里文档智能
+                    </span>
+                    {currentPdfProviderId === 'alidocmind' && <Check className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400" />}
+                  </div>
+                  <p className="text-[11px] text-slate-500 dark:text-slate-400 leading-snug">
+                    阿里云文档智能服务，支持高精度 OCR、表格与版面识别。
+                  </p>
+                  <div className="mt-1.5 text-[10px] font-mono text-slate-400 truncate">
+                    {pdfProvidersConfig?.alidocmind?.accessKeyId ? '已配置阿里云 AK/SK' : '需在设置中配置 AK/SK'}
                   </div>
                 </div>
               </div>
