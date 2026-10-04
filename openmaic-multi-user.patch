@@ -153,7 +153,7 @@ index 00000000..f4bbb134
 +pm2 restart openmaic --update-env
 +```
 diff --git a/README-zh.md b/README-zh.md
-index d20e64ef..0c96e2d0 100644
+index 5c236964..07e691d3 100644
 --- a/README-zh.md
 +++ b/README-zh.md
 @@ -37,11 +37,48 @@
@@ -207,7 +207,7 @@ index d20e64ef..0c96e2d0 100644
  ## 🗞️ 动态
  
 diff --git a/README.md b/README.md
-index 72db8864..c69d75d8 100644
+index 3d07dc4e..ec4a9a64 100644
 --- a/README.md
 +++ b/README.md
 @@ -37,11 +37,49 @@
@@ -1239,220 +1239,6 @@ index 00000000..34c12568
 +    );
 +  }
 +}
-diff --git a/app/api/classroom/route.ts b/app/api/classroom/route.ts
-index 3cbf7790..06ae1d94 100644
---- a/app/api/classroom/route.ts
-+++ b/app/api/classroom/route.ts
-@@ -9,9 +9,20 @@ import {
-   isValidClassroomId,
-   persistClassroom,
-   readClassroom,
-+  type PersistedClassroomData,
- } from '@/lib/server/classroom-storage';
- import { sanitizeSceneContent } from '@/lib/server/sanitize-scene-content';
- import { createLogger } from '@/lib/logger';
-+import { isServerPersistenceConfigured } from '@/lib/config/feature-flags';
-+import { resolveStageAccess, getStageAccessDb } from '@/lib/server/stage-access';
-+import { getServerPersistenceProvider } from '@/lib/persistence/server-provider';
-+import { markStageGenerationComplete } from '@/lib/persistence/stage-meta';
-+import { getSessionPayload } from '@/lib/server/auth/session';
-+import { resolveRequestOwner } from '@/lib/server/identity/resolve';
-+import { attachOwnerCookies } from '@/lib/server/identity/with-owner';
-+import { getOwnerScopedDocumentStore } from '@/lib/server/agent-runtime/owner-scoped-documents';
-+import { syncInteractiveLibraryForStage } from '@/lib/server/interactive-library';
-+import type { Stage, Scene } from '@/lib/types/stage';
- 
- const log = createLogger('Classroom API');
- 
-@@ -23,6 +34,7 @@ function describeSceneIssue(issue: { path: string; message: string }): string {
- export async function POST(request: NextRequest) {
-   let stageId: string | undefined;
-   let sceneCount: number | undefined;
-+  let setCookies: readonly string[] | undefined;
-   try {
-     const body = await request.json();
-     const { stage, scenes } = body;
-@@ -73,39 +85,53 @@ export async function POST(request: NextRequest) {
-     const safeStage = sanitizeSceneContent(stage);
-     const safeScenes = sanitizeSceneContent(scenes);
- 
--    // The storage id is ALWAYS server-generated. A caller-supplied stage.id is
--    // ignored: ids are public share-URL segments, so accepting one would let
--    // any visitor name — and therefore attempt to replace — an existing
--    // classroom. The generated id becomes the stage id and every scene's
--    // stageId so the persisted document is internally consistent.
-+    // If caller supplied a valid stage.id, preserve it so client, cloud DB and filesystem stay 100% consistent.
-+    const callerStageId =
-+      stage?.id && typeof stage.id === 'string' && isValidClassroomId(stage.id)
-+        ? stage.id
-+        : undefined;
-+
-     let persisted: Awaited<ReturnType<typeof persistClassroom>> | undefined;
--    for (let attempt = 0; attempt < CLASSROOM_ID_MAX_ATTEMPTS; attempt += 1) {
--      const id = generateClassroomId();
- 
--      // Defence in depth: the generator only emits allowlisted characters, but
--      // an id must never be joined into a filesystem path unasserted.
--      if (!isValidClassroomId(id)) {
--        return apiError(API_ERROR_CODES.INVALID_REQUEST, 400, 'Invalid classroom id');
--      }
-+    if (callerStageId) {
-+      persisted = await persistClassroom(
-+        {
-+          id: callerStageId,
-+          stage: { ...safeStage, id: callerStageId },
-+          scenes: safeScenes.map((scene) => ({ ...scene, stageId: callerStageId })),
-+        },
-+        baseUrl,
-+        { exclusive: false },
-+      );
-+    } else {
-+      for (let attempt = 0; attempt < CLASSROOM_ID_MAX_ATTEMPTS; attempt += 1) {
-+        const id = generateClassroomId();
- 
--      try {
--        persisted = await persistClassroom(
--          {
--            id,
--            stage: { ...safeStage, id },
--            scenes: safeScenes.map((scene) => ({ ...scene, stageId: id })),
--          },
--          baseUrl,
--          { exclusive: true },
--        );
--        break;
--      } catch (error) {
--        if (!(error instanceof ClassroomAlreadyExistsError)) {
--          throw error;
-+        // Defence in depth: the generator only emits allowlisted characters, but
-+        // an id must never be joined into a filesystem path unasserted.
-+        if (!isValidClassroomId(id)) {
-+          return apiError(API_ERROR_CODES.INVALID_REQUEST, 400, 'Invalid classroom id');
-+        }
-+
-+        try {
-+          persisted = await persistClassroom(
-+            {
-+              id,
-+              stage: { ...safeStage, id },
-+              scenes: safeScenes.map((scene) => ({ ...scene, stageId: id })),
-+            },
-+            baseUrl,
-+            { exclusive: true },
-+          );
-+          break;
-+        } catch (error) {
-+          if (!(error instanceof ClassroomAlreadyExistsError)) {
-+            throw error;
-+          }
-+          // Astronomically unlikely with a 10-character id: pick a fresh id and
-+          // retry a bounded number of times rather than clobbering the
-+          // incumbent classroom.
-         }
--        // Astronomically unlikely with a 10-character id: pick a fresh id and
--        // retry a bounded number of times rather than clobbering the
--        // incumbent classroom.
-       }
-     }
- 
-@@ -113,18 +139,58 @@ export async function POST(request: NextRequest) {
-       return apiError(API_ERROR_CODES.INVALID_REQUEST, 409, 'Classroom id collision');
-     }
- 
--    return apiSuccess({ id: persisted.id, url: persisted.url }, 201);
-+    if (isServerPersistenceConfigured()) {
-+      try {
-+        const session = getSessionPayload(request);
-+        let ownerId: string | undefined =
-+          session && session.userId ? `user:${session.userId}` : undefined;
-+        if (!ownerId) {
-+          const outcome = await resolveRequestOwner(request);
-+          if (outcome.ok) {
-+            ownerId = outcome.principal.ownerId;
-+            setCookies = outcome.setCookies;
-+          }
-+        }
-+        if (!ownerId) ownerId = 'anon:guest';
-+        const store = await getOwnerScopedDocumentStore(ownerId);
-+        await store.saveDocument({
-+          stage: { ...safeStage, id: persisted.id },
-+          scenes: safeScenes.map((scene) => ({ ...scene, stageId: persisted.id })),
-+        });
-+        try {
-+          const db = await getStageAccessDb();
-+          await markStageGenerationComplete(db, persisted.id);
-+        } catch (completeErr) {
-+          log.warn(`Classroom ${persisted.id} failed to mark generation complete:`, completeErr);
-+        }
-+        log.info(`Classroom ${persisted.id} also synced to owner store (${ownerId})`);
-+      } catch (dbError) {
-+        log.warn(`Classroom ${persisted.id} failed to sync to owner store:`, dbError);
-+      }
-+    }
-+
-+    // Automatically package and export interactive scenes to interactive library
-+    void syncInteractiveLibraryForStage(
-+      { ...safeStage, id: persisted.id },
-+      safeScenes.map((scene) => ({ ...scene, stageId: persisted.id })),
-+    ).catch((err) => {
-+      log.warn(`Classroom ${persisted?.id} failed to sync to interactive library:`, err);
-+    });
-+
-+    const response = apiSuccess({ id: persisted.id, url: persisted.url }, 201);
-+    return setCookies ? attachOwnerCookies(response, setCookies) : response;
-   } catch (error) {
-     log.error(
-       `Classroom storage failed [stageId=${stageId ?? 'unknown'}, scenes=${sceneCount ?? 0}]:`,
-       error,
-     );
--    return apiError(
-+    const errorResponse = apiError(
-       API_ERROR_CODES.INTERNAL_ERROR,
-       500,
-       'Failed to store classroom',
-       error instanceof Error ? error.message : String(error),
-     );
-+    return setCookies ? attachOwnerCookies(errorResponse, setCookies) : errorResponse;
-   }
- }
- 
-@@ -144,7 +210,35 @@ export async function GET(request: NextRequest) {
-       return apiError(API_ERROR_CODES.INVALID_REQUEST, 400, 'Invalid classroom id');
-     }
- 
--    const classroom = await readClassroom(id);
-+    let classroom: PersistedClassroomData | null = null;
-+
-+    if (isServerPersistenceConfigured()) {
-+      try {
-+        const access = await resolveStageAccess(id);
-+        if (access?.deletedAt) {
-+          return apiError(API_ERROR_CODES.INVALID_REQUEST, 404, 'Classroom not found');
-+        }
-+        if (access && access.ownerId) {
-+          const store = await getOwnerScopedDocumentStore(access.ownerId);
-+          const doc = await store.loadDocument(id);
-+          if (doc && doc.stage) {
-+            classroom = {
-+              id: doc.stage.id,
-+              stage: doc.stage as unknown as Stage,
-+              scenes: (doc.scenes || []) as unknown as Scene[],
-+              createdAt: new Date(doc.stage.createdAt || Date.now()).toISOString(),
-+            };
-+          }
-+        }
-+      } catch (dbError) {
-+        log.warn(`Database lookup for classroom [id=${id}] failed:`, dbError);
-+      }
-+    }
-+
-+    if (!classroom) {
-+      classroom = await readClassroom(id);
-+    }
-+
-     if (!classroom) {
-       return apiError(API_ERROR_CODES.INVALID_REQUEST, 404, 'Classroom not found');
-     }
 diff --git a/app/api/generate/scene-content/route.ts b/app/api/generate/scene-content/route.ts
 index e6121d5f..2f54e5e3 100644
 --- a/app/api/generate/scene-content/route.ts
@@ -1467,10 +1253,10 @@ index e6121d5f..2f54e5e3 100644
        ...(effectiveOutline.type === 'pbl'
          ? {
 diff --git a/app/api/generate/scene-outlines-stream/route.ts b/app/api/generate/scene-outlines-stream/route.ts
-index a4648257..1598825c 100644
+index a11e2f14..7df192bb 100644
 --- a/app/api/generate/scene-outlines-stream/route.ts
 +++ b/app/api/generate/scene-outlines-stream/route.ts
-@@ -45,6 +45,8 @@ import { resolveModelFromRequest } from '@/lib/server/resolve-model';
+@@ -48,6 +48,8 @@ import { requestWorkspaceId } from '@/lib/server/model-config/runtime';
  import { sortDocumentImagesForVision } from '@/lib/document/bundle';
  import { resolveVisionImagesForPrompt } from '@/lib/persistence/resolve-vision-images';
  import { resolveVocationalActive } from '@/lib/config/feature-flags';
@@ -1479,7 +1265,7 @@ index a4648257..1598825c 100644
  const log = createLogger('Outlines Stream');
  
  export const maxDuration = 300;
-@@ -419,12 +421,33 @@ export async function POST(req: NextRequest) {
+@@ -429,12 +431,33 @@ export async function POST(req: NextRequest) {
      // Check if Interactive Mode or server-enabled Task Engine mode is enabled.
      const interactiveMode = requirements.interactiveMode ?? false;
      const taskEngineMode = resolveVocationalActive(requirements);
@@ -1514,7 +1300,7 @@ index a4648257..1598825c 100644
        pdfText,
        pdfImages: resolvedPdfImages ?? pdfImages,
        visionEnabled: hasVision,
-@@ -440,7 +463,7 @@ export async function POST(req: NextRequest) {
+@@ -450,7 +473,7 @@ export async function POST(req: NextRequest) {
          ? PROMPT_IDS.TASK_ENGINE_OUTLINES
          : PROMPT_IDS.INTERACTIVE_OUTLINES;
        prompts = buildPrompt(promptId, {
@@ -1917,10 +1703,10 @@ index 00000000..1c3d602f
 +  }
 +}
 diff --git a/app/api/stages/[id]/route.ts b/app/api/stages/[id]/route.ts
-index b1100826..8cc1bf33 100644
+index b1100826..83a4b940 100644
 --- a/app/api/stages/[id]/route.ts
 +++ b/app/api/stages/[id]/route.ts
-@@ -28,6 +28,20 @@ import { ownerApiError, ownerJson, ownerNotFound } from '@/lib/server/agent-runt
+@@ -28,6 +28,19 @@ import { ownerApiError, ownerJson, ownerNotFound } from '@/lib/server/agent-runt
  import { withRequestOwner } from '@/lib/server/identity/with-owner';
  import { ownerWriteErrorResponse } from '@/lib/persistence/owner-merges';
  import { STAGE_NAME_MAX_LENGTH } from '@/lib/server/agent-runtime/stage-limits';
@@ -1933,7 +1719,6 @@ index b1100826..8cc1bf33 100644
 +import {
 +  buildRequestOrigin,
 +  isValidClassroomId,
-+  persistClassroom,
 +} from '@/lib/server/classroom-storage';
 +import { sanitizeSceneContent } from '@/lib/server/sanitize-scene-content';
 +import { markStageGenerationComplete } from '@/lib/persistence/stage-meta';
@@ -1941,7 +1726,7 @@ index b1100826..8cc1bf33 100644
  
  export const runtime = 'nodejs';
  
-@@ -110,6 +124,7 @@ export async function PATCH(req: NextRequest, { params }: Params) {
+@@ -110,6 +123,7 @@ export async function PATCH(req: NextRequest, { params }: Params) {
          ...document,
          stage: { ...document.stage, name, updatedAt: Date.now() },
        });
@@ -1949,7 +1734,7 @@ index b1100826..8cc1bf33 100644
      } catch (error) {
        return mapSaveError(error, responseHeaders);
      }
-@@ -157,12 +172,14 @@ export async function PUT(req: NextRequest, { params }: Params) {
+@@ -157,12 +171,14 @@ export async function PUT(req: NextRequest, { params }: Params) {
        );
      }
      const store = await getOwnerScopedDocumentStore(ownerId);
@@ -1970,7 +1755,7 @@ index b1100826..8cc1bf33 100644
      try {
        // The server is authoritative for "last modified": bumping updatedAt
        // keeps the manifest/freshness signal accurate for this route's writes.
-@@ -172,6 +189,46 @@ export async function PUT(req: NextRequest, { params }: Params) {
+@@ -172,6 +188,49 @@ export async function PUT(req: NextRequest, { params }: Params) {
          ...(body as MaicDocument),
          stage: { ...(body as MaicDocument).stage, updatedAt: Date.now() },
        });
@@ -1988,21 +1773,24 @@ index b1100826..8cc1bf33 100644
 +
 +      // Persist to filesystem for offline static serving
 +      try {
-+        const baseUrl = buildRequestOrigin(req);
++        const { promises: fsPromises } = await import('fs');
++        const pathModule = await import('path');
 +        const safeStage = sanitizeSceneContent((body as any).stage);
 +        const safeScenes = sanitizeSceneContent((body as any).scenes || []);
-+        await persistClassroom(
-+          {
++        const classroomsDir = pathModule.join(process.cwd(), 'data', 'classrooms');
++        await fsPromises.mkdir(classroomsDir, { recursive: true });
++        await fsPromises.writeFile(
++          pathModule.join(classroomsDir, `${id}.json`),
++          JSON.stringify({
 +            id,
 +            stage: { ...safeStage, id },
 +            scenes: safeScenes.map((scene: any) => ({ ...scene, stageId: id })),
-+          },
-+          baseUrl,
-+          { exclusive: false },
++          }, null, 2),
 +        );
 +      } catch (fsErr) {
 +        console.warn(`[PUT /api/stages/${id}] Filesystem persistence fallback:`, fsErr);
 +      }
++
 +
 +      // Automatically sync interactive scenes to interactive library
 +      const scenesList = (body as any).scenes || [];
@@ -2017,7 +1805,7 @@ index b1100826..8cc1bf33 100644
      } catch (error) {
        return mapSaveError(error, responseHeaders);
      }
-@@ -179,20 +236,96 @@ export async function PUT(req: NextRequest, { params }: Params) {
+@@ -179,20 +238,96 @@ export async function PUT(req: NextRequest, { params }: Params) {
    });
  }
  
@@ -2198,7 +1986,7 @@ index 7f24e0ab..a29e5f77 100644
  }
 diff --git a/app/batch-studio/page.tsx b/app/batch-studio/page.tsx
 new file mode 100644
-index 00000000..1073a3b4
+index 00000000..33056be9
 --- /dev/null
 +++ b/app/batch-studio/page.tsx
 @@ -0,0 +1,1488 @@
@@ -2270,9 +2058,9 @@ index 00000000..1073a3b4
 +  const router = useRouter();
 +
 +  // 系统全局设置同步
-+  const currentPdfProviderId = useSettingsStore((s) => s.pdfProviderId);
-+  const pdfProvidersConfig = useSettingsStore((s) => s.pdfProvidersConfig);
-+  const setPDFProvider = useSettingsStore((s) => s.setPDFProvider);
++  const currentPdfProviderId = useSettingsStore((s) => (s as any).pdfProviderId ?? 'mineru');
++  const pdfProvidersConfig = useSettingsStore((s) => (s as any).pdfProvidersConfig ?? {});
++  const setPDFProvider = useSettingsStore((s) => (s as any).setPDFProvider);
 +
 +  // 状态
 +  const [activeTab, setActiveTab] = useState<'create' | 'board'>('create');
@@ -2382,9 +2170,9 @@ index 00000000..1073a3b4
 +      initFormData.append('slideTheme', slideTheme);
 +      initFormData.append('totalTasks', String(totalFiles));
 +
-+      const settingsSnapshot = useSettingsStore.getState();
-+      const effectivePdfProviderId = settingsSnapshot.pdfProviderId;
-+      const effectivePdfProviderConfig = settingsSnapshot.pdfProvidersConfig?.[effectivePdfProviderId];
++      const settingsSnapshot = useSettingsStore.getState() as any;
++      const effectivePdfProviderId = settingsSnapshot?.pdfProviderId;
++      const effectivePdfProviderConfig = settingsSnapshot?.pdfProvidersConfig?.[effectivePdfProviderId];
 +
 +      if (effectivePdfProviderId) {
 +        initFormData.append('pdfProviderId', effectivePdfProviderId);
@@ -4831,7 +4619,7 @@ index 00000000..416a892c
 +}
 diff --git a/app/my-courses/page.tsx b/app/my-courses/page.tsx
 new file mode 100644
-index 00000000..8d1495df
+index 00000000..b66aa7df
 --- /dev/null
 +++ b/app/my-courses/page.tsx
 @@ -0,0 +1,897 @@
@@ -5056,8 +4844,8 @@ index 00000000..8d1495df
 +        toast.error('未找到该课件的本地详细场景数据');
 +        return;
 +      }
-+      const res = await fetch('/api/classroom', {
-+        method: 'POST',
++      const res = await fetch(`/api/stages/${encodeURIComponent(course.id)}`, {
++        method: 'PUT',
 +        headers: { 'Content-Type': 'application/json' },
 +        credentials: 'include',
 +        body: JSON.stringify({
@@ -5095,8 +4883,8 @@ index 00000000..8d1495df
 +      try {
 +        const doc = await loadStageData(c.id);
 +        if (doc && doc.stage) {
-+          const res = await fetch('/api/classroom', {
-+            method: 'POST',
++          const res = await fetch(`/api/stages/${encodeURIComponent(c.id)}`, {
++            method: 'PUT',
 +            headers: { 'Content-Type': 'application/json' },
 +            credentials: 'include',
 +            body: JSON.stringify({
@@ -5733,7 +5521,7 @@ index 00000000..8d1495df
 +  );
 +}
 diff --git a/app/page.tsx b/app/page.tsx
-index 41979efe..bc97f46b 100644
+index 410a9ed6..7af0503c 100644
 --- a/app/page.tsx
 +++ b/app/page.tsx
 @@ -27,6 +27,8 @@ import {
@@ -5754,7 +5542,7 @@ index 41979efe..bc97f46b 100644
  import { GenerationToolbar } from '@/components/generation/generation-toolbar';
  import { AgentBar } from '@/components/agent/agent-bar';
  import { useTheme } from '@/lib/hooks/use-theme';
-@@ -90,6 +94,10 @@ import {
+@@ -94,6 +98,10 @@ import {
  } from '@/lib/config/feature-flags';
  import { useImportPptx } from '@/lib/import/use-import-pptx';
  import { InteractiveModeButton } from '@/components/generation/interactive-mode-button';
@@ -5765,7 +5553,7 @@ index 41979efe..bc97f46b 100644
  import { ProBadge } from '@/components/workbench/ProBadge';
  import { arrivedByProSwap, startProSwap } from '@/lib/workbench/pro-swap';
  import {
-@@ -101,6 +109,9 @@ const log = createLogger('Home');
+@@ -105,6 +113,9 @@ const log = createLogger('Home');
  
  const RECENT_OPEN_STORAGE_KEY = 'recentClassroomsOpen';
  const INTERACTIVE_MODE_STORAGE_KEY = 'interactiveModeEnabled';
@@ -5775,7 +5563,7 @@ index 41979efe..bc97f46b 100644
  
  // PPTX import is still scaffolding: `useImportPptx` has no `onImported` consumer
  // yet, so the flow only logs the parsed slides. Hide the entry point behind a
-@@ -113,15 +124,21 @@ let workbenchRuntimeCache: boolean | null = null;
+@@ -117,15 +128,21 @@ let workbenchRuntimeCache: boolean | null = null;
  interface FormState {
    courseMaterials: SelectedCourseMaterial[];
    requirement: string;
@@ -5797,7 +5585,7 @@ index 41979efe..bc97f46b 100644
  };
  
  function HomePage() {
-@@ -202,6 +219,37 @@ function HomePage() {
+@@ -205,6 +222,37 @@ function HomePage() {
      } catch {
        /* localStorage unavailable */
      }
@@ -5835,7 +5623,7 @@ index 41979efe..bc97f46b 100644
    }, []);
  
    // Restore requirement draft from localStorage on mount. The previous derived-state
-@@ -218,6 +266,7 @@ function HomePage() {
+@@ -221,6 +269,7 @@ function HomePage() {
  
    const [themeOpen, setThemeOpen] = useState(false);
    const [error, setError] = useState<string | null>(null);
@@ -5843,7 +5631,7 @@ index 41979efe..bc97f46b 100644
    // True while the Generate click drains upload-time ingests and builds the
    // generation session. Doubles as the guard flag that freezes the course
    // material set for the duration of prep and as the switch that disables the
-@@ -513,6 +562,12 @@ function HomePage() {
+@@ -516,6 +565,12 @@ function HomePage() {
      try {
        if (field === 'interactiveMode')
          localStorage.setItem(INTERACTIVE_MODE_STORAGE_KEY, String(value));
@@ -5856,7 +5644,7 @@ index 41979efe..bc97f46b 100644
        if (field === 'requirement') updateRequirementCache(value as string);
      } catch {
        /* ignore */
-@@ -608,6 +663,9 @@ function HomePage() {
+@@ -595,6 +650,9 @@ function HomePage() {
        const userProfile = useUserProfileStore.getState();
        const requirements: UserRequirements = {
          requirement: form.requirement,
@@ -5865,8 +5653,8 @@ index 41979efe..bc97f46b 100644
 +        slideTheme: form.slideTheme ?? 'light',
          userNickname: userProfile.nickname || undefined,
          userBio: userProfile.bio || undefined,
-         // Course-level web search now lives in settings (课程模型配置 → 联网调研)
-@@ -792,26 +850,67 @@ function HomePage() {
+         // Research follows the workspace's webSearch slot; decided below from
+@@ -775,26 +833,67 @@ function HomePage() {
            )}
          </div>
  
@@ -5951,7 +5739,7 @@ index 41979efe..bc97f46b 100644
  
        {/* ═══ Background Decor ═══ */}
        <div className="absolute inset-0 overflow-hidden pointer-events-none">
-@@ -913,6 +1012,22 @@ function HomePage() {
+@@ -896,6 +995,22 @@ function HomePage() {
                  />
                </div>
  
@@ -7198,10 +6986,10 @@ index 00000000..5239f696
 +  );
 +}
 diff --git a/components/edit/PlaybackChromeRoot.tsx b/components/edit/PlaybackChromeRoot.tsx
-index 30e84939..271c012d 100644
+index 0f67c648..21ed119a 100644
 --- a/components/edit/PlaybackChromeRoot.tsx
 +++ b/components/edit/PlaybackChromeRoot.tsx
-@@ -1212,7 +1212,8 @@ export const PlaybackChromeRoot = forwardRef<PlaybackChromeRootHandle, PlaybackC
+@@ -1214,7 +1214,8 @@ export const PlaybackChromeRoot = forwardRef<PlaybackChromeRootHandle, PlaybackC
      // still reads as complete.
      const isCourseComplete =
        generationComplete ||
@@ -7610,28 +7398,30 @@ index a7dca80c..5e35c158 100644
    return <ClassroomCompletePage scenes={scenes} title={stage?.name ?? ''} />;
  }
 diff --git a/components/settings/index.tsx b/components/settings/index.tsx
-index 617b6f6a..66836cab 100644
+index 5cdb5d82..4cdffa88 100644
 --- a/components/settings/index.tsx
 +++ b/components/settings/index.tsx
-@@ -48,6 +48,7 @@ import {
- } from 'lucide-react';
+@@ -5,7 +5,9 @@ import { Dialog, DialogContent, DialogTitle, DialogDescription } from '@/compone
+ import { Button } from '@/components/ui/button';
+ import { X, Settings, Boxes, CreditCard, GraduationCap, Sparkles } from 'lucide-react';
  import { useI18n } from '@/lib/hooks/use-i18n';
- import { useSettingsStore } from '@/lib/store/settings';
 +import { useAuthStore } from '@/lib/store/auth-store';
- import { toast } from 'sonner';
- import { type ProviderId } from '@/lib/ai/providers';
- import { PROVIDERS, MONO_LOGO_PROVIDERS } from '@/lib/ai/providers';
-@@ -284,6 +285,7 @@ interface SettingsDialogProps {
- 
+ import { useAgentRuntimeAvailable } from '@/lib/hooks/use-agent-runtime-available';
++
+ import { cn } from '@/lib/utils';
+ import { GeneralSettings } from './general-settings';
+ import { SkillSettings } from './skill-settings';
+@@ -43,6 +45,7 @@ const NAV: { id: SettingsSection; icon: typeof Settings; label: string }[] = [
+  */
  export function SettingsDialog({ open, onOpenChange, initialSection }: SettingsDialogProps) {
    const { t } = useI18n();
 +  const isAdmin = useAuthStore((state) => state.user?.role === 'admin');
  
-   // Get settings from store
-   const _modelId = useSettingsStore((state) => state.modelId);
-@@ -897,6 +899,10 @@ export function SettingsDialog({ open, onOpenChange, initialSection }: SettingsD
-     );
-   };
+   // Navigation
+   const [requestedSection, setActiveSection] = useState<SettingsSection>('token-plan');
+@@ -148,6 +151,10 @@ export function SettingsDialog({ open, onOpenChange, initialSection }: SettingsD
+ 
+   const fillsHeight = activeSection === 'model-services' || activeSection === 'course-models';
  
 +  if (!isAdmin) {
 +    return null;
@@ -7639,7 +7429,7 @@ index 617b6f6a..66836cab 100644
 +
    return (
      <Dialog open={open} onOpenChange={onOpenChange}>
-       <DialogContent className="h-[85vh] p-0 gap-0 block" showCloseButton={false}>
+       <DialogContent
 diff --git a/components/stage/header-controls.tsx b/components/stage/header-controls.tsx
 index ae21bfe6..0f9ad784 100644
 --- a/components/stage/header-controls.tsx
@@ -7840,10 +7630,10 @@ index 00000000..25cd34fa
 +  ],
 +};
 diff --git a/instrumentation.ts b/instrumentation.ts
-index 6d668280..c18e6b9e 100644
+index ecdbd17f..c11859a5 100644
 --- a/instrumentation.ts
 +++ b/instrumentation.ts
-@@ -173,20 +173,28 @@ async function validateBootConfiguration(): Promise<void> {
+@@ -200,20 +200,28 @@ async function validateBootConfiguration(): Promise<void> {
    // is treated as unset, so this only rejects values that are present and
    // unusable.
    //
@@ -7908,18 +7698,17 @@ index 2e4122e4..c4a7ca31 100644
  }
  
 diff --git a/lib/classroom/load-classroom.ts b/lib/classroom/load-classroom.ts
-index 63b56599..e79610c5 100644
+index e9e42a78..5e3780f1 100644
 --- a/lib/classroom/load-classroom.ts
 +++ b/lib/classroom/load-classroom.ts
-@@ -352,7 +352,7 @@ export function applyClassroomStageAndScenes(
-     currentSceneId: nextScenes[0]?.id ?? null,
-     chats: options.chats ?? [],
-     chatSnapshot: options.chatSnapshot ?? { sessions: [], restoreMarker: null },
--    generationComplete: false,
-+    generationComplete: nextScenes.length > 0,
-     isOwner: access.isOwner,
-     readOnly: !access.isOwner,
-     generationEpoch: state.generationEpoch + 1,
+@@ -223,6 +223,7 @@ export async function runClassroomLoad<TMediaTasks = unknown>({
+ }
+ 
+ /**
++
+  * Restored media state split by hydration phase. `tasks` is metadata-complete
+  * and applied before first paint; records in `deferred` have their blob object
+  * URLs materialized afterwards in the background (see
 diff --git a/lib/prompts/templates/interactive-outlines/system.md b/lib/prompts/templates/interactive-outlines/system.md
 index ae2091d4..102e2614 100644
 --- a/lib/prompts/templates/interactive-outlines/system.md
@@ -8840,10 +8629,10 @@ index 00000000..f5104f6b
 +}
 diff --git a/lib/server/batch-generation/runner.ts b/lib/server/batch-generation/runner.ts
 new file mode 100644
-index 00000000..f3ea8d76
+index 00000000..ddbbd6b0
 --- /dev/null
 +++ b/lib/server/batch-generation/runner.ts
-@@ -0,0 +1,754 @@
+@@ -0,0 +1,756 @@
 +import { promises as fs } from 'fs';
 +import { createLogger } from '@/lib/logger';
 +import { generateClassroom } from '@/lib/server/classroom-generation';
@@ -9288,6 +9077,7 @@ index 00000000..f3ea8d76
 +    },
 +    {
 +      baseUrl,
++      ownerId: job.ownerId || 'anon:batch',
 +      signal: controller.signal,
 +      onProgress: async (p) => {
 +        // Map 0-100% of generateClassroom to 30% - 95% of batch job
@@ -9453,6 +9243,7 @@ index 00000000..f3ea8d76
 +        },
 +        {
 +          baseUrl,
++          ownerId: currentJob.ownerId || initialJob.ownerId || 'anon:batch',
 +          signal: controller.signal,
 +          onProgress: async (p) => {
 +            const stepMapping: Record<string, SubTaskStep> = {
@@ -9817,11 +9608,11 @@ index 00000000..5a9a7977
 +  error?: string;
 +}
 diff --git a/lib/server/classroom-generation.ts b/lib/server/classroom-generation.ts
-index 47e79cc9..03a976e3 100644
+index 6b55e2da..52fbd14a 100644
 --- a/lib/server/classroom-generation.ts
 +++ b/lib/server/classroom-generation.ts
-@@ -1,6 +1,9 @@
- import { callLLM } from '@/lib/ai/llm';
+@@ -2,6 +2,9 @@ import { callLLM } from '@/lib/ai/llm';
+ import { backgroundWorkspaceId } from '@/lib/server/model-config/runtime';
  import { createStageAPI } from '@/lib/api/stage-api';
  import type { StageStore } from '@/lib/api/stage-api-types';
 +import { nanoid } from 'nanoid';
@@ -9830,7 +9621,7 @@ index 47e79cc9..03a976e3 100644
  import {
    applyOutlineFallbacks,
    generateSceneOutlinesFromRequirements,
-@@ -9,8 +12,12 @@ import {
+@@ -10,8 +13,12 @@ import {
    isAbortError,
    PBLGenerationError,
    withGenerationRetry,
@@ -9843,7 +9634,15 @@ index 47e79cc9..03a976e3 100644
  } from '@openmaic/generation';
  import { createSceneWithActions } from '@/lib/server/scene-generation';
  import { generatePBLV2Project } from '@/lib/pbl/v2/agents/planner';
-@@ -44,6 +51,12 @@ import {
+@@ -28,6 +35,7 @@ import type { ThinkingConfig } from '@/lib/types/provider';
+ import { resolveVocationalActive } from '@/lib/config/feature-flags';
+ import { buildSearchQuery } from '@/lib/server/search-query-builder';
+ import { formatSearchResultsAsContext, searchWeb } from '@/lib/web-search';
++import type { WebSearchProviderId, BaiduSubSources } from '@/lib/web-search/types';
+ import { generateClassroomId, saveGeneratedClassroom } from '@/lib/server/classroom-persistence';
+ import {
+   classroomTtsSummary,
+@@ -39,6 +47,12 @@ import {
  } from '@/lib/server/classroom-media-generation';
  import { buildVideoManifestFromOutlines } from '@/lib/media/video-manifest';
  import type { UserRequirements } from '@/lib/types/generation';
@@ -9856,10 +9655,20 @@ index 47e79cc9..03a976e3 100644
  import type { Scene, Stage } from '@/lib/types/stage';
  import { AGENT_COLOR_PALETTE, AGENT_DEFAULT_AVATARS } from '@/lib/constants/agent-defaults';
  
-@@ -67,6 +80,10 @@ export interface GenerateClassroomInput {
-   enableVideoGeneration?: boolean;
-   enableTTS?: boolean;
-   agentMode?: 'default' | 'generate';
+@@ -59,6 +73,20 @@ export interface GenerateClassroomInput {
+   requirement: string;
+   /** Owner-library uploads (`POST /api/materials`) to generate from, in order. */
+   materialIds?: string[];
++  pdfContent?: { text: string; images: string[] };
++  enableWebSearch?: boolean;
++  webSearchProviderId?: WebSearchProviderId;
++  webSearchApiKey?: string;
++  webSearchModelId?: string;
++  baiduSubSources?: BaiduSubSources;
++  enableImageGeneration?: boolean;
++  enableVideoGeneration?: boolean;
++  enableTTS?: boolean;
++  agentMode?: 'default' | 'generate';
 +  interactiveMode?: boolean;
 +  courseScale?: CourseScale;
 +  interactiveTheme?: InteractiveThemeStyle;
@@ -9867,9 +9676,9 @@ index 47e79cc9..03a976e3 100644
  }
  
  export type ClassroomGenerationStep =
-@@ -488,8 +505,25 @@ export async function generateClassroom(
-     return result.text;
-   };
+@@ -326,8 +354,25 @@ export async function generateClassroom(
+     sceneRetries: true,
+   });
  
 +  const scaleInstruction = buildCourseScaleInstruction(input.courseScale, input.interactiveMode);
 +  const themeInstruction = buildThemeStyleInstruction(
@@ -9893,8 +9702,17 @@ index 47e79cc9..03a976e3 100644
 +    slideTheme: input.slideTheme ?? 'light',
    };
    const vocationalActive = resolveVocationalActive(requirements);
-   const pdfText = pdfContent?.text || undefined;
-@@ -562,18 +596,149 @@ export async function generateClassroom(
+ 
+@@ -340,6 +385,8 @@ export async function generateClassroom(
+       scenesGenerated: 0,
+     });
+     pdfText = await loadClassroomMaterialText(options.ownerId, input.materialIds);
++  } else if (input.pdfContent?.text) {
++    pdfText = input.pdfContent.text;
+   }
+ 
+   await options.onProgress?.({
+@@ -395,18 +442,153 @@ export async function generateClassroom(
      scenesGenerated: 0,
    });
  
@@ -9902,10 +9720,10 @@ index 47e79cc9..03a976e3 100644
 -    requirements,
 -    pdfText,
 -    undefined,
--    aiCall,
+-    outlineAiCall,
 -    {
--      imageGenerationEnabled: input.enableImageGeneration,
--      videoGenerationEnabled: input.enableVideoGeneration,
+-      imageGenerationEnabled: capabilities.imageGeneration,
+-      videoGenerationEnabled: capabilities.videoGeneration,
 -      researchContext,
 -      // NO teacherContext — agents haven't been generated yet
 -    },
@@ -9922,6 +9740,9 @@ index 47e79cc9..03a976e3 100644
 +    error?: string;
 +  };
 +
++  const imageGenEnabled = capabilities.imageGeneration ?? input.enableImageGeneration ?? false;
++  const videoGenEnabled = capabilities.videoGeneration ?? input.enableVideoGeneration ?? false;
++
 +  if (input.interactiveMode) {
 +    log.info('🌟 Interactive mode is ENABLED: Generating outline with PROMPT_IDS.INTERACTIVE_OUTLINES (interactive widgets, simulation, game, etc.)');
 +    const prompts = buildPrompt(PROMPT_IDS.INTERACTIVE_OUTLINES, {
@@ -9930,9 +9751,9 @@ index 47e79cc9..03a976e3 100644
 +      availableImages: 'No images available',
 +      researchContext: researchContext || 'None',
 +      hasSourceImages: false,
-+      imageEnabled: input.enableImageGeneration ?? false,
-+      videoEnabled: input.enableVideoGeneration ?? false,
-+      mediaEnabled: !!(input.enableImageGeneration || input.enableVideoGeneration),
++      imageEnabled: imageGenEnabled,
++      videoEnabled: videoGenEnabled,
++      mediaEnabled: !!(imageGenEnabled || videoGenEnabled),
 +      teacherContext: '',
 +      userProfile: '',
 +    });
@@ -9943,16 +9764,16 @@ index 47e79cc9..03a976e3 100644
 +        requirements,
 +        pdfText,
 +        undefined,
-+        aiCall,
++        outlineAiCall,
 +        {
-+          imageGenerationEnabled: input.enableImageGeneration,
-+          videoGenerationEnabled: input.enableVideoGeneration,
++          imageGenerationEnabled: imageGenEnabled,
++          videoGenerationEnabled: videoGenEnabled,
 +          researchContext,
 +        },
 +      );
 +    } else {
 +      try {
-+        const response = await aiCall(prompts.system, prompts.user);
++        const response = await outlineAiCall(prompts.system, prompts.user);
 +        const parsed = parseJsonResponse<{
 +          languageDirective?: string;
 +          courseTitle?: string;
@@ -9980,10 +9801,10 @@ index 47e79cc9..03a976e3 100644
 +            requirements,
 +            pdfText,
 +            undefined,
-+            aiCall,
++            outlineAiCall,
 +            {
-+              imageGenerationEnabled: input.enableImageGeneration,
-+              videoGenerationEnabled: input.enableVideoGeneration,
++              imageGenerationEnabled: imageGenEnabled,
++              videoGenerationEnabled: videoGenEnabled,
 +              researchContext,
 +            },
 +          );
@@ -10031,10 +9852,10 @@ index 47e79cc9..03a976e3 100644
 +          requirements,
 +          pdfText,
 +          undefined,
-+          aiCall,
++          outlineAiCall,
 +          {
-+            imageGenerationEnabled: input.enableImageGeneration,
-+            videoGenerationEnabled: input.enableVideoGeneration,
++            imageGenerationEnabled: imageGenEnabled,
++            videoGenerationEnabled: videoGenEnabled,
 +            researchContext,
 +          },
 +        );
@@ -10045,18 +9866,19 @@ index 47e79cc9..03a976e3 100644
 +      requirements,
 +      pdfText,
 +      undefined,
-+      aiCall,
++      outlineAiCall,
 +      {
-+        imageGenerationEnabled: input.enableImageGeneration,
-+        videoGenerationEnabled: input.enableVideoGeneration,
++        imageGenerationEnabled: imageGenEnabled,
++        videoGenerationEnabled: videoGenEnabled,
 +        researchContext,
 +      },
 +    );
 +  }
++
  
    if (!outlinesResult.success || !outlinesResult.data) {
      log.error('Failed to generate outlines:', outlinesResult.error);
-@@ -581,8 +746,11 @@ export async function generateClassroom(
+@@ -414,8 +596,11 @@ export async function generateClassroom(
    }
  
    const { languageDirective, courseTitle, outlines } = outlinesResult.data;
@@ -10069,7 +9891,7 @@ index 47e79cc9..03a976e3 100644
    );
  
    await options.onProgress?.({
-@@ -617,6 +785,7 @@ export async function generateClassroom(
+@@ -451,6 +636,7 @@ export async function generateClassroom(
      languageDirective,
      videoManifest: buildVideoManifestFromOutlines(outlines),
      style: 'interactive',
@@ -10077,7 +9899,7 @@ index 47e79cc9..03a976e3 100644
      createdAt: Date.now(),
      updatedAt: Date.now(),
      // For LLM-generated agents, embed full configs so the client can
-@@ -652,6 +821,12 @@ export async function generateClassroom(
+@@ -482,6 +668,12 @@ export async function generateClassroom(
      let generatedScenes = 0;
  
      for (const [index, outline] of outlines.entries()) {
@@ -10090,7 +9912,7 @@ index 47e79cc9..03a976e3 100644
        const safeOutline = applyOutlineFallbacks(outline, true, {
          allowProceduralSkill: vocationalActive,
        });
-@@ -693,6 +868,8 @@ export async function generateClassroom(
+@@ -523,6 +715,8 @@ export async function generateClassroom(
                  agents,
                  languageDirective,
                  allowProceduralSkill: vocationalActive,
@@ -10099,10 +9921,12 @@ index 47e79cc9..03a976e3 100644
                  ...(safeOutline.type === 'pbl'
                    ? {
                        pblLoopFallback: (input) =>
-@@ -761,6 +938,12 @@ export async function generateClassroom(
+@@ -595,7 +789,13 @@ export async function generateClassroom(
+     const storageFullPhases: string[] = [];
  
      // Phase: Media generation (after all scenes generated)
-     if (input.enableImageGeneration || input.enableVideoGeneration) {
+-    if (capabilities.imageGeneration || capabilities.videoGeneration) {
++    if (capabilities.imageGeneration || capabilities.videoGeneration || input.enableImageGeneration || input.enableVideoGeneration) {
 +      if (options.signal?.aborted) {
 +        const err = new Error('Classroom generation was aborted');
 +        err.name = 'AbortError';
@@ -10736,7 +10560,7 @@ index 00000000..80678769
 +  }
 +}
 diff --git a/lib/server/provider-config.ts b/lib/server/provider-config.ts
-index d8b3ef5b..ca075876 100644
+index 10bc62fb..7243cf3e 100644
 --- a/lib/server/provider-config.ts
 +++ b/lib/server/provider-config.ts
 @@ -15,6 +15,7 @@ import {
@@ -10747,7 +10571,7 @@ index d8b3ef5b..ca075876 100644
  
  const log = createLogger('ServerProviderConfig');
  
-@@ -670,6 +671,33 @@ export function resolveProxy(providerId: string): string | undefined {
+@@ -680,6 +681,33 @@ export function resolveProxy(providerId: string): string | undefined {
    return serverEntry('providers', providerId)?.proxy;
  }
  
@@ -10782,7 +10606,7 @@ index d8b3ef5b..ca075876 100644
  // Public API — TTS
  // ---------------------------------------------------------------------------
 diff --git a/lib/server/resolve-model.ts b/lib/server/resolve-model.ts
-index 4e27bb37..3fd4df5c 100644
+index 83cb4dbe..d2ec715c 100644
 --- a/lib/server/resolve-model.ts
 +++ b/lib/server/resolve-model.ts
 @@ -12,6 +12,7 @@ import {
@@ -10793,52 +10617,31 @@ index 4e27bb37..3fd4df5c 100644
    resolveProxy,
  } from '@/lib/server/provider-config';
  import { validateClientBaseUrl, validateUrlForSSRF } from '@/lib/server/ssrf-guard';
-@@ -93,7 +94,7 @@ export async function resolveModel(params: {
-   const userRoute = envRoute ? undefined : getUserStageRoute(params.userRoutes ?? {}, params.stage);
-   const stageRoute: UserStageRoute | undefined = envRoute ?? userRoute;
-   const stageModel = stageRoute?.model;
--  const modelString = stageModel || params.modelString || process.env.DEFAULT_MODEL;
-+  let modelString = stageModel || params.modelString || process.env.DEFAULT_MODEL;
-   if (!modelString) {
-     throw new Error(
-       'No model could be resolved. Configure DEFAULT_MODEL (and/or a MODEL_ROUTES entry for this stage), or send a model via x-model.',
-@@ -122,6 +123,18 @@ export async function resolveModel(params: {
-   // public targets, so the hop target is checked regardless of who chose the
+@@ -116,7 +117,7 @@ export async function resolveRequestedModel(
+ ): Promise<ResolvedModel | undefined> {
+   const userRoute = getUserStageRoute(params.userRoutes ?? {}, params.stage);
+   const stageModel = userRoute?.model;
+-  const modelString = stageModel || params.modelString;
++  let modelString = stageModel || params.modelString;
+   if (!modelString) return undefined;
+   if (!deprecationLogged) {
+     deprecationLogged = true;
+@@ -124,6 +125,7 @@ export async function resolveRequestedModel(
+       '[resolve-model] A request named its own model or key. This is deprecated: configure models in the model settings or openmaic.yml.',
+     );
+   }
++
+   const { providerId, modelId } = parseModelString(modelString);
+ 
+   // When a stage route overrides the client's model, the client-sent connection
+@@ -148,6 +150,7 @@ export async function resolveRequestedModel(
    // origin.
    const managed = isServerConfiguredProvider('providers', providerId);
-+
-+  // For server-managed providers, ensure the model is allowed by server config (e.g. OPENAI_MODELS).
-+  // If the client sent an obsolete or unconfigured model, gracefully fall back to server's current model.
-+  let effectiveModelId = modelId;
-+  if (managed) {
-+    const validatedModelId = resolveLLMModel(providerId, modelId);
-+    if (validatedModelId && validatedModelId !== modelId) {
-+      effectiveModelId = validatedModelId;
-+      modelString = `${providerId}:${effectiveModelId}`;
-+    }
-+  }
-+
    const registeredProviderType = getProvider(providerId)?.type;
++
    if (
      clientProviderType &&
-@@ -161,7 +174,7 @@ export async function resolveModel(params: {
-   const proxy = resolveProxy(providerId);
-   const { model, modelInfo } = getModel({
-     providerId,
--    modelId,
-+    modelId: effectiveModelId,
-     apiKey,
-     baseUrl,
-     proxy,
-@@ -188,7 +201,7 @@ export async function resolveModel(params: {
-     modelInfo,
-     modelString,
-     providerId,
--    modelId,
-+    modelId: effectiveModelId,
-     apiKey,
-     baseUrl,
-     thinkingConfig,
+     registeredProviderType &&
 diff --git a/lib/server/ssrf-guard.ts b/lib/server/ssrf-guard.ts
 index 816b093e..6a4199ce 100644
 --- a/lib/server/ssrf-guard.ts
@@ -11204,216 +11007,8 @@ index 30d4021c..7f38acb2 100644
  }
  
  /** True when a KV backend keeps its `device` scope on the machine. */
-diff --git a/lib/store/settings.ts b/lib/store/settings.ts
-index d26e71e4..87e4efc5 100644
---- a/lib/store/settings.ts
-+++ b/lib/store/settings.ts
-@@ -12,7 +12,7 @@ import { persist } from 'zustand/middleware';
- import type { ProviderId } from '@/lib/ai/providers';
- import type { ProvidersConfig } from '@/lib/types/settings';
- import { PROVIDERS } from '@/lib/ai/providers';
--import { findModelById, getCanonicalModelId } from '@/lib/ai/model-aliases';
-+import { findModelById, getCanonicalModelId, modelIdsMatch } from '@/lib/ai/model-aliases';
- import type { ThinkingConfig } from '@/lib/types/provider';
- import { getThinkingConfigKey, supportsConfigurableThinking } from '@/lib/ai/thinking-config';
- import { getCatalogThinkingCapability } from '@/lib/ai/model-metadata';
-@@ -118,21 +118,58 @@ function pruneUnusableStageRoutes(
- }
- 
- /**
-- * Stage routes that are operator-only and can never take effect from the
-- * client-side Course Model Config UI. `maic-agent-driver` is resolved
-- * exclusively from the operator's MODEL_ROUTES (with an explicit api dialect
-- * and contextWindow) in agent-runtime/agent-driver-model.ts, so a persisted
-- * user route for it is dead weight. Drop any leftover entry; returns null when
-- * nothing changed so callers can skip the write.
-+ * Prune stage routes that are operator-only or point to models no longer available
-+ * on the configured provider. If an operator updates environment models (e.g. from
-+ * 3.7 to 3.8, or in the future to 4.0), stale stage routes are automatically purged
-+ * so the stages seamlessly fall back to following the current mainline model.
-  */
--function pruneOperatorOnlyStageRoutes(
-+export function pruneInvalidStageRoutes(
-   routes: SettingsState['llmStageRoutes'] | undefined,
-+  providersConfig: ProvidersConfig | undefined,
- ): SettingsState['llmStageRoutes'] | null {
--  if (!routes || !('maic-agent-driver' in routes)) return null;
--  const { 'maic-agent-driver': _retired, ...rest } = routes;
--  return rest;
-+  if (!routes) return null;
-+  let changed = false;
-+  const filtered: SettingsState['llmStageRoutes'] = {};
-+
-+  for (const [stage, selection] of Object.entries(routes)) {
-+    if (!selection) {
-+      changed = true;
-+      continue;
-+    }
-+    // Operator-only stage: cannot be user-routed
-+    if (stage === 'maic-agent-driver') {
-+      changed = true;
-+      continue;
-+    }
-+    const provider = providersConfig?.[selection.providerId];
-+    // Provider disabled or removed
-+    if (!provider || provider.enabled === false) {
-+      changed = true;
-+      continue;
-+    }
-+
-+    // Check if the selected model is still in the provider's allowed models list
-+    const available = provider.models ?? [];
-+    if (available.length > 0) {
-+      const isAvailable = available.some(
-+        (m) =>
-+          m.id === selection.modelId ||
-+          modelIdsMatch(selection.providerId, m.id, selection.modelId),
-+      );
-+      if (!isAvailable) {
-+        changed = true;
-+        continue;
-+      }
-+    }
-+
-+    filtered[stage] = selection;
-+  }
-+
-+  return changed ? filtered : null;
- }
- 
-+export const pruneOperatorOnlyStageRoutes = pruneInvalidStageRoutes;
-+
- function pruneThinkingConfigs(
-   thinkingConfigs: Record<string, ThinkingConfig> | undefined,
-   providersConfig: ProvidersConfig | undefined,
-@@ -1071,6 +1108,76 @@ function stripLegacyServerBaseUrl(state: Partial<SettingsState>): void {
-   }
- }
- 
-+/**
-+ * Automatically migrate legacy model references (e.g. gemini-3.7-flash-high -> gemini-3.8-flash-high).
-+ * Ensures old client-side persisted state doesn't keep calling deprecated models.
-+ */
-+export function migrateLegacyModelIds(state: Partial<SettingsState>): void {
-+  if (state.modelId === 'gemini-3.7-flash-high') {
-+    state.modelId = 'gemini-3.8-flash-high';
-+  }
-+
-+  if (state.llmStageRoutes) {
-+    const updatedRoutes: typeof state.llmStageRoutes = { ...state.llmStageRoutes };
-+    let changed = false;
-+    for (const [stage, route] of Object.entries(updatedRoutes)) {
-+      if (route && route.modelId === 'gemini-3.7-flash-high') {
-+        updatedRoutes[stage] = { ...route, modelId: 'gemini-3.8-flash-high' };
-+        changed = true;
-+      }
-+    }
-+    if (changed) {
-+      state.llmStageRoutes = updatedRoutes;
-+    }
-+  }
-+
-+  if (state.providersConfig) {
-+    for (const providerCfg of Object.values(state.providersConfig)) {
-+      if (providerCfg && Array.isArray(providerCfg.models)) {
-+        let changed = false;
-+        const newModels = providerCfg.models.map((m) => {
-+          if (m.id === 'gemini-3.7-flash-high') {
-+            changed = true;
-+            return {
-+              ...m,
-+              id: 'gemini-3.8-flash-high',
-+              name:
-+                m.name === 'gemini-3.7-flash-high'
-+                  ? 'gemini-3.8-flash-high'
-+                  : m.name.replace(/3\.7/g, '3.8'),
-+            };
-+          }
-+          return m;
-+        });
-+        if (changed) {
-+          const seen = new Set<string>();
-+          providerCfg.models = newModels.filter((m) => {
-+            if (seen.has(m.id)) return false;
-+            seen.add(m.id);
-+            return true;
-+          });
-+        }
-+      }
-+    }
-+  }
-+
-+  if (state.thinkingConfigs) {
-+    const updatedThinking = { ...state.thinkingConfigs };
-+    let changed = false;
-+    for (const [key, val] of Object.entries(updatedThinking)) {
-+      if (key.includes('gemini-3.7-flash-high')) {
-+        const newKey = key.replace(/gemini-3\.7-flash-high/g, 'gemini-3.8-flash-high');
-+        delete updatedThinking[key];
-+        updatedThinking[newKey] = val;
-+        changed = true;
-+      }
-+    }
-+    if (changed) {
-+      state.thinkingConfigs = updatedThinking;
-+    }
-+  }
-+}
-+
- export const useSettingsStore = create<SettingsState>()(
-   persist(
-     (set, get) => {
-@@ -2178,10 +2285,14 @@ export const useSettingsStore = create<SettingsState>()(
-               // (LLM first-load auto-select removed: the symmetric provider
-               // recovery + resolveSelectedModel above now resolve LLM provider
-               // and model atomically at the source, covering server-configured
--              // AND client-API-key providers — see #580.)
-+              const prunedStageRoutes = pruneInvalidStageRoutes(
-+                state.llmStageRoutes,
-+                newProvidersConfig,
-+              );
- 
-               return {
-                 providersConfig: newProvidersConfig,
-+                ...(prunedStageRoutes ? { llmStageRoutes: prunedStageRoutes } : {}),
-                 ttsProvidersConfig: newTTSConfig,
-                 asrProvidersConfig: newASRConfig,
-                 pdfProvidersConfig: newPDFConfig,
-@@ -2494,9 +2605,10 @@ export const useSettingsStore = create<SettingsState>()(
-         ensureValidProviderSelections(state);
-         ensureBuiltInAudioProviders(state);
-         ensureBuiltInWebSearchProviders(state);
-+        migrateLegacyModelIds(state);
-         state.thinkingConfigs = pruneThinkingConfigs(state.thinkingConfigs, state.providersConfig);
--        const prunedOperatorOnly = pruneOperatorOnlyStageRoutes(state.llmStageRoutes);
--        if (prunedOperatorOnly) state.llmStageRoutes = prunedOperatorOnly;
-+        const prunedInvalid = pruneInvalidStageRoutes(state.llmStageRoutes, state.providersConfig);
-+        if (prunedInvalid) state.llmStageRoutes = prunedInvalid;
- 
-         return state;
-       },
-@@ -2537,13 +2649,17 @@ export const useSettingsStore = create<SettingsState>()(
-         ensureBuiltInWebSearchProviders(merged as Partial<SettingsState>);
-         ensureValidProviderSelections(merged as Partial<SettingsState>);
-         stripLegacyServerBaseUrl(merged as Partial<SettingsState>);
-+        migrateLegacyModelIds(merged as Partial<SettingsState>);
-         const typedMerged = merged as Partial<SettingsState>;
-         typedMerged.thinkingConfigs = pruneThinkingConfigs(
-           typedMerged.thinkingConfigs,
-           typedMerged.providersConfig,
-         );
--        const prunedOperatorOnly = pruneOperatorOnlyStageRoutes(typedMerged.llmStageRoutes);
--        if (prunedOperatorOnly) typedMerged.llmStageRoutes = prunedOperatorOnly;
-+        const prunedInvalid = pruneInvalidStageRoutes(
-+          typedMerged.llmStageRoutes,
-+          typedMerged.providersConfig,
-+        );
-+        if (prunedInvalid) typedMerged.llmStageRoutes = prunedInvalid;
-         return merged as SettingsState;
-       },
-     },
 diff --git a/lib/store/stage.ts b/lib/store/stage.ts
-index 552e168c..c75605b4 100644
+index 24c7b963..686aca8f 100644
 --- a/lib/store/stage.ts
 +++ b/lib/store/stage.ts
 @@ -778,6 +778,39 @@ const useStageStoreBase = create<StageState>()((set, get) => ({
@@ -11654,7 +11249,7 @@ index 00000000..cc1e82c4
 +  3. 最后一页必须是 type: "slide" 总结页。`;
 +}
 diff --git a/lib/types/generation.ts b/lib/types/generation.ts
-index f3e99e6b..d28471c7 100644
+index 92ecb39a..3e698ff6 100644
 --- a/lib/types/generation.ts
 +++ b/lib/types/generation.ts
 @@ -7,6 +7,10 @@
@@ -11668,7 +11263,7 @@ index f3e99e6b..d28471c7 100644
  
  // ==================== PDF Image Types ====================
  
-@@ -100,6 +104,9 @@ export interface UploadedDocument {
+@@ -99,6 +103,9 @@ export interface UploadedDocument {
   */
  export interface UserRequirements {
    requirement: string; // Single free-form text for all user input
@@ -11802,76 +11397,8 @@ index 00000000..3e705fe1
 +    isPreset: false,
 +  };
 +}
-diff --git a/lib/utils/model-config.ts b/lib/utils/model-config.ts
-index 1818c25f..9132d395 100644
---- a/lib/utils/model-config.ts
-+++ b/lib/utils/model-config.ts
-@@ -5,7 +5,7 @@ import {
-   normalizeThinkingConfig,
-   supportsConfigurableThinking,
- } from '@/lib/ai/thinking-config';
--import { findModelById } from '@/lib/ai/model-aliases';
-+import { findModelById, modelIdsMatch } from '@/lib/ai/model-aliases';
- import { getCatalogThinkingCapability } from '@/lib/ai/model-metadata';
- 
- /**
-@@ -13,20 +13,29 @@ import { getCatalogThinkingCapability } from '@/lib/ai/model-metadata';
-  */
- export function getCurrentModelConfig() {
-   const { providerId, modelId, providersConfig, thinkingConfigs } = useSettingsStore.getState();
--  const modelString = `${providerId}:${modelId}`;
-+  const providerConfig = providersConfig[providerId];
-+  const availableModels = providerConfig?.models ?? [];
-+  const effectiveModelId =
-+    availableModels.length > 0 &&
-+    !availableModels.some((m) => m.id === modelId || modelIdsMatch(providerId, m.id, modelId))
-+      ? availableModels[0]?.id || modelId
-+      : modelId;
-+  const modelString = `${providerId}:${effectiveModelId}`;
- 
-   // Get current provider's config
--  const providerConfig = providersConfig[providerId];
--  const modelInfo = findModelById(providerId, providerConfig?.models, modelId);
-+  const modelInfo = findModelById(providerId, providerConfig?.models, effectiveModelId);
-   const thinking =
--    modelInfo?.capabilities?.thinking ?? getCatalogThinkingCapability(providerId, modelId);
-+    modelInfo?.capabilities?.thinking ?? getCatalogThinkingCapability(providerId, effectiveModelId);
-   const thinkingConfig = supportsConfigurableThinking(thinking)
--    ? normalizeThinkingConfig(thinking, thinkingConfigs[getThinkingConfigKey(providerId, modelId)])
-+    ? normalizeThinkingConfig(
-+        thinking,
-+        thinkingConfigs[getThinkingConfigKey(providerId, effectiveModelId)],
-+      )
-     : undefined;
- 
-   return {
-     providerId,
--    modelId,
-+    modelId: effectiveModelId,
-     modelString,
-     apiKey: providerConfig?.apiKey || '',
-     baseUrl: providerConfig?.baseUrl || '',
-@@ -58,6 +67,18 @@ export function getStageRoutesHeaderValue(): string | undefined {
-     // a route onto an unusable provider would make the server fail that stage
-     // instead of falling back to the main model, so it is dropped here.
-     if (!config || config.enabled === false || !isLLMProviderConfigured(config)) continue;
-+
-+    // Check if the selected model still exists in available models for this provider
-+    const availableModels = config.models ?? [];
-+    if (availableModels.length > 0) {
-+      const isModelValid = availableModels.some(
-+        (m) =>
-+          m.id === selection.modelId ||
-+          modelIdsMatch(selection.providerId, m.id, selection.modelId),
-+      );
-+      if (!isModelValid) continue; // Model is obsolete or no longer exists; skip sending stale route!
-+    }
-+
-     routes[stage] = {
-       model: `${selection.providerId}:${selection.modelId}`,
-       apiKey: config?.apiKey || undefined,
 diff --git a/lib/utils/stage-storage.ts b/lib/utils/stage-storage.ts
-index 25b0a801..22e5c187 100644
+index 71719093..6c4a96de 100644
 --- a/lib/utils/stage-storage.ts
 +++ b/lib/utils/stage-storage.ts
 @@ -26,6 +26,7 @@ import {
@@ -11882,7 +11409,7 @@ index 25b0a801..22e5c187 100644
    type AppDocumentOutline,
  } from '@/lib/document-store';
  import { clearAllForScene } from '@/lib/quiz/persistence';
-@@ -280,6 +281,16 @@ export async function saveStageData(
+@@ -283,6 +284,16 @@ export async function saveStageData(
        return 'stale-dropped';
      }
      log.info(`Saved stage: ${stageId}`);
@@ -11899,7 +11426,7 @@ index 25b0a801..22e5c187 100644
      return failedChanges.length > 0 ? { failedChanges } : undefined;
    } catch (error) {
      log.error('Failed to save stage:', error);
-@@ -449,16 +460,97 @@ export async function saveStageDataIncremental(
+@@ -452,16 +463,97 @@ export async function saveStageDataIncremental(
    if (has('chats') && !(await saveStageChats(stageId, data))) {
      failedChanges.push({ kind: 'chats' });
    }
@@ -11999,7 +11526,7 @@ index 25b0a801..22e5c187 100644
      if (!document) {
        log.info(`Stage not found: ${stageId}`);
        return null;
-@@ -655,6 +747,10 @@ async function performStageDeletion(stageId: string): Promise<void> {
+@@ -658,6 +750,10 @@ async function performStageDeletion(stageId: string): Promise<void> {
              }
  
              log.info(`Deleted stage: ${stageId}`);
@@ -12010,7 +11537,7 @@ index 25b0a801..22e5c187 100644
              releaseCaller(undefined);
              // The public deletion remains bounded, but this callback deliberately
              // retains the exclusive lock until a late runtime cascade can no longer
-@@ -845,7 +941,13 @@ export async function getFirstSlideByStages(
+@@ -848,7 +944,13 @@ export async function getFirstSlideByStages(
    try {
      await Promise.all(
        stageIds.map(async (stageId) => {
@@ -12025,7 +11552,7 @@ index 25b0a801..22e5c187 100644
          const firstSlide = document?.scenes.find((s) => s.content?.type === 'slide');
          if (firstSlide && firstSlide.content.type === 'slide') {
            const slide = structuredClone(firstSlide.content.canvas);
-@@ -1009,10 +1111,20 @@ export async function getFirstSlideByStages(
+@@ -1014,10 +1116,20 @@ export async function getFirstSlideByStages(
   */
  export async function renameStage(stageId: string, newName: string): Promise<void> {
    try {
@@ -12051,7 +11578,7 @@ index 25b0a801..22e5c187 100644
    } catch (error) {
      log.error('Failed to rename stage:', error);
 diff --git a/next.config.ts b/next.config.ts
-index fbaeccff..30dee4be 100644
+index 32bdecb7..32c91018 100644
 --- a/next.config.ts
 +++ b/next.config.ts
 @@ -57,7 +57,7 @@ const nextConfig: NextConfig = {
@@ -27340,10 +26867,10 @@ index 00000000..a4c8ae46
 +  });
 +});
 diff --git a/tests/server/provider-config.test.ts b/tests/server/provider-config.test.ts
-index 5d139055..229a7e8e 100644
+index 78fed84c..a6519198 100644
 --- a/tests/server/provider-config.test.ts
 +++ b/tests/server/provider-config.test.ts
-@@ -626,6 +626,18 @@ pdf:
+@@ -627,6 +627,18 @@ pdf:
        expect(resolveImageModel('seedream')).toBe('model-a');
      });
  
@@ -27363,10 +26890,10 @@ index 5d139055..229a7e8e 100644
        const { resolveImageModel } = await import('@/lib/server/provider-config');
        expect(resolveImageModel('seedream', 'client-model')).toBe('client-model');
 diff --git a/tests/server/provider-redirect-wiring.test.ts b/tests/server/provider-redirect-wiring.test.ts
-index 75427052..3302a7e7 100644
+index 614bc31b..eaf15285 100644
 --- a/tests/server/provider-redirect-wiring.test.ts
 +++ b/tests/server/provider-redirect-wiring.test.ts
-@@ -26,6 +26,7 @@ vi.mock('@/lib/server/provider-config', () => ({
+@@ -32,6 +32,7 @@ vi.mock('@/lib/server/provider-config', () => ({
    isServerConfiguredProvider: () => mocks.serverManaged,
    resolveApiKey: (_id: string, clientKey: string) => clientKey || 'server-key',
    resolveBaseUrl: (_id: string, clientBaseUrl?: string) => clientBaseUrl,
@@ -27374,82 +26901,6 @@ index 75427052..3302a7e7 100644
    resolveProxy: () => undefined,
  }));
  
-diff --git a/tests/server/resolve-model.test.ts b/tests/server/resolve-model.test.ts
-index e67927c6..19360bec 100644
---- a/tests/server/resolve-model.test.ts
-+++ b/tests/server/resolve-model.test.ts
-@@ -12,6 +12,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
- const mocks = vi.hoisted(() => ({
-   getModelCalls: [] as Array<Record<string, unknown>>,
-   serverManaged: false,
-+  serverAllowedModels: undefined as string[] | undefined,
- }));
- 
- vi.mock('@/lib/ai/providers', async (importOriginal) => {
-@@ -30,6 +31,14 @@ vi.mock('@/lib/server/provider-config', () => ({
-   resolveApiKey: (_id: string, clientKey: string) => clientKey || 'server-key',
-   resolveBaseUrl: (_id: string, clientBaseUrl?: string) => clientBaseUrl,
-   resolveProxy: () => undefined,
-+  resolveLLMModel: (_id: string, clientModel?: string) => {
-+    if (mocks.serverAllowedModels && clientModel) {
-+      if (!mocks.serverAllowedModels.includes(clientModel)) {
-+        return mocks.serverAllowedModels[0];
-+      }
-+    }
-+    return clientModel;
-+  },
- }));
- 
- vi.mock('@/lib/server/ssrf-guard', () => ({
-@@ -42,6 +51,7 @@ describe('resolveModel — per-stage resolution order', () => {
-     vi.resetModules();
-     mocks.getModelCalls.length = 0;
-     mocks.serverManaged = false;
-+    mocks.serverAllowedModels = undefined;
-     delete process.env.MODEL_ROUTES;
-     delete process.env.DEFAULT_MODEL;
-   });
-@@ -314,4 +324,40 @@ describe('resolveModel — per-stage resolution order', () => {
-     expect(call.baseUrl).toBe('https://user.example/v1');
-     expect(call.apiKey).toBe('user-anthropic-key');
-   });
-+
-+  it('dynamically falls back to server allowed model when client requests an obsolete/unsupported model', async () => {
-+    mocks.serverManaged = true;
-+    mocks.serverAllowedModels = ['gemini-3.8-flash-high', 'claude-sonnet-4'];
-+    const { resolveModel } = await import('@/lib/server/resolve-model');
-+    const r1 = await resolveModel({
-+      stage: 'scene-content',
-+      modelString: 'openai:gemini-3.7-flash-high',
-+    });
-+    expect(r1.modelId).toBe('gemini-3.8-flash-high');
-+    expect(r1.modelString).toBe('openai:gemini-3.8-flash-high');
-+
-+    const r2 = await resolveModel({
-+      stage: 'scene-actions',
-+      userRoutes: {
-+        'scene-actions': {
-+          model: 'openai:gemini-3.7-flash-high',
-+        },
-+      },
-+    });
-+    expect(r2.modelId).toBe('gemini-3.8-flash-high');
-+    expect(r2.modelString).toBe('openai:gemini-3.8-flash-high');
-+
-+    // Also works when future model transitions happen (e.g. 3.8 retired, 4.0 added)
-+    mocks.serverAllowedModels = ['gemini-4.0-flash', 'claude-sonnet-4'];
-+    const r3 = await resolveModel({
-+      stage: 'scene-actions',
-+      userRoutes: {
-+        'scene-actions': {
-+          model: 'openai:gemini-3.8-flash-high',
-+        },
-+      },
-+    });
-+    expect(r3.modelId).toBe('gemini-4.0-flash');
-+    expect(r3.modelString).toBe('openai:gemini-4.0-flash');
-+  });
- });
 diff --git a/tests/server/user-kv.test.ts b/tests/server/user-kv.test.ts
 new file mode 100644
 index 00000000..8447980b
@@ -27511,120 +26962,5 @@ index 00000000..8447980b
 +    await deleteUserKV(testUserId, testKey);
 +    const afterDelete = await getUserKV(testUserId, testKey);
 +    expect(afterDelete).toBeNull();
-+  });
-+});
-diff --git a/tests/store/settings-legacy-model-migration.test.ts b/tests/store/settings-legacy-model-migration.test.ts
-new file mode 100644
-index 00000000..d4ee312a
---- /dev/null
-+++ b/tests/store/settings-legacy-model-migration.test.ts
-@@ -0,0 +1,109 @@
-+import { describe, expect, it } from 'vitest';
-+import { migrateLegacyModelIds, type SettingsState } from '@/lib/store/settings';
-+
-+describe('migrateLegacyModelIds', () => {
-+  it('migrates main modelId from gemini-3.7-flash-high to gemini-3.8-flash-high', () => {
-+    const state: Partial<SettingsState> = {
-+      modelId: 'gemini-3.7-flash-high',
-+    };
-+    migrateLegacyModelIds(state);
-+    expect(state.modelId).toBe('gemini-3.8-flash-high');
-+  });
-+
-+  it('migrates stage routes from gemini-3.7-flash-high to gemini-3.8-flash-high', () => {
-+    const state: Partial<SettingsState> = {
-+      llmStageRoutes: {
-+        'scene-content': { providerId: 'openai', modelId: 'gemini-3.7-flash-high' },
-+        'scene-actions': { providerId: 'openai', modelId: 'gemini-3.7-flash-high' },
-+        'quiz-grade': { providerId: 'openai', modelId: 'gpt-4o' },
-+      },
-+    };
-+    migrateLegacyModelIds(state);
-+    expect(state.llmStageRoutes?.['scene-content']?.modelId).toBe('gemini-3.8-flash-high');
-+    expect(state.llmStageRoutes?.['scene-actions']?.modelId).toBe('gemini-3.8-flash-high');
-+    expect(state.llmStageRoutes?.['quiz-grade']?.modelId).toBe('gpt-4o');
-+  });
-+
-+  it('migrates provider models', () => {
-+    const state = {
-+      providersConfig: {
-+        openai: {
-+          apiKey: 'key',
-+          baseUrl: 'url',
-+          name: 'OpenAI',
-+          type: 'openai',
-+          requiresApiKey: true,
-+          isBuiltIn: true,
-+          models: [
-+            { id: 'gemini-3.7-flash-high', name: 'gemini-3.7-flash-high' },
-+            { id: 'other-model', name: 'Other Model' },
-+          ],
-+        },
-+      },
-+    } as unknown as Partial<SettingsState>;
-+    migrateLegacyModelIds(state);
-+    expect(state.providersConfig?.openai.models).toEqual([
-+      { id: 'gemini-3.8-flash-high', name: 'gemini-3.8-flash-high' },
-+      { id: 'other-model', name: 'Other Model' },
-+    ]);
-+  });
-+
-+  it('migrates thinkingConfigs keys', () => {
-+    const state: Partial<SettingsState> = {
-+      thinkingConfigs: {
-+        'openai:gemini-3.7-flash-high': { enabled: true, level: 'high' },
-+        'openai:gpt-5': { enabled: false },
-+      },
-+    };
-+    migrateLegacyModelIds(state);
-+    expect(state.thinkingConfigs?.['openai:gemini-3.8-flash-high']).toEqual({
-+      enabled: true,
-+      level: 'high',
-+    });
-+    expect(state.thinkingConfigs?.['openai:gemini-3.7-flash-high']).toBeUndefined();
-+    expect(state.thinkingConfigs?.['openai:gpt-5']).toEqual({ enabled: false });
-+  });
-+});
-+
-+describe('pruneInvalidStageRoutes', () => {
-+  it('dynamically prunes stage routes whose model is no longer available in the provider', async () => {
-+    const { pruneInvalidStageRoutes } = await import('@/lib/store/settings');
-+    const providersConfig = {
-+      openai: {
-+        models: [
-+          { id: 'gemini-4.0-flash', name: 'Gemini 4.0' },
-+          { id: 'claude-sonnet-4', name: 'Claude Sonnet 4' },
-+        ],
-+        enabled: true,
-+      },
-+    } as never;
-+
-+    const routes = {
-+      'scene-content': { providerId: 'openai' as never, modelId: 'gemini-3.8-flash-high' }, // obsolete model
-+      'scene-actions': { providerId: 'openai' as never, modelId: 'gemini-4.0-flash' }, // valid model
-+      'maic-agent-driver': { providerId: 'openai' as never, modelId: 'gemini-4.0-flash' }, // operator only
-+    };
-+
-+    const pruned = pruneInvalidStageRoutes(routes, providersConfig);
-+    expect(pruned).toEqual({
-+      'scene-actions': { providerId: 'openai', modelId: 'gemini-4.0-flash' },
-+    });
-+  });
-+
-+  it('keeps valid routes and returns null when nothing changed', async () => {
-+    const { pruneInvalidStageRoutes } = await import('@/lib/store/settings');
-+    const providersConfig = {
-+      openai: {
-+        models: [{ id: 'gemini-4.0-flash', name: 'Gemini 4.0' }],
-+        enabled: true,
-+      },
-+    } as never;
-+
-+    const routes = {
-+      'scene-actions': { providerId: 'openai' as never, modelId: 'gemini-4.0-flash' },
-+    };
-+
-+    const pruned = pruneInvalidStageRoutes(routes, providersConfig);
-+    expect(pruned).toBeNull();
 +  });
 +});
