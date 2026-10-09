@@ -1,19 +1,20 @@
 # 👥 OpenMAIC 模块化扩展补丁集 (Multi-Users, Course-Manager, Batch-Studio & Interactive-Hub)
 
-[![OpenMAIC](https://img.shields.io/badge/OpenMAIC-v1.1.2-blue?style=flat-square)](https://github.com/THU-MAIC/OpenMAIC)
+[![OpenMAIC](https://img.shields.io/badge/OpenMAIC-v1.2.0--rc.1-blue?style=flat-square)](https://github.com/THU-MAIC/OpenMAIC)
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-16+-336791?style=flat-square&logo=postgresql&logoColor=white)](https://www.postgresql.org/)
 [![Next.js](https://img.shields.io/badge/Next.js-16-black?style=flat-square&logo=next.js)](https://nextjs.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg?style=flat-square)](LICENSE)
 
-本仓库是针对清华大学开源项目 [**THU-MAIC/OpenMAIC**](https://github.com/THU-MAIC/OpenMAIC) 的**高可用模块化生产级扩展套件**。全面适配官方最新 **v1.1.2** 基线架构。
+本仓库是针对清华大学开源项目 [**THU-MAIC/OpenMAIC**](https://github.com/THU-MAIC/OpenMAIC) 的**高可用模块化生产级扩展套件**。全面适配官方最新 **v1.2.0-rc.1** 服务端优先（Server-First Generation Runs）基线架构。
 
-包含五大核心独立模块，支持按需独立安装或统一全量部署：
+包含七大核心模块，支持按需独立安装或统一全量部署：
 1. **👥 多用户管理与统一身份认证模块**：开箱即用的多用户注册/登录、RBAC 角色权限、超级管理员全站控制台与多端云端漫游，**全面接入官方 Owner Identity Seam 与 PersistenceHooks 宿主标准接口**；
 2. **📚 我的课程管理中心与双轨存储漫游模块 (`/my-courses`)**：本地 IndexedDB 历史课程与 PostgreSQL 云端课程双轨智能聚合、一键上云备份、集中播放、Pro 工作台二次深度编辑、行内重命名与**四维彻底物理级联删除保障**；
 3. **⚡ 批量制课工坊扩展 (`/batch-studio`)**：纯后台异步批处理、三档课时定制（微课/标准/大课）、真·70%+ 深度互动场景、**系列编号防重碰撞保护**、**阶段小测穿插防扎堆机制**、实时任务大屏看板与任务即时中断止损；
 4. **🎮 互动实验与游戏工坊 / 互动展厅 (`/interactive-hub`)**：纯脱机单文件 HTML 自动内联打包、**多选批量打包下载为 ZIP 压缩包**、断网即开即用、全生命周期联动与极速强制同步归集；
-5. **🎛️ Pro Mode 专业工作台方案 B 指南**：智能体多轮对话编排与 MAIC Editor 专业课件排版二次编辑模式；
-6. **🧠 运行时自愈与大模型动态迁移机制**：动态模型白名单校验，历史过期模型（如 `gemini-3.7-flash-high`）自动平滑迁移至新模型（`gemini-3.8-flash-high`）并自动修剪失效配置，杜绝模型漂移与报错。
+5. **📁 课件原件归档、提示词回溯与材料二次衍生**：原文档/PPTX/PDF 自动归档至课堂、支持下载/预览/彻底物理删除；一键查看并复制课堂初始 Prompt；支持以原附件为蓝本二次调整提示词与教学重点衍生定制新课程；
+6. **🎛️ Pro Mode 专业工作台方案 B 指南**：智能体多轮对话编排与 MAIC Editor 专业课件排版二次编辑模式；
+7. **🧠 运行时自愈与大模型动态迁移机制**：动态模型白名单校验，历史过期模型自动平滑迁移至新模型并自动修剪失效配置，杜绝模型漂移与报错。
 
 ---
 
