@@ -71,9 +71,16 @@ function run(targetDir) {
     const relPath = path.relative(rootDir, fullPath);
     let content = fs.readFileSync(fullPath, 'utf-8');
 
-    // 提取所有内联 onclick 函数名
-    const onclickMatches = [...content.matchAll(/onclick=["']([a-zA-Z0-9_$]+)\s*\([^"')]*\)["']/g)];
-    if (onclickMatches.length === 0) continue;
+    // 提取所有内联 onclick 函数名 (支持末尾分号、多函数调用及复杂参数)
+    const onclickAttrRegex = /onclick=["']([^"']+)["']/gi;
+    const foundCallFns = [];
+    for (const attrMatch of content.matchAll(onclickAttrRegex)) {
+      const code = attrMatch[1];
+      for (const fnMatch of code.matchAll(/([a-zA-Z0-9_$]+)\s*\(/g)) {
+        foundCallFns.push(fnMatch[1]);
+      }
+    }
+    if (foundCallFns.length === 0) continue;
 
     const lastScriptIdx = content.lastIndexOf('</script>');
     if (lastScriptIdx === -1) continue;
@@ -83,21 +90,14 @@ function run(targetDir) {
 
     const missingFunctions = [];
 
-    for (const m of onclickMatches) {
+    for (const fnName of foundCallFns) {
       checkedCount++;
-      const fnName = m[1];
       if (BUILTIN_FUNCTIONS.has(fnName)) continue;
 
       // 检查当前脚本是否已定义该函数
-      const isDefined = scriptsText.includes(`function ${fnName}`) ||
-                        scriptsText.includes(`window.${fnName}`) ||
-                        scriptsText.includes(`window['${fnName}']`) ||
-                        scriptsText.includes(`window["${fnName}"]`) ||
-                        scriptsText.includes(`const ${fnName}`) ||
-                        scriptsText.includes(`let ${fnName}`) ||
-                        scriptsText.includes(`var ${fnName}`) ||
-                        scriptsText.includes(`${fnName} =`) ||
-                        scriptsText.includes(`${fnName}:`);
+      const isDefined = new RegExp(
+        `((?:async\\s+)?function\\s+${fnName}\\b|window\\.${fnName}\\s*=|window\\s*\\[['"]${fnName}['"]\\]|var\\s+${fnName}\\b|let\\s+${fnName}\\b|const\\s+${fnName}\\b|\\b${fnName}\\s*:)`
+      ).test(scriptsText);
 
       if (!isDefined) {
         missingFunctions.push(fnName);
@@ -146,8 +146,12 @@ function run(targetDir) {
       generatedBridges.push(`
 // [Auto-Fix 通用规则] 自动桥接未定义的全局交互函数: ${fn}
 window['${fn}'] = function() {
-  const modal = document.querySelector('.modal, [id*="modal"], [id*="result"], [id*="screen"], [id*="victory"], [id*="dialog"]');
-  if (modal) modal.classList.add('hidden');
+  const modal = document.querySelector('.modal, .modal-overlay, [id*="modal"], [id*="result"], [id*="screen"], [id*="victory"], [id*="dialog"]');
+  if (modal) {
+    modal.classList.remove('active');
+    modal.classList.remove('show');
+    modal.classList.add('hidden');
+  }
 ${bridgeLogic}
 };
 window.${fn} = window['${fn}'];

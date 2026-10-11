@@ -34,8 +34,13 @@ const SANDBOX_GUARD_SCRIPT = `<script id="${SANDBOX_GUARD_ID}">
     }
     try {
       var memStore = createMemoryStorage();
-      Object.defineProperty(window, 'localStorage', { value: memStore, configurable: true, writable: true });
-      Object.defineProperty(window, 'sessionStorage', { value: createMemoryStorage(), configurable: true, writable: true });
+      try {
+        Object.defineProperty(window, 'localStorage', { value: memStore, configurable: true, writable: true });
+        Object.defineProperty(window, 'sessionStorage', { value: createMemoryStorage(), configurable: true, writable: true });
+      } catch (_) {
+        window.localStorage = memStore;
+        window.sessionStorage = createMemoryStorage();
+      }
     } catch (_) {}
   }
 

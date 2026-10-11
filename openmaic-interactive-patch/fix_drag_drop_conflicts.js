@@ -68,8 +68,8 @@ function run(targetDir) {
     let content = fs.readFileSync(fullPath, 'utf-8');
     const original = content;
 
-    // 1. 扫描修复内联 ondragover
-    content = content.replace(/ondragover="([^"]*)"/g, (match, body) => {
+    // 1. 扫描修复内联 ondragover (支持单双引号)
+    content = content.replace(/ondragover=["']([^"']*)["']/gi, (match, body) => {
       checkedCount++;
       if (body.includes('preventDefault')) return match;
       return `ondragover="event.preventDefault(); ${body}"`;

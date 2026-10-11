@@ -1,6 +1,16 @@
 const fs = require('fs');
 const path = require('path');
-const { chromium } = require('/home/helin/projects/OpenMAIC/node_modules/.pnpm/node_modules/playwright');
+let chromium;
+try {
+  chromium = require('playwright').chromium;
+} catch (_) {
+  try {
+    chromium = require('/home/helin/projects/OpenMAIC/node_modules/.pnpm/node_modules/playwright').chromium;
+  } catch (err) {
+    console.error('Playwright is required to run retest_audit.js. Run `pnpm add -D playwright` first.');
+    process.exit(1);
+  }
+}
 
 const ROOT_DIR = path.resolve(__dirname, '..');
 const REPORT_FILE = path.join(__dirname, 'retest_results.json');
