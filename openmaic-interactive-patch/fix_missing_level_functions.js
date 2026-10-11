@@ -26,9 +26,14 @@ function getAllHtmlFiles(dir) {
 }
 
 const BUILTIN_FUNCTIONS = new Set([
+  // JavaScript 控制流与操作符关键字 (防止 if(...), for(...), catch(...) 误匹配为函数)
+  'if', 'for', 'while', 'switch', 'catch', 'return', 'typeof', 'void', 'delete', 'throw', 'function', 'import', 'with', 'do',
+  // 浏览器原生全局调度与操作方法
   'alert', 'console', 'setTimeout', 'clearTimeout', 'setInterval', 'clearInterval',
   'close', 'print', 'focus', 'blur', 'open', 'confirm', 'prompt',
-  'preventDefault', 'stopPropagation', 'history', 'location', 'window'
+  'preventDefault', 'stopPropagation', 'history', 'location', 'window', 'requestAnimationFrame', 'cancelAnimationFrame',
+  // 基础类型与常用工具函数
+  'parseInt', 'parseFloat', 'isNaN', 'isFinite', 'eval', 'Boolean', 'Number', 'String', 'Object', 'Array', 'Date', 'RegExp', 'Math', 'JSON'
 ]);
 
 function analyzeLevelEngine(scriptText) {

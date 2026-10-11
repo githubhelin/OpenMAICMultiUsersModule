@@ -62,6 +62,23 @@ export interface RepairResult {
 }
 
 const BUILTIN_GLOBAL_FUNCTIONS = new Set([
+  // JavaScript 控制流与操作符关键字 (防止 if(...), for(...), catch(...) 误匹配为函数)
+  'if',
+  'for',
+  'while',
+  'switch',
+  'catch',
+  'return',
+  'typeof',
+  'void',
+  'delete',
+  'throw',
+  'function',
+  'import',
+  'with',
+  'do',
+
+  // 浏览器原生全局调度与操作方法
   'alert',
   'confirm',
   'prompt',
@@ -82,6 +99,32 @@ const BUILTIN_GLOBAL_FUNCTIONS = new Set([
   'focus',
   'blur',
   'open',
+
+  // 基础类型转换与全局工具函数
+  'parseInt',
+  'parseFloat',
+  'isNaN',
+  'isFinite',
+  'encodeURI',
+  'decodeURI',
+  'encodeURIComponent',
+  'decodeURIComponent',
+  'eval',
+  'Boolean',
+  'Number',
+  'String',
+  'Function',
+  'Object',
+  'Array',
+  'Date',
+  'RegExp',
+  'Error',
+  'Math',
+  'JSON',
+  'Promise',
+  'Set',
+  'Map',
+  'Symbol',
 ]);
 
 function tryRepairJson(raw: string): string {

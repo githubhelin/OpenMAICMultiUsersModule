@@ -33,6 +33,23 @@ describe('repairInteractiveHtml (Defensive Self-Healing Cleaner)', () => {
     expect(html).toContain('window["nextLevelOrRestart"] = function');
   });
 
+  it('does not treat JavaScript control keywords like if, for, while, return as missing functions', () => {
+    const raw = `
+      <button onclick="if(confirm('重来？')) restartGame();">重来</button>
+      <button onclick="for(let i=0;i<3;i++) doSomething(i);">循环</button>
+      <button onclick="return (valid > 0);">返回</button>
+      <script>
+        function restartGame() {}
+        function doSomething() {}
+      </script>
+    `;
+    const { html, appliedRepairs } = repairInteractiveHtml(raw);
+    expect(html).not.toContain('window["if"]');
+    expect(html).not.toContain('window["for"]');
+    expect(html).not.toContain('window["return"]');
+    expect(appliedRepairs.filter((r) => r.includes('自动桥接缺失函数'))).toEqual([]);
+  });
+
   it('adds preventDefault to ondragover dropzones', () => {
     const raw = `<div class="slot" ondragover="handleOver(event)"></div>`;
     const { html, appliedRepairs } = repairInteractiveHtml(raw);

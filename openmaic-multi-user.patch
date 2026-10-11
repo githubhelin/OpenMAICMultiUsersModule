@@ -8650,10 +8650,10 @@ index 7ec91ce7..cb9e3359 100644
  const log = createLogger('ExportClassroom');
 diff --git a/lib/interactive/repair-interactive-html.ts b/lib/interactive/repair-interactive-html.ts
 new file mode 100644
-index 00000000..70521b89
+index 00000000..395c5835
 --- /dev/null
 +++ b/lib/interactive/repair-interactive-html.ts
-@@ -0,0 +1,397 @@
+@@ -0,0 +1,440 @@
 +/**
 + * OpenMAIC 交互课件自动化防御性自愈清洗器
 + * 针对大模型单文件 HTML 课件的常见共性盲区进行纯内存快速清洗与加固。
@@ -8665,6 +8665,23 @@ index 00000000..70521b89
 +}
 +
 +const BUILTIN_GLOBAL_FUNCTIONS = new Set([
++  // JavaScript 控制流与操作符关键字 (防止 if(...), for(...), catch(...) 误匹配为函数)
++  'if',
++  'for',
++  'while',
++  'switch',
++  'catch',
++  'return',
++  'typeof',
++  'void',
++  'delete',
++  'throw',
++  'function',
++  'import',
++  'with',
++  'do',
++
++  // 浏览器原生全局调度与操作方法
 +  'alert',
 +  'confirm',
 +  'prompt',
@@ -8685,6 +8702,32 @@ index 00000000..70521b89
 +  'focus',
 +  'blur',
 +  'open',
++
++  // 基础类型转换与全局工具函数
++  'parseInt',
++  'parseFloat',
++  'isNaN',
++  'isFinite',
++  'encodeURI',
++  'decodeURI',
++  'encodeURIComponent',
++  'decodeURIComponent',
++  'eval',
++  'Boolean',
++  'Number',
++  'String',
++  'Function',
++  'Object',
++  'Array',
++  'Date',
++  'RegExp',
++  'Error',
++  'Math',
++  'JSON',
++  'Promise',
++  'Set',
++  'Map',
++  'Symbol',
 +]);
 +
 +function tryRepairJson(raw: string): string {
@@ -13973,10 +14016,10 @@ index 00000000..be7682fa
 +});
 diff --git a/tests/interactive/repair-interactive-html.test.ts b/tests/interactive/repair-interactive-html.test.ts
 new file mode 100644
-index 00000000..4aed2b59
+index 00000000..920750ac
 --- /dev/null
 +++ b/tests/interactive/repair-interactive-html.test.ts
-@@ -0,0 +1,124 @@
+@@ -0,0 +1,141 @@
 +import { describe, it, expect } from 'vitest';
 +import * as vm from 'node:vm';
 +import { repairInteractiveHtml } from '@/lib/interactive/repair-interactive-html';
@@ -14010,6 +14053,23 @@ index 00000000..4aed2b59
 +    expect(appliedRepairs.some((r) => r.includes('自动桥接缺失函数: nextLevelOrRestart'))).toBe(true);
 +    expect(html).toContain('id="openmaic-missing-fn-bridge"');
 +    expect(html).toContain('window["nextLevelOrRestart"] = function');
++  });
++
++  it('does not treat JavaScript control keywords like if, for, while, return as missing functions', () => {
++    const raw = `
++      <button onclick="if(confirm('重来？')) restartGame();">重来</button>
++      <button onclick="for(let i=0;i<3;i++) doSomething(i);">循环</button>
++      <button onclick="return (valid > 0);">返回</button>
++      <script>
++        function restartGame() {}
++        function doSomething() {}
++      </script>
++    `;
++    const { html, appliedRepairs } = repairInteractiveHtml(raw);
++    expect(html).not.toContain('window["if"]');
++    expect(html).not.toContain('window["for"]');
++    expect(html).not.toContain('window["return"]');
++    expect(appliedRepairs.filter((r) => r.includes('自动桥接缺失函数'))).toEqual([]);
 +  });
 +
 +  it('adds preventDefault to ondragover dropzones', () => {
