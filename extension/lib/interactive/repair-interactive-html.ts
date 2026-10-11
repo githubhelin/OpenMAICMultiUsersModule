@@ -121,11 +121,29 @@ export function repairInteractiveHtml(rawHtml: string): RepairResult {
   });
 
   // 2. 修复多关卡缺失的 onclick 函数 (动态桩函数与关卡流转桥接)
-  const onclickAttrRegex = /onclick=["']([^"']+)["']/gi;
+  // 首先检测并剥离之前可能已注入的桥接脚本以支持重新审计自愈，避免误报的伪桩代码残留
+  let existingBridgeFns: string[] = [];
+  const existingBridgeMatch = html.match(/<script id="openmaic-missing-fn-bridge">([\s\S]*?)<\/script>/i);
+  if (existingBridgeMatch) {
+    existingBridgeFns = [...existingBridgeMatch[1].matchAll(/window\[["']([^"']+)["']\]\s*=/g)]
+      .map((m) => m[1])
+      .sort();
+  }
+  const hadPreviousBridge = !!existingBridgeMatch;
+  let cleanScanHtml = html;
+  if (hadPreviousBridge) {
+    cleanScanHtml = html.replace(/\s*<script id="openmaic-missing-fn-bridge">[\s\S]*?<\/script>/gi, '');
+  }
+
+  // 采用反向引用 \1 匹配成对引号，完整提取内部包含单双引号参数的多语句
+  const onclickAttrRegex = /onclick\s*=\s*(["'])([\s\S]*?)\1/gi;
+  // 增加负向后行断言 (?<![\w$.])，只捕获独立函数或 window.func()，彻底排除 obj.method()
+  const fnRegex = /(?<![\w$.])(?:window\s*\.)?([a-zA-Z0-9_$]+)\s*\(/g;
+
   const referencedFns = new Set<string>();
-  for (const match of html.matchAll(onclickAttrRegex)) {
-    const code = match[1];
-    const fnMatches = code.matchAll(/([a-zA-Z0-9_$]+)\s*\(/g);
+  for (const match of cleanScanHtml.matchAll(onclickAttrRegex)) {
+    const code = match[2];
+    const fnMatches = code.matchAll(fnRegex);
     for (const fnMatch of fnMatches) {
       const fnName = fnMatch[1];
       if (!BUILTIN_GLOBAL_FUNCTIONS.has(fnName)) {
@@ -139,14 +157,20 @@ export function repairInteractiveHtml(rawHtml: string): RepairResult {
     const definedPattern = new RegExp(
       `((?:async\\s+)?function\\s+${fn}\\b|window\\.${fn}\\s*=|window\\s*\\[['"]${fn}['"]\\]|var\\s+${fn}\\b|let\\s+${fn}\\b|const\\s+${fn}\\b|\\b${fn}\\s*:)`,
     );
-    if (!definedPattern.test(html)) {
+    if (!definedPattern.test(cleanScanHtml)) {
       missingFns.push(fn);
     }
   }
 
-  if (missingFns.length > 0 && !html.includes('id="openmaic-missing-fn-bridge"')) {
-    const bridgeScript = `\n<script id="openmaic-missing-fn-bridge">\n` +
-      missingFns.map((fn) => `
+  const sortedMissing = [...missingFns].sort();
+  const bridgeNeedsUpdate =
+    !hadPreviousBridge ||
+    JSON.stringify(existingBridgeFns) !== JSON.stringify(sortedMissing);
+
+  if (missingFns.length > 0) {
+    if (bridgeNeedsUpdate) {
+      const bridgeScript = `\n<script id="openmaic-missing-fn-bridge">\n` +
+        missingFns.map((fn) => `
 window["${fn}"] = function(...args) {
   console.warn('[OpenMAIC AutoBridge] 触发了模型未显式定义的函数: ${fn}', args);
   var nextModal = document.querySelector('.modal-overlay.active, .modal.show, [id*="modal"].show, [id*="result"].active, [id*="screen"].active, [id*="victory"].active');
@@ -161,10 +185,16 @@ window["${fn}"] = function(...args) {
   if (nextBtn && nextBtn !== this) { try { nextBtn.click(); } catch(e) {} }
 };`).join('\n') + `\n</script>\n`;
 
-    html = /<\/body>/i.test(html)
-      ? html.replace(/<\/body>/i, `${bridgeScript}</body>`)
-      : `${html}${bridgeScript}`;
-    appliedRepairs.push(`自动桥接缺失函数: ${missingFns.join(', ')}`);
+      const targetHtml = cleanScanHtml;
+      html = /<\/body>/i.test(targetHtml)
+        ? targetHtml.replace(/<\/body>/i, `${bridgeScript}</body>`)
+        : `${targetHtml}${bridgeScript}`;
+      appliedRepairs.push(`自动桥接缺失函数: ${missingFns.join(', ')}`);
+    }
+  } else if (hadPreviousBridge) {
+    // 之前曾注入过桥接桩函数，但重新判定后已无缺失函数（如先前误报的成员方法等），清除误判注入
+    html = cleanScanHtml;
+    appliedRepairs.push('清理误报的伪桩函数');
   }
 
   // 3. 修复 HTML5 拖放 dropzone 缺少 event.preventDefault() 导致 drop 失效

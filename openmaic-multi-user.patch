@@ -8650,10 +8650,10 @@ index 7ec91ce7..cb9e3359 100644
  const log = createLogger('ExportClassroom');
 diff --git a/lib/interactive/repair-interactive-html.ts b/lib/interactive/repair-interactive-html.ts
 new file mode 100644
-index 00000000..395c5835
+index 00000000..8505ba70
 --- /dev/null
 +++ b/lib/interactive/repair-interactive-html.ts
-@@ -0,0 +1,440 @@
+@@ -0,0 +1,470 @@
 +/**
 + * OpenMAIC 交互课件自动化防御性自愈清洗器
 + * 针对大模型单文件 HTML 课件的常见共性盲区进行纯内存快速清洗与加固。
@@ -8777,11 +8777,29 @@ index 00000000..395c5835
 +  });
 +
 +  // 2. 修复多关卡缺失的 onclick 函数 (动态桩函数与关卡流转桥接)
-+  const onclickAttrRegex = /onclick=["']([^"']+)["']/gi;
++  // 首先检测并剥离之前可能已注入的桥接脚本以支持重新审计自愈，避免误报的伪桩代码残留
++  let existingBridgeFns: string[] = [];
++  const existingBridgeMatch = html.match(/<script id="openmaic-missing-fn-bridge">([\s\S]*?)<\/script>/i);
++  if (existingBridgeMatch) {
++    existingBridgeFns = [...existingBridgeMatch[1].matchAll(/window\[["']([^"']+)["']\]\s*=/g)]
++      .map((m) => m[1])
++      .sort();
++  }
++  const hadPreviousBridge = !!existingBridgeMatch;
++  let cleanScanHtml = html;
++  if (hadPreviousBridge) {
++    cleanScanHtml = html.replace(/\s*<script id="openmaic-missing-fn-bridge">[\s\S]*?<\/script>/gi, '');
++  }
++
++  // 采用反向引用 \1 匹配成对引号，完整提取内部包含单双引号参数的多语句
++  const onclickAttrRegex = /onclick\s*=\s*(["'])([\s\S]*?)\1/gi;
++  // 增加负向后行断言 (?<![\w$.])，只捕获独立函数或 window.func()，彻底排除 obj.method()
++  const fnRegex = /(?<![\w$.])(?:window\s*\.)?([a-zA-Z0-9_$]+)\s*\(/g;
++
 +  const referencedFns = new Set<string>();
-+  for (const match of html.matchAll(onclickAttrRegex)) {
-+    const code = match[1];
-+    const fnMatches = code.matchAll(/([a-zA-Z0-9_$]+)\s*\(/g);
++  for (const match of cleanScanHtml.matchAll(onclickAttrRegex)) {
++    const code = match[2];
++    const fnMatches = code.matchAll(fnRegex);
 +    for (const fnMatch of fnMatches) {
 +      const fnName = fnMatch[1];
 +      if (!BUILTIN_GLOBAL_FUNCTIONS.has(fnName)) {
@@ -8795,14 +8813,20 @@ index 00000000..395c5835
 +    const definedPattern = new RegExp(
 +      `((?:async\\s+)?function\\s+${fn}\\b|window\\.${fn}\\s*=|window\\s*\\[['"]${fn}['"]\\]|var\\s+${fn}\\b|let\\s+${fn}\\b|const\\s+${fn}\\b|\\b${fn}\\s*:)`,
 +    );
-+    if (!definedPattern.test(html)) {
++    if (!definedPattern.test(cleanScanHtml)) {
 +      missingFns.push(fn);
 +    }
 +  }
 +
-+  if (missingFns.length > 0 && !html.includes('id="openmaic-missing-fn-bridge"')) {
-+    const bridgeScript = `\n<script id="openmaic-missing-fn-bridge">\n` +
-+      missingFns.map((fn) => `
++  const sortedMissing = [...missingFns].sort();
++  const bridgeNeedsUpdate =
++    !hadPreviousBridge ||
++    JSON.stringify(existingBridgeFns) !== JSON.stringify(sortedMissing);
++
++  if (missingFns.length > 0) {
++    if (bridgeNeedsUpdate) {
++      const bridgeScript = `\n<script id="openmaic-missing-fn-bridge">\n` +
++        missingFns.map((fn) => `
 +window["${fn}"] = function(...args) {
 +  console.warn('[OpenMAIC AutoBridge] 触发了模型未显式定义的函数: ${fn}', args);
 +  var nextModal = document.querySelector('.modal-overlay.active, .modal.show, [id*="modal"].show, [id*="result"].active, [id*="screen"].active, [id*="victory"].active');
@@ -8817,10 +8841,16 @@ index 00000000..395c5835
 +  if (nextBtn && nextBtn !== this) { try { nextBtn.click(); } catch(e) {} }
 +};`).join('\n') + `\n</script>\n`;
 +
-+    html = /<\/body>/i.test(html)
-+      ? html.replace(/<\/body>/i, `${bridgeScript}</body>`)
-+      : `${html}${bridgeScript}`;
-+    appliedRepairs.push(`自动桥接缺失函数: ${missingFns.join(', ')}`);
++      const targetHtml = cleanScanHtml;
++      html = /<\/body>/i.test(targetHtml)
++        ? targetHtml.replace(/<\/body>/i, `${bridgeScript}</body>`)
++        : `${targetHtml}${bridgeScript}`;
++      appliedRepairs.push(`自动桥接缺失函数: ${missingFns.join(', ')}`);
++    }
++  } else if (hadPreviousBridge) {
++    // 之前曾注入过桥接桩函数，但重新判定后已无缺失函数（如先前误报的成员方法等），清除误判注入
++    html = cleanScanHtml;
++    appliedRepairs.push('清理误报的伪桩函数');
 +  }
 +
 +  // 3. 修复 HTML5 拖放 dropzone 缺少 event.preventDefault() 导致 drop 失效
@@ -14016,10 +14046,10 @@ index 00000000..be7682fa
 +});
 diff --git a/tests/interactive/repair-interactive-html.test.ts b/tests/interactive/repair-interactive-html.test.ts
 new file mode 100644
-index 00000000..920750ac
+index 00000000..89efe074
 --- /dev/null
 +++ b/tests/interactive/repair-interactive-html.test.ts
-@@ -0,0 +1,141 @@
+@@ -0,0 +1,181 @@
 +import { describe, it, expect } from 'vitest';
 +import * as vm from 'node:vm';
 +import { repairInteractiveHtml } from '@/lib/interactive/repair-interactive-html';
@@ -14070,6 +14100,46 @@ index 00000000..920750ac
 +    expect(html).not.toContain('window["for"]');
 +    expect(html).not.toContain('window["return"]');
 +    expect(appliedRepairs.filter((r) => r.includes('自动桥接缺失函数'))).toEqual([]);
++  });
++
++  it('correctly handles nested quotes without truncation and bridges trailing statements', () => {
++    const raw = `
++      <button onclick="checkAnswer('A'); nextLevel();">下一关</button>
++      <script>
++        function checkAnswer(ans) {}
++      </script>
++    `;
++    const { html, appliedRepairs } = repairInteractiveHtml(raw);
++    expect(appliedRepairs.some((r) => r.includes('自动桥接缺失函数: nextLevel'))).toBe(true);
++    expect(html).toContain('window["nextLevel"] = function');
++    expect(html).not.toContain('window["checkAnswer"]');
++  });
++
++  it('does not mistake object member methods for missing functions and cleans previous bogus bridges', () => {
++    const raw = `
++      <button onclick="this.classList.add('active'); audio.play(); document.getElementById('dialog').remove(); window.restartGame();">Action</button>
++      <script>
++        function restartGame() {}
++      </script>
++    `;
++    const { html, appliedRepairs } = repairInteractiveHtml(raw);
++    expect(html).not.toContain('window["add"]');
++    expect(html).not.toContain('window["play"]');
++    expect(html).not.toContain('window["getElementById"]');
++    expect(html).not.toContain('window["remove"]');
++    expect(appliedRepairs.filter((r) => r.includes('自动桥接缺失函数'))).toEqual([]);
++
++    // Test cleaning up a previous bogus bridge
++    const bogusHtml = `
++      <button onclick="document.getElementById('test').classList.add('hidden')">Close</button>
++      <script id="openmaic-missing-fn-bridge">
++        window["getElementById"] = function() {};
++      </script>
++    `;
++    const cleaned = repairInteractiveHtml(bogusHtml);
++    expect(cleaned.appliedRepairs).toContain('清理误报的伪桩函数');
++    expect(cleaned.html).not.toContain('openmaic-missing-fn-bridge');
++    expect(cleaned.html).not.toContain('window["getElementById"]');
 +  });
 +
 +  it('adds preventDefault to ondragover dropzones', () => {

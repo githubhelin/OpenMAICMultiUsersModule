@@ -50,6 +50,46 @@ describe('repairInteractiveHtml (Defensive Self-Healing Cleaner)', () => {
     expect(appliedRepairs.filter((r) => r.includes('自动桥接缺失函数'))).toEqual([]);
   });
 
+  it('correctly handles nested quotes without truncation and bridges trailing statements', () => {
+    const raw = `
+      <button onclick="checkAnswer('A'); nextLevel();">下一关</button>
+      <script>
+        function checkAnswer(ans) {}
+      </script>
+    `;
+    const { html, appliedRepairs } = repairInteractiveHtml(raw);
+    expect(appliedRepairs.some((r) => r.includes('自动桥接缺失函数: nextLevel'))).toBe(true);
+    expect(html).toContain('window["nextLevel"] = function');
+    expect(html).not.toContain('window["checkAnswer"]');
+  });
+
+  it('does not mistake object member methods for missing functions and cleans previous bogus bridges', () => {
+    const raw = `
+      <button onclick="this.classList.add('active'); audio.play(); document.getElementById('dialog').remove(); window.restartGame();">Action</button>
+      <script>
+        function restartGame() {}
+      </script>
+    `;
+    const { html, appliedRepairs } = repairInteractiveHtml(raw);
+    expect(html).not.toContain('window["add"]');
+    expect(html).not.toContain('window["play"]');
+    expect(html).not.toContain('window["getElementById"]');
+    expect(html).not.toContain('window["remove"]');
+    expect(appliedRepairs.filter((r) => r.includes('自动桥接缺失函数'))).toEqual([]);
+
+    // Test cleaning up a previous bogus bridge
+    const bogusHtml = `
+      <button onclick="document.getElementById('test').classList.add('hidden')">Close</button>
+      <script id="openmaic-missing-fn-bridge">
+        window["getElementById"] = function() {};
+      </script>
+    `;
+    const cleaned = repairInteractiveHtml(bogusHtml);
+    expect(cleaned.appliedRepairs).toContain('清理误报的伪桩函数');
+    expect(cleaned.html).not.toContain('openmaic-missing-fn-bridge');
+    expect(cleaned.html).not.toContain('window["getElementById"]');
+  });
+
   it('adds preventDefault to ondragover dropzones', () => {
     const raw = `<div class="slot" ondragover="handleOver(event)"></div>`;
     const { html, appliedRepairs } = repairInteractiveHtml(raw);

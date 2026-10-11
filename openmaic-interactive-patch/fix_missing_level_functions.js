@@ -76,12 +76,15 @@ function run(targetDir) {
     const relPath = path.relative(rootDir, fullPath);
     let content = fs.readFileSync(fullPath, 'utf-8');
 
-    // 提取所有内联 onclick 函数名 (支持末尾分号、多函数调用及复杂参数)
-    const onclickAttrRegex = /onclick=["']([^"']+)["']/gi;
+    // 提取所有内联 onclick 函数名 (支持末尾分号、嵌套单双引号多函数调用及复杂参数)
+    const onclickAttrRegex = /onclick\s*=\s*(["'])([\s\S]*?)\1/gi;
     const foundCallFns = [];
     for (const attrMatch of content.matchAll(onclickAttrRegex)) {
-      const code = attrMatch[1];
-      for (const fnMatch of code.matchAll(/([a-zA-Z0-9_$]+)\s*\(/g)) {
+      const code = attrMatch[2];
+      // 排除对象成员方法调用 (如 this.classList.add, audio.play, document.getElementById)
+      // 允许 window.funcName(...) 或独立的 funcName(...)
+      const fnRegex = /(?<![\w$.])(?:window\s*\.)?([a-zA-Z0-9_$]+)\s*\(/g;
+      for (const fnMatch of code.matchAll(fnRegex)) {
         foundCallFns.push(fnMatch[1]);
       }
     }
