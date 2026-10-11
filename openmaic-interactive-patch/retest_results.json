@@ -1,0 +1,281 @@
+[
+  {
+    "index": 1,
+    "category": "JSON 语法验证",
+    "relPath": "第12课 万维网服务大揭秘_cOYRkGf12R/03_交互图解：超链接网状拓扑与树状目录.html",
+    "testType": "load",
+    "passed": true,
+    "errors": [],
+    "details": "页面渲染正常，无任何运行时或 JSON 解析错误"
+  },
+  {
+    "index": 2,
+    "category": "JSON 语法验证",
+    "relPath": "第15课 展示数字作品_ZUm2UZSkgo/03_分享途径探索树.html",
+    "testType": "load",
+    "passed": true,
+    "errors": [],
+    "details": "页面渲染正常，无任何运行时或 JSON 解析错误"
+  },
+  {
+    "index": 3,
+    "category": "离线化与KaTeX解析",
+    "relPath": "03.游戏体验寻规律：汉诺塔算法探秘_xKDnhWlbZU/08_迁移应用：双杯量水思维大挑战.html",
+    "testType": "load",
+    "passed": true,
+    "errors": [],
+    "details": "页面渲染正常，无任何运行时或 JSON 解析错误"
+  },
+  {
+    "index": 4,
+    "category": "多关卡推进",
+    "relPath": "第15课 互联网实验齐发现_qWS2wbE0SE/08_极速快运：数据封包与路由分发挑战赛.html",
+    "testType": "level2_func",
+    "passed": true,
+    "errors": [],
+    "details": "全局函数 window.nextLevelOrRestart() 成功执行，无异常"
+  },
+  {
+    "index": 5,
+    "category": "多关卡推进",
+    "relPath": "第17课 物联数据需采集_ngOt7dm4TY/08_极客挑战：智能花盆低功耗传输大作战.html",
+    "testType": "level2_func",
+    "passed": true,
+    "errors": [],
+    "details": "全局函数 window.nextOrRestart() 成功执行，无异常"
+  },
+  {
+    "index": 6,
+    "category": "多关卡推进",
+    "relPath": "第18课 美化网页方法多_sVjRYsvQfH/08_闯关挑战：科技节展厅极速装潢师.html",
+    "testType": "level2_func",
+    "passed": true,
+    "errors": [],
+    "details": "全局函数 window.nextLevelOrFinish() 成功执行，无异常"
+  },
+  {
+    "index": 7,
+    "category": "多关卡推进",
+    "relPath": "第19课 多人协同效率高_iv9Gr6KtJU/08_挑战：科技节发布会倒计时调度战.html",
+    "testType": "level2_func",
+    "passed": true,
+    "errors": [],
+    "details": "全局函数 window.nextLevelOrReplay() 成功执行，无异常"
+  },
+  {
+    "index": 8,
+    "category": "多关卡推进",
+    "relPath": "第23课 挑战多角度比拼_9Lh8N45ZWa/08_全能战队匹配战：多维度角色甄选.html",
+    "testType": "level2_func",
+    "passed": true,
+    "errors": [],
+    "details": "全局函数 window.nextStage() 成功执行，无异常"
+  },
+  {
+    "index": 9,
+    "category": "多关卡推进",
+    "relPath": "第25课 网络创新云服务_I6e7-l-XuX/08_数据安全防御战：加密备份大挑战.html",
+    "testType": "level2_func",
+    "passed": true,
+    "errors": [],
+    "details": "全局函数 window.nextLevelAction() 成功执行，无异常"
+  },
+  {
+    "index": 10,
+    "category": "多关卡推进",
+    "relPath": "第28课 使用系统讲安全__QXSvTVTe5/08_安全小卫士：智能空间隐患排查大作战.html",
+    "testType": "level2_func",
+    "passed": true,
+    "errors": [],
+    "details": "全局函数 window.startNextLevel() 成功执行，无异常"
+  },
+  {
+    "index": 11,
+    "category": "多关卡推进",
+    "relPath": "第32课 机器学习靠数据__jg_j-C5j9/08_超级AI训练师：疾速标注挑战.html",
+    "testType": "level2_func",
+    "passed": true,
+    "errors": [],
+    "details": "全局函数 window.nextLevelOrRestart() 成功执行，无异常"
+  },
+  {
+    "index": 12,
+    "category": "运行时状态机与Canvas",
+    "relPath": "第14课 复杂系统可分解_SV8n9efWsK/08_调度指挥官：智能家居应急大作战.html",
+    "testType": "level2_next",
+    "passed": true,
+    "errors": [],
+    "details": "第二关状态机成功初始化，无 forEach 报错"
+  },
+  {
+    "index": 13,
+    "category": "运行时状态机与Canvas",
+    "relPath": "9.互传密信有诀窍_2dkXMl8h7V/04_中文方阵：二维置换密信实验室.html",
+    "testType": "task2_click",
+    "passed": true,
+    "errors": [],
+    "details": "成功切入任务二 5×5 方阵，无 map of undefined 崩溃"
+  },
+  {
+    "index": 14,
+    "category": "运行时状态机与Canvas",
+    "relPath": "第18课 数据分析与处理_Lf7xf_7GmU/08_决策闯关：植物适居带环境诊断大救援.html",
+    "testType": "game_loop",
+    "passed": true,
+    "errors": [],
+    "details": "Canvas 循环渲染 60 帧无 split(undefined) 报错"
+  },
+  {
+    "index": 15,
+    "category": "运行时状态机与Canvas",
+    "relPath": "第26课 寻找最短的路径_V3B-ttRgx2/07_动态规划实验台：权值变化与回溯寻径.html",
+    "testType": "load_draw",
+    "passed": true,
+    "errors": [],
+    "details": "DP 权值矩阵与 Canvas 画布正常渲染，无 dpTable[0] 报错"
+  },
+  {
+    "index": 16,
+    "category": "运行时状态机与Canvas",
+    "relPath": "第30课 应对智能新挑战_pgsucLiiNN/07_求真实验室：事实交叉查验模拟器.html",
+    "testType": "canvas_arc",
+    "passed": true,
+    "errors": [],
+    "details": "Canvas roundRect/arcTo 绘制平滑，无负半径报错"
+  },
+  {
+    "index": 17,
+    "category": "运行时状态机与Canvas",
+    "relPath": "第31课 人与机器的感知_FmW2EgR3Ex/04_火场感知沙盒：极端环境下的传感器探秘.html",
+    "testType": "canvas_radial",
+    "passed": true,
+    "errors": [],
+    "details": "createRadialGradient 粒子动画正常，无非正半径报错"
+  },
+  {
+    "index": 18,
+    "category": "运行时状态机与Canvas",
+    "relPath": "第18课 美化网页方法多_sVjRYsvQfH/07_代码工坊：CSS样式实时装配实验室.html",
+    "testType": "load",
+    "passed": true,
+    "errors": [],
+    "details": "页面渲染正常，无任何运行时或 JSON 解析错误"
+  },
+  {
+    "index": 19,
+    "category": "拖拽与放置交互",
+    "relPath": "11.闰年平年算法探秘_hZDzx9txV4/05_逻辑水管工：组装判断器.html",
+    "testType": "dnd_probe",
+    "passed": true,
+    "errors": [],
+    "details": "放置槽 dragover 默认行为已成功阻止，可接收 drop 放置 (0/0)"
+  },
+  {
+    "index": 20,
+    "category": "拖拽与放置交互",
+    "relPath": "8.算法验证与Python实现_IfYWA2s9eP/07_特工闯关：算法修复大作战.html",
+    "testType": "dnd_probe",
+    "passed": true,
+    "errors": [],
+    "details": "放置槽 dragover 默认行为已成功阻止，可接收 drop 放置 (0/0)"
+  },
+  {
+    "index": 21,
+    "category": "拖拽与放置交互",
+    "relPath": "第12课 认识数字作品_LTqTsjkmvY/08_小小制作人：校园展演大闯关.html",
+    "testType": "dnd_probe",
+    "passed": true,
+    "errors": [],
+    "details": "放置槽 dragover 默认行为已成功阻止，可接收 drop 放置 (5/5)"
+  },
+  {
+    "index": 22,
+    "category": "拖拽与放置交互",
+    "relPath": "第13课 制作数字相册_ZF7SLiscl0/08_音画魔术师：主题相册速搭闯关挑战.html",
+    "testType": "dnd_probe",
+    "passed": true,
+    "errors": [],
+    "details": "放置槽 dragover 默认行为已成功阻止，可接收 drop 放置 (3/3)"
+  },
+  {
+    "index": 23,
+    "category": "拖拽与放置交互",
+    "relPath": "第16课 探秘网页与代码_wC2tdAJo2z/08_网页急救员：科技节展板抢修闯关.html",
+    "testType": "dnd_probe",
+    "passed": true,
+    "errors": [],
+    "details": "放置槽 dragover 默认行为已成功阻止，可接收 drop 放置 (0/0)"
+  },
+  {
+    "index": 24,
+    "category": "拖拽与放置交互",
+    "relPath": "第17课 制作网页展活动_rqpy5t03I-/08_闯关挑战：AI提示词组装与展厅巡检发布.html",
+    "testType": "dnd_probe",
+    "passed": true,
+    "errors": [],
+    "details": "放置槽 dragover 默认行为已成功阻止，可接收 drop 放置 (4/4)"
+  },
+  {
+    "index": 25,
+    "category": "拖拽与放置交互",
+    "relPath": "第20课 组建网站跟我做_AUTSVMXI5c/08_网站急救员：404 故障排查大闯关.html",
+    "testType": "dnd_probe",
+    "passed": true,
+    "errors": [],
+    "details": "放置槽 dragover 默认行为已成功阻止，可接收 drop 放置 (2/2)"
+  },
+  {
+    "index": 26,
+    "category": "拖拽与放置交互",
+    "relPath": "第23课 分解描述问题_ayGORYr1U5/08_小任务大挑战：读书节布展大作战.html",
+    "testType": "dnd_probe",
+    "passed": true,
+    "errors": [],
+    "details": "放置槽 dragover 默认行为已成功阻止，可接收 drop 放置 (1/1)"
+  },
+  {
+    "index": 27,
+    "category": "拖拽与放置交互",
+    "relPath": "第7课 音频记录声音_PsYXrxqEOV/08_红领巾广播站：校园古诗音频合成挑战.html",
+    "testType": "dnd_probe",
+    "passed": true,
+    "errors": [],
+    "details": "放置槽 dragover 默认行为已成功阻止，可接收 drop 放置 (6/6)"
+  },
+  {
+    "index": 28,
+    "category": "拖拽与点击消抖",
+    "relPath": "5.数学运算讲方法：探索算法顺序结构_UeEO0vYVOH/06_流水线大闯关：打卡积分转换器.html",
+    "testType": "hybrid_click",
+    "passed": true,
+    "errors": [],
+    "details": "点击卡片立即生效，消抖互斥机制运转正常"
+  },
+  {
+    "index": 29,
+    "category": "拖拽与点击消抖",
+    "relPath": "第24课 在线交流新气象_sxXH0K2A_r/08_清朗守望者：网络安全与防坑大闯关.html",
+    "testType": "hybrid_click",
+    "passed": true,
+    "errors": [],
+    "details": "点击卡片立即生效，消抖互斥机制运转正常"
+  },
+  {
+    "index": 30,
+    "category": "拖拽与点击消抖",
+    "relPath": "第29课 了解自主可控_Iecd4S6B_E/08_大国科技守护者：应急决策挑战.html",
+    "testType": "hybrid_click",
+    "passed": true,
+    "errors": [],
+    "details": "点击卡片立即生效，消抖互斥机制运转正常"
+  },
+  {
+    "index": 31,
+    "category": "拖拽与点击消抖",
+    "relPath": "第30课 应对智能新挑战_pgsucLiiNN/08_火眼金睛：AI破绽寻踪大挑战.html",
+    "testType": "hybrid_click",
+    "passed": true,
+    "errors": [],
+    "details": "点击卡片立即生效，消抖互斥机制运转正常"
+  }
+]

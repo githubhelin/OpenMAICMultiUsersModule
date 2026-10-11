@@ -3,6 +3,7 @@ import path from 'path';
 import JSZip from 'jszip';
 import { createLogger } from '@/lib/logger';
 import { inlineHtmlAssets } from '@/lib/export/inline-assets';
+import { repairInteractiveHtml } from '@/lib/interactive/repair-interactive-html';
 import type { Scene } from '@/lib/types/stage';
 
 const log = createLogger('InteractiveLibrary');
@@ -182,6 +183,17 @@ export async function syncInteractiveLibraryForStage(
       } catch (err) {
         log.warn(`Inlining assets for ${sceneTitle} failed; writing raw HTML`, err);
         inlinedHtml = rawHtml;
+      }
+
+      // Defensive repair & self-healing
+      try {
+        const { html: repairedHtml, appliedRepairs } = repairInteractiveHtml(inlinedHtml);
+        if (appliedRepairs.length > 0) {
+          log.info(`[InteractiveRepair] ${sceneTitle} 自动修复: ${appliedRepairs.join(', ')}`);
+        }
+        inlinedHtml = repairedHtml;
+      } catch (err) {
+        log.warn(`[InteractiveRepair] 对 ${sceneTitle} 执行自愈清洗异常，跳过`, err);
       }
 
       await fs.writeFile(filePath, inlinedHtml, 'utf-8');

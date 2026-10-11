@@ -7,14 +7,15 @@
 
 本仓库是针对清华大学开源项目 [**THU-MAIC/OpenMAIC**](https://github.com/THU-MAIC/OpenMAIC) 的**高可用模块化生产级扩展套件**。全面适配官方最新 **v1.2.0-rc.1** 服务端优先（Server-First Generation Runs）基线架构。
 
-包含七大核心模块，支持按需独立安装或统一全量部署：
+包含八大核心模块，支持按需独立安装或统一全量部署：
 1. **👥 多用户管理与统一身份认证模块**：开箱即用的多用户注册/登录、RBAC 角色权限、超级管理员全站控制台与多端云端漫游，**全面接入官方 Owner Identity Seam 与 PersistenceHooks 宿主标准接口**；
 2. **📚 我的课程管理中心与双轨存储漫游模块 (`/my-courses`)**：本地 IndexedDB 历史课程与 PostgreSQL 云端课程双轨智能聚合、一键上云备份、集中播放、Pro 工作台二次深度编辑、行内重命名与**四维彻底物理级联删除保障**；
 3. **⚡ 批量制课工坊扩展 (`/batch-studio`)**：纯后台异步批处理、三档课时定制（微课/标准/大课）、真·70%+ 深度互动场景、**系列编号防重碰撞保护**、**阶段小测穿插防扎堆机制**、实时任务大屏看板与任务即时中断止损；
 4. **🎮 互动实验与游戏工坊 / 互动展厅 (`/interactive-hub`)**：纯脱机单文件 HTML 自动内联打包、**多选批量打包下载为 ZIP 压缩包**、断网即开即用、全生命周期联动与极速强制同步归集；
 5. **📁 课件原件归档、提示词回溯与材料二次衍生**：原文档/PPTX/PDF 自动归档至课堂、支持下载/预览/彻底物理删除；一键查看并复制课堂初始 Prompt；支持以原附件为蓝本二次调整提示词与教学重点衍生定制新课程；
 6. **🎛️ Pro Mode 专业工作台方案 B 指南**：智能体多轮对话编排与 MAIC Editor 专业课件排版二次编辑模式；
-7. **🧠 运行时自愈与大模型动态迁移机制**：动态模型白名单校验，历史过期模型自动平滑迁移至新模型并自动修剪失效配置，杜绝模型漂移与报错。
+7. **🧠 运行时自愈与大模型动态迁移机制**：动态模型白名单校验，历史过期模型自动平滑迁移至新模型并自动修剪失效配置，杜绝模型漂移与报错；
+8. **🛡️ 互动课件防御性自愈清洗与离线修复引擎 (`repair-interactive-html` / `openmaic-interactive-patch`)**：8 大生成代码缺陷自动自愈（嵌入式 JSON 纠错、关卡推进 progression 函数自动兜底桥接、拖拽 Dropzone 原生事件阻断、Canvas 2D 负半径防护、Iframe 沙箱存储降级与静默 Toast、触控屏/电子白板 Touch-to-Drag 补丁、点击/拖拽防抖冲突解耦），全面拦截生成管线、展厅归集与离线导出，自带 747+ 历史互动课件秒级全量自愈审计脚本。
 
 ---
 
@@ -59,6 +60,21 @@
 - **官方 v1.1.2 思考模式修复**：完美支持 DeepSeek 思考模型（R1）多轮交互中回传 `reasoning_content`，解决长文本断流与报错问题。
 - **LLM 故障降级重试**：遇到服务商限流或瞬时网络抖动自动调用 Fallback 模型重试。
 - **模型自动热迁移**：针对用户配置的旧模型（如 `gemini-3.7-flash-high`），自动热迁移为最新标准模型（`gemini-3.8-flash-high`），并自动修剪失效配置。
+
+### 6. 🛡️ 互动课件防御性自愈清洗模块 (`repair-interactive-html` / `openmaic-interactive-patch`)
+- **8 大代码自愈规则**：
+  1. **Canvas 2D 负半径防护**：自动修正 `arc`/`roundRect` 传入负半径引发的 Canvas 绘制崩溃，确保极小或负值安全钳位（`Math.max(0.1, r)`）；
+  2. **Iframe 沙箱存储安全兜底**：Restricted Sandbox 禁用 `localStorage`/`sessionStorage` 时自动降级为安全内存 Store，阻断 `SecurityError`；
+  3. **非阻塞静默弹窗与音频自动解锁**：替换沙箱内 `window.alert` 为非阻塞浮层 Toast；`AudioContext` 遭遇浏览器自动播放拦截时注入首次用户手势自动恢复；
+  4. **HTML5 拖拽 Dropzone 原生事件注入**：自动为放置容器补充 `ondragover="event.preventDefault(); event.dataTransfer.dropEffect='move';"`，恢复被原生默认事件阻止的拖拽交互；
+  5. **电子白板与触控屏 Touch-to-Drag 兼容**：为大屏设备（希沃、鸿合、iPad）注入触控仿真代理层与幽灵跟随元素，解决移动端与触控一体机无法拖拽组件的问题；
+  6. **卡片点击与拖拽防抖冲突解耦**：针对同时绑定点击翻转与拖拽放置的卡片，自动注入 5px 位移容差判定，杜绝微小拖动误触翻转事件；
+  7. **缺失关卡推进函数自动桥接**：自动补充 `nextLevelOrRestart`、`nextLevel`、`initLevel` 等缺失全局函数，关卡完成自动重启或平滑过渡，杜绝无响应；
+  8. **嵌入式 JSON 语法与 ClassList 安全保护**：容错修正无引号 key、多余冒号、单引号 JSON 属性；为事件元素注入 safe optional chaining 链式访问。
+- **全流程双防线拦截**：
+  - **落库 Source 防线**：批量制课、单课生成与材料二次衍生在落库 `document_scenes` 前自动执行自愈清洗；
+  - **离线 Export 防线**：互动展厅内联单文件生成、离线课件 HTML 导出与 ZIP 打包全链路自动调用清洗过滤。
+- **全量自愈与幂等性保证**：已完成全站 747+ 份历史互动课件无损自愈（541 份问题文件一次性修复），二次扫描 100% 幂等（0 误伤、0 脏更新）。附带运维工具 `pnpm exec tsx scripts/repair-interactive-library.ts`。
 
 ---
 
@@ -247,6 +263,14 @@ OpenMAICMultiUsersModule/
 ├── pro-workbench-guide/              # 🎛️ Pro Mode 专业工作台配置指南与脚本
 │   ├── setup-pro-workbench.sh        # 专业工作台一键安装脚本
 │   └── README.md                     # 专业工作台规约与配置文档
+├── openmaic-interactive-patch/       # 🛡️ 互动课件防御性自愈清洗模块与独立审计修复工具包
+│   ├── OPENMAIC_INTEGRATION_GUIDE.md # 互动课件清洗规格书与集成指南
+│   ├── AUDIT_REPORT.md               # 747+ 份互动场景缺陷诊断审计报告
+│   ├── fix_all.js                    # 独立离线全量修复脚本
+│   ├── fix_drag_drop_conflicts.js    # 拖拽防抖与事件冲突独立修复器
+│   ├── fix_sandbox_and_storage.js    # 沙箱 Storage 与 Alert 兜底独立修复器
+│   ├── fix_touch_compatibility.js    # 电子白板触控 Touch 拖拽独立修复器
+│   └── retest_audit.js               # 幂等性与缺陷重测脚本
 ├── extension/                        # 核心多用户模块独立源码副本 (供比对与手动增量部署)
 │   ├── app/my-courses/page.tsx       # 我的课程中心页面
 │   ├── app/interactive-hub/page.tsx  # 互动实验与游戏工坊展厅页面
@@ -254,12 +278,14 @@ OpenMAICMultiUsersModule/
 │   ├── app/api/admin/                # 管理员全站用户管理 API
 │   ├── app/api/stages/               # 课程列表与管理聚合 API (含四维级联物理删除)
 │   ├── app/api/interactive-library/  # 展厅索引、离线 HTML 托管、ZIP 打包与强制归集 API
+│   ├── lib/interactive/repair-interactive-html.ts # 互动课件防御性自愈清洗核心引擎
 │   ├── lib/server/interactive-library/# 离线 HTML 资源内联打包与孤儿清扫引擎
 │   ├── components/auth/              # 登录注册、个人中心与导航栏 UserNav 组件
 │   ├── components/admin/             # 全站用户管理控制台
 │   ├── lib/server/auth/              # 密码加密、数据库连接与会话凭据工具
 │   ├── lib/server/auth/identity-method.ts # 官方 Owner Identity Seam 认证方法与库钩子
 │   ├── lib/store/settings.ts         # 模型设置自愈与自动迁移
+│   ├── scripts/repair-interactive-library.ts # 历史展厅 HTML 批量修复与幂等验证脚本
 │   └── scripts/                      # 管理员密码重置等运维工具
 ├── LICENSE                           # MIT 开源许可证
 └── README.md                         # 模块安装与完整使用文档

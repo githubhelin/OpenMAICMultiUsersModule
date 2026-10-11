@@ -1214,10 +1214,10 @@ index 00000000..34c12568
 +}
 diff --git a/app/api/classroom/[id]/derive-course/route.ts b/app/api/classroom/[id]/derive-course/route.ts
 new file mode 100644
-index 00000000..25070a25
+index 00000000..7065bcf5
 --- /dev/null
 +++ b/app/api/classroom/[id]/derive-course/route.ts
-@@ -0,0 +1,228 @@
+@@ -0,0 +1,246 @@
 +import { NextRequest } from 'next/server';
 +import { promises as fs } from 'node:fs';
 +import {
@@ -1231,6 +1231,7 @@ index 00000000..25070a25
 +import { executeAndAwaitGenerationRun } from '@/lib/server/generation/run/await-run';
 +import { getOwnerScopedDocumentStore } from '@/lib/server/agent-runtime/owner-scoped-documents';
 +import { syncInteractiveLibraryForStage } from '@/lib/server/interactive-library';
++import { repairInteractiveHtml } from '@/lib/interactive/repair-interactive-html';
 +import { createLogger } from '@/lib/logger';
 +
 +const log = createLogger('DeriveCourse API');
@@ -1399,11 +1400,28 @@ index 00000000..25070a25
 +            log.warn(`Failed to inherit material to derived course ${stageId}:`, archiveErr);
 +          }
 +
-+          // 6. 同步互动到组件库
++          // 6. 清洗互动场景并同步组件库
 +          try {
 +            const store = await getOwnerScopedDocumentStore(ownerId);
 +            const doc = await store.loadDocument(stageId);
 +            if (doc) {
++              let hasModifiedHtml = false;
++              for (const scene of doc.scenes) {
++                if (scene.type === 'interactive' && scene.content && typeof (scene.content as any).html === 'string') {
++                  const { html: cleanHtml, appliedRepairs } = repairInteractiveHtml((scene.content as any).html);
++                  if (appliedRepairs.length > 0) {
++                    (scene.content as any).html = cleanHtml;
++                    hasModifiedHtml = true;
++                  }
++                }
++              }
++              if (hasModifiedHtml) {
++                try {
++                  await store.saveDocument(doc);
++                } catch (saveErr) {
++                  log.warn(`Failed to save repaired document ${stageId}:`, saveErr);
++                }
++              }
 +              void syncInteractiveLibraryForStage(doc.stage, doc.scenes).catch((err) => {
 +                log.warn(`Failed to sync interactive library for derived course ${stageId}:`, err);
 +              });
@@ -8608,6 +8626,361 @@ index 6b646ba2..fb3ec701 100644
    const { validateOwnerIdentityConfiguration } = await import('@/lib/server/identity/registry');
    runConfigurationCheck(validateOwnerIdentityConfiguration);
  
+diff --git a/lib/export/use-export-classroom.ts b/lib/export/use-export-classroom.ts
+index 7ec91ce7..cb9e3359 100644
+--- a/lib/export/use-export-classroom.ts
++++ b/lib/export/use-export-classroom.ts
+@@ -38,6 +38,7 @@ import { createProxiedFetch } from './proxied-fetch';
+ import type { SceneContent, Scene, Stage } from '@/lib/types/stage';
+ import { preparePBLScenesForDocumentPersistence } from '@/lib/pbl/v2/runtime/document-persistence';
+ import { accessDocument, type DocumentMigrationDeps } from '@/lib/document-store';
++import { repairInteractiveHtml } from '@/lib/interactive/repair-interactive-html';
+ 
+ export async function inlineSceneContent(
+   content: SceneContent,
+@@ -47,7 +48,8 @@ export async function inlineSceneContent(
+     return { content, report: { inlined: [], failed: [] } };
+   }
+   const { html, report } = await inlineHtmlAssets(content.html, options);
+-  return { content: { ...content, html }, report };
++  const { html: repairedHtml } = repairInteractiveHtml(html);
++  return { content: { ...content, html: repairedHtml }, report };
+ }
+ 
+ const log = createLogger('ExportClassroom');
+diff --git a/lib/interactive/repair-interactive-html.ts b/lib/interactive/repair-interactive-html.ts
+new file mode 100644
+index 00000000..bd39a943
+--- /dev/null
++++ b/lib/interactive/repair-interactive-html.ts
+@@ -0,0 +1,327 @@
++/**
++ * OpenMAIC 交互课件自动化防御性自愈清洗器
++ * 针对大模型单文件 HTML 课件的常见共性盲区进行纯内存快速清洗与加固。
++ */
++
++export interface RepairResult {
++  html: string;
++  appliedRepairs: string[];
++}
++
++function tryRepairJson(raw: string): string {
++  // 规则 1: 修复未带双引号的对象键名，例如: label: "..." 或 isExternal: false
++  let repaired = raw.replace(/([{,]\s*)([a-zA-Z0-9_$]+)\s*:/g, (_match, prefix, key) => {
++    return `${prefix}"${key}":`;
++  });
++
++  // 规则 2: 修复重复键名语法错误，例如 "id": "n6": "n6" -> "id": "n6"
++  repaired = repaired.replace(/"([a-zA-Z0-9_$]+)"\s*:\s*"([^"]+)"\s*:\s*"\2"/g, '"$1": "$2"');
++
++  // 规则 3: 修复对象或数组结尾的多余逗号 (trailing commas)
++  repaired = repaired.replace(/,\s*([}\]])/g, '$1');
++
++  // 规则 4: 修复单引号包裹的字符串键值 -> 双引号
++  repaired = repaired.replace(/'([^'\\]*(?:\\.[^'\\]*)*)'/g, '"$1"');
++
++  return repaired;
++}
++
++export function repairInteractiveHtml(rawHtml: string): RepairResult {
++  if (!rawHtml || typeof rawHtml !== 'string') {
++    return { html: rawHtml, appliedRepairs: [] };
++  }
++
++  let html = rawHtml;
++  const appliedRepairs: string[] = [];
++
++  // 1. 修复内嵌 JSON 语法错误 (未加双引号、单引号字符串、尾随逗号、重复键名等)
++  const jsonRegex = /(<script[^>]*type=["']application\/json["'][^>]*>)([\s\S]*?)(<\/script>)/gi;
++  html = html.replace(jsonRegex, (full, start, content, end) => {
++    const trimmed = content.trim();
++    if (!trimmed) return full;
++    try {
++      JSON.parse(trimmed);
++      return full;
++    } catch (_) {
++      const clean = tryRepairJson(content);
++      try {
++        JSON.parse(clean.trim());
++        if (clean !== content) appliedRepairs.push('JSON 语法校正');
++        return `${start}${clean}${end}`;
++      } catch (_) {
++        return full; // 若仍无法解析则保持原样，避免破坏非标准数据
++      }
++    }
++  });
++
++  // 2. 修复多关卡缺失的 onclick 函数 (动态桩函数与关卡流转桥接)
++  const onclickMatches = html.matchAll(/onclick=["']([a-zA-Z0-9_]+)\([^)]*\)["']/gi);
++  const referencedFns = new Set<string>();
++  for (const m of onclickMatches) {
++    const fnName = m[1];
++    if (!/^(alert|confirm|prompt|console|location|history)$/.test(fnName)) {
++      referencedFns.add(fnName);
++    }
++  }
++
++  const missingFns: string[] = [];
++  for (const fn of referencedFns) {
++    const definedPattern = new RegExp(`(function\\s+${fn}\\b|window\\.${fn}\\s*=|var\\s+${fn}\\s*=|let\\s+${fn}\\s*=|const\\s+${fn}\\s*=)`);
++    if (!definedPattern.test(html)) {
++      missingFns.push(fn);
++    }
++  }
++
++  if (missingFns.length > 0 && !html.includes('id="openmaic-missing-fn-bridge"')) {
++    const bridgeScript = `\n<script id="openmaic-missing-fn-bridge">\n` +
++      missingFns.map((fn) => `
++window["${fn}"] = function(...args) {
++  console.warn('[OpenMAIC AutoBridge] 触发了模型未显式定义的函数: ${fn}', args);
++  var nextModal = document.querySelector('.modal-overlay.active, .modal.show, [id*="modal"].show, [id*="result"].active');
++  if (nextModal) { nextModal.classList.remove('active'); nextModal.classList.add('hidden'); }
++  if (typeof initLevel === 'function') {
++    var cur = (window.gameState && typeof window.gameState.currentLevel === 'number') ? window.gameState.currentLevel : 0;
++    try { initLevel(cur + 1); return; } catch(e) {}
++  }
++  if (typeof nextLevel === 'function') { try { nextLevel(); return; } catch(e) {} }
++  if (typeof restartGame === 'function') { try { restartGame(); return; } catch(e) {} }
++};`).join('\n') + `\n</script>\n`;
++
++    html = html.includes('</body>')
++      ? html.replace('</body>', `${bridgeScript}</body>`)
++      : `${html}${bridgeScript}`;
++    appliedRepairs.push(`自动桥接缺失函数: ${missingFns.join(', ')}`);
++  }
++
++  // 3. 修复 HTML5 拖放 dropzone 缺少 event.preventDefault() 导致 drop 失效
++  if (html.includes('ondragover=')) {
++    const beforeDnd = html;
++    html = html.replace(/ondragover=["']((?!.*event\.preventDefault\(\))[^"']+)["']/gi, (_match, body) => {
++      return `ondragover="event.preventDefault(); ${body}"`;
++    });
++    if (html !== beforeDnd) appliedRepairs.push('补齐 ondragover 默认行为拦截 (防止 drop 丢弃)');
++  }
++
++  // 4. 增强 currentTarget 安全访问
++  if (html.includes('e.currentTarget.classList')) {
++    const beforeTarget = html;
++    html = html.replace(
++      /e\.currentTarget\.classList\.add/g,
++      '(e.currentTarget || e.target || this)?.classList?.add',
++    );
++    html = html.replace(
++      /e\.currentTarget\.classList\.remove/g,
++      '(e.currentTarget || e.target || this)?.classList?.remove',
++    );
++    if (html !== beforeTarget) appliedRepairs.push('增强 currentTarget 安全访问');
++  }
++
++  // 5. 扫描同时拥有 draggable="true" 与 onclick 属性的元素，注入拖拽/点击互斥消抖
++  const hasHybridCards = /<[^>]*draggable=["']true["'][^>]*onclick=[^>]*>|<[^>]*onclick=[^>]*draggable=["']true["'][^>]*>/i.test(html);
++  if (hasHybridCards && !html.includes('__dragMovementDetected')) {
++    const disambiguationScript = `\n<script id="openmaic-drag-disambiguation">
++(function() {
++  if (window.__dragMovementDetected) return;
++  window.__dragMovementDetected = true;
++  var isDraggingItem = false;
++  var dragStartX = 0, dragStartY = 0;
++
++  document.addEventListener('dragstart', function(e) {
++    isDraggingItem = true;
++    dragStartX = e.clientX;
++    dragStartY = e.clientY;
++  }, true);
++
++  document.addEventListener('dragend', function() {
++    setTimeout(function() { isDraggingItem = false; }, 80);
++  }, true);
++
++  document.addEventListener('click', function(e) {
++    if (isDraggingItem) {
++      var moved = Math.hypot(e.clientX - dragStartX, e.clientY - dragStartY);
++      if (moved > 5) {
++        e.stopImmediatePropagation();
++      }
++    }
++  }, true);
++})();
++</script>\n`;
++
++    html = html.includes('</body>')
++      ? html.replace('</body>', `${disambiguationScript}</body>`)
++      : `${html}${disambiguationScript}`;
++    appliedRepairs.push('注入拖拽与点击互斥消抖拦截器');
++  }
++
++  // 6. 修复 Canvas 2D 负半径崩溃 (arc / arcTo / roundRect)
++  if (html.includes('ctx.arc') || html.includes('createRadialGradient') || html.includes('arcTo')) {
++    const beforeCanvas = html;
++    html = html.replace(/ctx\.arc\(([^,]+),\s*([^,]+),\s*([^,]+),/g, (match, x, y, r) => {
++      if (r.includes('Math.max')) return match;
++      return `ctx.arc(${x}, ${y}, Math.max(0.1, ${r}),`;
++    });
++    if (html !== beforeCanvas) {
++      appliedRepairs.push('Canvas 关键绘制尺寸防负数保护');
++    }
++  }
++  if (html.includes('function roundRect(') && !html.includes('Math.min(r || 0')) {
++    html = html.replace(
++      /function roundRect\(ctx,\s*x,\s*y,\s*w,\s*h,\s*r\)\s*\{[\s\S]*?ctx\.beginPath\(\);/g,
++      `function roundRect(ctx, x, y, w, h, r) {
++      r = Math.max(0, Math.min(r || 0, Math.abs(w) / 2, Math.abs(h) / 2));
++      ctx.beginPath();`,
++    );
++  }
++
++  // 7. 注入沙箱环境与 Storage / Alert / Audio 守卫 (解决受限 iframe 下 DOMException)
++  const needsSandboxGuard =
++    html.includes('localStorage') ||
++    html.includes('sessionStorage') ||
++    html.includes('alert(') ||
++    html.includes('AudioContext');
++
++  if (needsSandboxGuard && !html.includes('openmaic-sandbox-safe-guard')) {
++    const sandboxGuardScript = `<script id="openmaic-sandbox-safe-guard">
++(function() {
++  try {
++    var _testKey = '__openmaic_test_key__';
++    window.localStorage.setItem(_testKey, '1');
++    window.localStorage.removeItem(_testKey);
++  } catch (e) {
++    function createMemoryStorage() {
++      var store = {};
++      return {
++        getItem: function(k) { return Object.prototype.hasOwnProperty.call(store, k) ? store[k] : null; },
++        setItem: function(k, v) { store[k] = String(v); },
++        removeItem: function(k) { delete store[k]; },
++        clear: function() { store = {}; },
++        get length() { return Object.keys(store).length; },
++        key: function(i) { return Object.keys(store)[i] || null; }
++      };
++    }
++    try {
++      window.localStorage = createMemoryStorage();
++      window.sessionStorage = createMemoryStorage();
++    } catch (_) {}
++  }
++  var _origAlert = window.alert;
++  window.alert = function(msg) {
++    try {
++      if (_origAlert) _origAlert.call(window, msg);
++    } catch (e) {
++      var toast = document.createElement('div');
++      toast.style.cssText = 'position:fixed;top:24px;left:50%;transform:translateX(-50%);background:rgba(15,23,42,0.92);color:#fff;padding:12px 24px;border-radius:10px;font-size:15px;z-index:999999;box-shadow:0 10px 25px -5px rgba(0,0,0,0.3);text-align:center;pointer-events:none;transition:all 0.3s;';
++      toast.textContent = String(msg);
++      (document.body || document.documentElement).appendChild(toast);
++      setTimeout(function() { toast.style.opacity = '0'; setTimeout(function() { toast.remove(); }, 350); }, 2800);
++    }
++  };
++  var _unlocked = false;
++  function _unlockAudio() {
++    if (_unlocked) return;
++    _unlocked = true;
++    try {
++      if (window.audioCtx && window.audioCtx.state === 'suspended') window.audioCtx.resume();
++    } catch (_) {}
++    window.removeEventListener('click', _unlockAudio, true);
++    window.removeEventListener('touchstart', _unlockAudio, true);
++  }
++  window.addEventListener('click', _unlockAudio, true);
++  window.addEventListener('touchstart', _unlockAudio, true);
++})();
++</script>`;
++
++    if (/<head[^>]*>/i.test(html)) {
++      html = html.replace(/(<head[^>]*>)/i, `$1\n  ${sandboxGuardScript}`);
++    } else {
++      html = `${sandboxGuardScript}\n${html}`;
++    }
++    appliedRepairs.push('注入沙箱环境与 Storage/Alert/Audio 安全守卫');
++  }
++
++  // 8. 注入触屏与智慧电子白板 Touch-to-Drag 兼容 Polyfill
++  const hasDnd = html.includes('draggable="true"') || html.includes('ondragstart');
++  if (hasDnd && !html.includes('openmaic-touch-dnd-guard')) {
++    const touchDndScript = `<script id="openmaic-touch-dnd-guard">
++(function() {
++  if (!('ontouchstart' in window) && !navigator.maxTouchPoints) return;
++  var currentDragItem = null, dragGhost = null, dragData = {}, startX = 0, startY = 0, isDragging = false;
++  function findDraggable(el) {
++    while (el && el !== document.body && el !== document.documentElement) {
++      if (el.getAttribute && (el.getAttribute('draggable') === 'true' || el.hasAttribute('ondragstart'))) return el;
++      el = el.parentElement;
++    }
++    return null;
++  }
++  function createMockDataTransfer() {
++    return {
++      data: dragData,
++      setData: function(k, v) { dragData[k] = String(v); },
++      getData: function(k) { return dragData[k] || ''; },
++      clearData: function() { dragData = {}; }
++    };
++  }
++  function dispatchSynthetic(elem, type, touch, dt) {
++    var evt = new CustomEvent(type, { bubbles: true, cancelable: true });
++    (evt as any).clientX = touch.clientX; (evt as any).clientY = touch.clientY;
++    (evt as any).dataTransfer = dt || createMockDataTransfer();
++    return elem.dispatchEvent(evt);
++  }
++  document.addEventListener('touchstart', function(e) {
++    if (e.touches.length > 1) return;
++    var target = findDraggable(e.target);
++    if (!target) return;
++    currentDragItem = target;
++    startX = e.touches[0].clientX; startY = e.touches[0].clientY;
++    dragData = {}; isDragging = false;
++  }, { passive: true });
++  document.addEventListener('touchmove', function(e) {
++    if (!currentDragItem) return;
++    var touch = e.touches[0];
++    var dx = touch.clientX - startX, dy = touch.clientY - startY;
++    if (!isDragging && (Math.abs(dx) > 8 || Math.abs(dy) > 8)) {
++      isDragging = true;
++      dispatchSynthetic(currentDragItem, 'dragstart', touch);
++      try {
++        dragGhost = currentDragItem.cloneNode(true);
++        dragGhost.style.cssText = 'position:fixed;pointer-events:none;z-index:999999;opacity:0.85;transform:scale(1.05);box-shadow:0 12px 28px rgba(0,0,0,0.28);width:' + currentDragItem.offsetWidth + 'px;height:' + currentDragItem.offsetHeight + 'px;left:' + (touch.clientX - currentDragItem.offsetWidth/2) + 'px;top:' + (touch.clientY - currentDragItem.offsetHeight/2) + 'px;';
++        document.body.appendChild(dragGhost);
++      } catch(_) {}
++    }
++    if (isDragging) {
++      if (e.cancelable) e.preventDefault();
++      if (dragGhost) {
++        dragGhost.style.left = (touch.clientX - currentDragItem.offsetWidth/2) + 'px';
++        dragGhost.style.top = (touch.clientY - currentDragItem.offsetHeight/2) + 'px';
++        dragGhost.style.display = 'none';
++      }
++      var hoverElem = document.elementFromPoint(touch.clientX, touch.clientY);
++      if (dragGhost) dragGhost.style.display = '';
++      if (hoverElem) dispatchSynthetic(hoverElem, 'dragover', touch);
++    }
++  }, { passive: false });
++  document.addEventListener('touchend', function(e) {
++    if (!currentDragItem) return;
++    if (isDragging) {
++      var touch = e.changedTouches[0];
++      if (dragGhost) dragGhost.style.display = 'none';
++      var dropTarget = document.elementFromPoint(touch.clientX, touch.clientY);
++      if (dropTarget) dispatchSynthetic(dropTarget, 'drop', touch);
++      dispatchSynthetic(currentDragItem, 'dragend', touch);
++    }
++    if (dragGhost && dragGhost.parentNode) dragGhost.parentNode.removeChild(dragGhost);
++    dragGhost = null; currentDragItem = null; isDragging = false;
++  }, { passive: true });
++})();
++</script>`;
++
++    if (/<head[^>]*>/i.test(html)) {
++      html = html.replace(/(<head[^>]*>)/i, `$1\n  ${touchDndScript}`);
++    } else {
++      html = `${touchDndScript}\n${html}`;
++    }
++    appliedRepairs.push('注入电子白板与触控拖拽兼容 Polyfill');
++  }
++
++  return { html, appliedRepairs };
++}
 diff --git a/lib/persistence/classroom-materials.ts b/lib/persistence/classroom-materials.ts
 new file mode 100644
 index 00000000..bc2f0549
@@ -9877,10 +10250,10 @@ index 00000000..f5104f6b
 +}
 diff --git a/lib/server/batch-generation/runner.ts b/lib/server/batch-generation/runner.ts
 new file mode 100644
-index 00000000..5da6e3e2
+index 00000000..9728256e
 --- /dev/null
 +++ b/lib/server/batch-generation/runner.ts
-@@ -0,0 +1,823 @@
+@@ -0,0 +1,858 @@
 +import { promises as fs } from 'fs';
 +import { createLogger } from '@/lib/logger';
 +import { getOwnerScopedDocumentStore } from '@/lib/server/agent-runtime/owner-scoped-documents';
@@ -9896,6 +10269,7 @@ index 00000000..5da6e3e2
 +import { archiveClassroomMaterial } from '@/lib/persistence/classroom-materials';
 +import { createOwnerMaterialFromFile } from '@/lib/server/materials/create-owner-material';
 +import { executeAndAwaitGenerationRun } from '@/lib/server/generation/run/await-run';
++import { repairInteractiveHtml } from '@/lib/interactive/repair-interactive-html';
 +
 +const log = createLogger('BatchJobRunner');
 +const runningBatchJobs = new Map<string, Promise<void>>();
@@ -10368,6 +10742,23 @@ index 00000000..5da6e3e2
 +    const doc = await store.loadDocument(stageId);
 +    if (doc) {
 +      scenesCount = doc.scenes.length;
++      let hasModifiedHtml = false;
++      for (const scene of doc.scenes) {
++        if (scene.type === 'interactive' && scene.content && typeof (scene.content as any).html === 'string') {
++          const { html: cleanHtml, appliedRepairs } = repairInteractiveHtml((scene.content as any).html);
++          if (appliedRepairs.length > 0) {
++            (scene.content as any).html = cleanHtml;
++            hasModifiedHtml = true;
++          }
++        }
++      }
++      if (hasModifiedHtml) {
++        try {
++          await store.saveDocument(doc);
++        } catch (saveErr) {
++          log.warn(`Failed to save repaired document ${stageId}:`, saveErr);
++        }
++      }
 +      void syncInteractiveLibraryForStage(doc.stage, doc.scenes).catch((err) => {
 +        log.warn(`Failed to sync interactive library for merged course ${stageId}:`, err);
 +      });
@@ -10587,6 +10978,23 @@ index 00000000..5da6e3e2
 +        const doc = await store.loadDocument(stageId);
 +        if (doc) {
 +          scenesCount = doc.scenes.length;
++          let hasModifiedHtml = false;
++          for (const scene of doc.scenes) {
++            if (scene.type === 'interactive' && scene.content && typeof (scene.content as any).html === 'string') {
++              const { html: cleanHtml, appliedRepairs } = repairInteractiveHtml((scene.content as any).html);
++              if (appliedRepairs.length > 0) {
++                (scene.content as any).html = cleanHtml;
++                hasModifiedHtml = true;
++              }
++            }
++          }
++          if (hasModifiedHtml) {
++            try {
++              await store.saveDocument(doc);
++            } catch (saveErr) {
++              log.warn(`Failed to save repaired document ${stageId}:`, saveErr);
++            }
++          }
 +          void syncInteractiveLibraryForStage(doc.stage, doc.scenes).catch((err) => {
 +            log.warn(`Failed to sync interactive library for course ${stageId}:`, err);
 +          });
@@ -11070,10 +11478,10 @@ index 00000000..51d37393
 +  }
 +}
 diff --git a/lib/server/generation/run/engine.ts b/lib/server/generation/run/engine.ts
-index fda37e10..91b32817 100644
+index fda37e10..9d6383c0 100644
 --- a/lib/server/generation/run/engine.ts
 +++ b/lib/server/generation/run/engine.ts
-@@ -1697,6 +1697,20 @@ async function executeClaimedRun(
+@@ -1697,6 +1697,34 @@ async function executeClaimedRun(
      run = committed!;
      reportCommittedRunEvents(run, events, currentOwnerOf);
      for (const checkpoint of unplaced.steps) steps.set(checkpoint.id, checkpoint.output);
@@ -11091,20 +11499,35 @@ index fda37e10..91b32817 100644
 +        log.warn(`Failed to archive run materials to classroom ${stageId}:`, archiveErr);
 +      }
 +    }
++
++    try {
++      const { getOwnerScopedDocumentStore } = await import('@/lib/server/agent-runtime/owner-scoped-documents');
++      const { syncInteractiveLibraryForStage } = await import('@/lib/server/interactive-library');
++      const store = await getOwnerScopedDocumentStore(owner);
++      const doc = await store.loadDocument(stageId);
++      if (doc && doc.scenes.some((s) => s.type === 'interactive')) {
++        void syncInteractiveLibraryForStage(doc.stage, doc.scenes).catch((err) => {
++          log.warn(`Failed to sync interactive library for completed run course ${stageId}:`, err);
++        });
++      }
++    } catch {
++      /* ignore non-critical interactive sync error */
++    }
    };
  
    const end = async (stageId: string): Promise<void> => {
 diff --git a/lib/server/interactive-library/index.ts b/lib/server/interactive-library/index.ts
 new file mode 100644
-index 00000000..c22cb0ae
+index 00000000..da8c0572
 --- /dev/null
 +++ b/lib/server/interactive-library/index.ts
-@@ -0,0 +1,538 @@
+@@ -0,0 +1,550 @@
 +import fs from 'fs/promises';
 +import path from 'path';
 +import JSZip from 'jszip';
 +import { createLogger } from '@/lib/logger';
 +import { inlineHtmlAssets } from '@/lib/export/inline-assets';
++import { repairInteractiveHtml } from '@/lib/interactive/repair-interactive-html';
 +import type { Scene } from '@/lib/types/stage';
 +
 +const log = createLogger('InteractiveLibrary');
@@ -11284,6 +11707,17 @@ index 00000000..c22cb0ae
 +      } catch (err) {
 +        log.warn(`Inlining assets for ${sceneTitle} failed; writing raw HTML`, err);
 +        inlinedHtml = rawHtml;
++      }
++
++      // Defensive repair & self-healing
++      try {
++        const { html: repairedHtml, appliedRepairs } = repairInteractiveHtml(inlinedHtml);
++        if (appliedRepairs.length > 0) {
++          log.info(`[InteractiveRepair] ${sceneTitle} 自动修复: ${appliedRepairs.join(', ')}`);
++        }
++        inlinedHtml = repairedHtml;
++      } catch (err) {
++        log.warn(`[InteractiveRepair] 对 ${sceneTitle} 执行自愈清洗异常，跳过`, err);
 +      }
 +
 +      await fs.writeFile(filePath, inlinedHtml, 'utf-8');
@@ -13231,6 +13665,82 @@ index 00000000..792fbd19
 +echo -e "  1. 打开首页 http://127.0.0.1:${PORT}/，点击 Logo 右上角的 [Pro] 徽章进入工作台"
 +echo -e "  2. 进入任意课程页面，右上角顶栏已激活 [PRO MODE] 专业编辑开关"
 +echo -e "${BLUE}======================================================${NC}"
+diff --git a/scripts/repair-interactive-library.ts b/scripts/repair-interactive-library.ts
+new file mode 100644
+index 00000000..9ddd1514
+--- /dev/null
++++ b/scripts/repair-interactive-library.ts
+@@ -0,0 +1,70 @@
++import fs from 'node:fs/promises';
++import path from 'node:path';
++import { repairInteractiveHtml } from '../lib/interactive/repair-interactive-html';
++
++const INTERACTIVE_LIBRARY_DIR = path.join(process.cwd(), 'data', 'interactive-library');
++
++async function getAllHtmlFiles(dir: string): Promise<string[]> {
++  const htmlFiles: string[] = [];
++  try {
++    const entries = await fs.readdir(dir, { withFileTypes: true });
++    for (const entry of entries) {
++      const fullPath = path.join(dir, entry.name);
++      if (entry.isDirectory()) {
++        htmlFiles.push(...(await getAllHtmlFiles(fullPath)));
++      } else if (entry.name.endsWith('.html')) {
++        htmlFiles.push(fullPath);
++      }
++    }
++  } catch {
++    /* ignore unreadable dirs */
++  }
++  return htmlFiles;
++}
++
++async function main() {
++  console.log('====================================================');
++  console.log('   OpenMAIC 历史互动展厅课件全量防御性自愈修复');
++  console.log(`   扫描目录: ${INTERACTIVE_LIBRARY_DIR}`);
++  console.log('====================================================\n');
++
++  const files = await getAllHtmlFiles(INTERACTIVE_LIBRARY_DIR);
++  console.log(`发现 ${files.length} 个互动 HTML 课件文件，开始逐一巡检修复...\n`);
++
++  let repairedCount = 0;
++  const repairBreakdown = new Map<string, number>();
++
++  for (const filePath of files) {
++    try {
++      const raw = await fs.readFile(filePath, 'utf-8');
++      const { html: cleanHtml, appliedRepairs } = repairInteractiveHtml(raw);
++
++      if (appliedRepairs.length > 0 && cleanHtml !== raw) {
++        await fs.writeFile(filePath, cleanHtml, 'utf-8');
++        repairedCount++;
++        for (const rep of appliedRepairs) {
++          repairBreakdown.set(rep, (repairBreakdown.get(rep) || 0) + 1);
++        }
++        const rel = path.relative(INTERACTIVE_LIBRARY_DIR, filePath);
++        console.log(`[已修复] ${rel} -> [${appliedRepairs.join(', ')}]`);
++      }
++    } catch (err) {
++      console.warn(`[跳过] ${filePath} 处理异常:`, err);
++    }
++  }
++
++  console.log('\n====================================================');
++  console.log(`巡检修复完成！共扫描 ${files.length} 个课件，修复生效 ${repairedCount} 个课件。`);
++  if (repairBreakdown.size > 0) {
++    console.log('各修复项生效统计:');
++    for (const [name, count] of repairBreakdown.entries()) {
++      console.log(`  - ${name}: ${count} 次`);
++    }
++  }
++  console.log('====================================================\n');
++}
++
++main().catch((err) => {
++  console.error('Fatal error:', err);
++  process.exit(1);
++});
 diff --git a/scripts/reset-admin-password.mjs b/scripts/reset-admin-password.mjs
 new file mode 100755
 index 00000000..104eb0c7
@@ -13372,6 +13882,126 @@ index 00000000..be7682fa
 +    // Expired token (expires in -1 second)
 +    const expiredToken = signToken(payload, -1);
 +    expect(verifyToken(expiredToken)).toBeNull();
++  });
++});
+diff --git a/tests/interactive/repair-interactive-html.test.ts b/tests/interactive/repair-interactive-html.test.ts
+new file mode 100644
+index 00000000..5ce7f08f
+--- /dev/null
++++ b/tests/interactive/repair-interactive-html.test.ts
+@@ -0,0 +1,114 @@
++import { describe, it, expect } from 'vitest';
++import { repairInteractiveHtml } from '@/lib/interactive/repair-interactive-html';
++
++describe('repairInteractiveHtml (Defensive Self-Healing Cleaner)', () => {
++  it('handles null, undefined, or empty html gracefully', () => {
++    expect(repairInteractiveHtml('' as any)).toEqual({ html: '', appliedRepairs: [] });
++    expect(repairInteractiveHtml(null as any)).toEqual({ html: null, appliedRepairs: [] });
++    expect(repairInteractiveHtml(undefined as any)).toEqual({ html: undefined, appliedRepairs: [] });
++  });
++
++  it('corrects invalid JSON syntax in script tags', () => {
++    const raw = `<script type="application/json">{ label: "test", 'key': 'val', }</script>`;
++    const { html, appliedRepairs } = repairInteractiveHtml(raw);
++    expect(appliedRepairs).toContain('JSON 语法校正');
++    expect(html).toContain('"label":');
++    expect(html).toContain('"key": "val"');
++  });
++
++  it('bridges missing onclick functions', () => {
++    const raw = `
++      <div id="modal" class="modal-overlay active">
++        <button onclick="nextLevelOrRestart()">进入下一关</button>
++      </div>
++      <script>
++        function someOtherFn() {}
++      </script>
++    `;
++    const { html, appliedRepairs } = repairInteractiveHtml(raw);
++    expect(appliedRepairs.some((r) => r.includes('自动桥接缺失函数: nextLevelOrRestart'))).toBe(true);
++    expect(html).toContain('id="openmaic-missing-fn-bridge"');
++    expect(html).toContain('window["nextLevelOrRestart"] = function');
++  });
++
++  it('adds preventDefault to ondragover dropzones', () => {
++    const raw = `<div class="slot" ondragover="handleOver(event)"></div>`;
++    const { html, appliedRepairs } = repairInteractiveHtml(raw);
++    expect(appliedRepairs).toContain('补齐 ondragover 默认行为拦截 (防止 drop 丢弃)');
++    expect(html).toContain('ondragover="event.preventDefault(); handleOver(event)"');
++  });
++
++  it('protects against Canvas negative arc radius and roundRect', () => {
++    const raw = `
++      <script>
++        ctx.arc(100, 100, radius - 20, 0, Math.PI * 2);
++        function roundRect(ctx, x, y, w, h, r) {
++          ctx.beginPath();
++        }
++      </script>
++    `;
++    const { html, appliedRepairs } = repairInteractiveHtml(raw);
++    expect(appliedRepairs).toContain('Canvas 关键绘制尺寸防负数保护');
++    expect(html).toContain('Math.max(0.1, radius - 20)');
++    expect(html).toContain('Math.max(0, Math.min(r || 0');
++  });
++
++  it('injects sandbox guard for localStorage, alert, and AudioContext', () => {
++    const raw = `
++      <!DOCTYPE html>
++      <html>
++      <head><title>Test Game</title></head>
++      <body>
++        <script>
++          localStorage.setItem('score', 100);
++          alert('You win!');
++        </script>
++      </body>
++      </html>
++    `;
++    const { html, appliedRepairs } = repairInteractiveHtml(raw);
++    expect(appliedRepairs).toContain('注入沙箱环境与 Storage/Alert/Audio 安全守卫');
++    expect(html).toContain('id="openmaic-sandbox-safe-guard"');
++    expect(html).toContain('createMemoryStorage');
++  });
++
++  it('injects touch drag-and-drop polyfill for draggable elements', () => {
++    const raw = `
++      <!DOCTYPE html>
++      <html>
++      <head><title>DND Game</title></head>
++      <body>
++        <div class="card" draggable="true" ondragstart="drag(event)">Card</div>
++      </body>
++      </html>
++    `;
++    const { html, appliedRepairs } = repairInteractiveHtml(raw);
++    expect(appliedRepairs).toContain('注入电子白板与触控拖拽兼容 Polyfill');
++    expect(html).toContain('id="openmaic-touch-dnd-guard"');
++    expect(html).toContain('touchstart');
++  });
++
++  it('is completely idempotent when run multiple times', () => {
++    const raw = `
++      <!DOCTYPE html>
++      <html>
++      <head><title>Complex Interactive Game</title></head>
++      <body>
++        <div class="card" draggable="true" ondragstart="drag(event)">Card</div>
++        <div class="slot" ondragover="handleOver(event)">Slot</div>
++        <button onclick="nextLevelOrRestart()">下一关</button>
++        <script>
++          localStorage.setItem('high', 1000);
++          ctx.arc(50, 50, -5, 0, 6.28);
++        </script>
++      </body>
++      </html>
++    `;
++    const firstRun = repairInteractiveHtml(raw);
++    expect(firstRun.appliedRepairs.length).toBeGreaterThan(0);
++
++    const secondRun = repairInteractiveHtml(firstRun.html);
++    expect(secondRun.appliedRepairs).toEqual([]);
++    expect(secondRun.html).toBe(firstRun.html);
 +  });
 +});
 diff --git a/tests/server/batch-generation-queue.test.ts b/tests/server/batch-generation-queue.test.ts

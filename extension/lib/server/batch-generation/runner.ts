@@ -1,15 +1,19 @@
 import { promises as fs } from 'fs';
 import { createLogger } from '@/lib/logger';
-import { generateClassroom } from '@/lib/server/classroom-generation';
 import { getOwnerScopedDocumentStore } from '@/lib/server/agent-runtime/owner-scoped-documents';
 import { extractFileContent } from './extractor';
 import { getBatchJob, updateBatchJob, listBatchJobs } from './store';
 import type { BatchJob, SubTaskStep } from './types';
 import { buildCourseScaleInstruction } from '@/lib/types/course-scale';
+import { buildThemeStyleInstruction } from '@/lib/types/theme-style';
 import { syncInteractiveLibraryForStage } from '@/lib/server/interactive-library';
 import { getStageAccessDb } from '@/lib/server/stage-access';
 import { markStageGenerationComplete } from '@/lib/persistence/stage-meta';
 import { getUserKV } from '@/lib/server/kv/user-kv';
+import { archiveClassroomMaterial } from '@/lib/persistence/classroom-materials';
+import { createOwnerMaterialFromFile } from '@/lib/server/materials/create-owner-material';
+import { executeAndAwaitGenerationRun } from '@/lib/server/generation/run/await-run';
+import { repairInteractiveHtml } from '@/lib/interactive/repair-interactive-html';
 
 const log = createLogger('BatchJobRunner');
 const runningBatchJobs = new Map<string, Promise<void>>();
@@ -416,79 +420,131 @@ async function executeSingleMergedJob(
   }
 
   // 3. 构建综合生成指令
+  const ownerId = job.ownerId || 'anon:batch';
+  const ownerMaterialIds: string[] = [];
+  for (const t of job.tasks) {
+    if (t.tempFilePath) {
+      try {
+        const mId = await createOwnerMaterialFromFile({
+          ownerId,
+          filePath: t.tempFilePath,
+          fileName: t.fileName,
+          mimeType: t.mimeType,
+          extract: true,
+        });
+        ownerMaterialIds.push(mId);
+      } catch (matErr) {
+        log.warn(`Failed to register material ${t.fileName}:`, matErr);
+      }
+    }
+  }
+
   const scaleInstruction = buildCourseScaleInstruction(job.courseScale, job.enableInteractiveMode);
-  const requirement = job.enableInteractiveMode
-    ? `【课程教学主题】：${job.title || '多课件融合互动微课堂'}\n${job.requirement ? '【教学总要求】：\n' + job.requirement + '\n' : ''}【教学交互规范】：必须启用深度互动模式（Interactive-First），全课必须生成不少于3~4个生动的高品质可交互场景（涵盖物理/科学过程仿真、动态沙盒、算法可视化或趣味闯关游戏，提供完备的 widgetType 与 widgetOutline），与理论精讲及阶段小测深度交替融合。${scaleInstruction}`
-    : `【课程教学主题】：${job.title || '多课件融合微课堂'}\n${job.requirement ? '【教学总要求】：\n' + job.requirement + '\n' : ''}${scaleInstruction}`;
+  const themeInstruction = buildThemeStyleInstruction(
+    job.interactiveTheme || 'dark',
+    job.slideTheme || 'light',
+  );
+  let finalRequirement = job.enableInteractiveMode
+    ? `【课程教学主题】：${job.title || '多课件融合互动微课堂'}\n${job.requirement ? '【教学总要求】：\n' + job.requirement + '\n' : ''}【教学交互规范】：必须启用深度互动模式（Interactive-First），全课必须生成不少于3~4个生动的高品质可交互场景（涵盖物理/科学过程仿真、动态沙盒、算法可视化或趣味闯关游戏，提供完备的 widgetType 与 widgetOutline），与理论精讲及阶段小测深度交替融合。`
+    : `【课程教学主题】：${job.title || '多课件融合微课堂'}\n${job.requirement ? '【教学总要求】：\n' + job.requirement + '\n' : ''}`;
+
+  if (scaleInstruction && !finalRequirement.includes('【课程篇幅与教学结构规范')) {
+    finalRequirement += scaleInstruction;
+  }
+  if (themeInstruction && !finalRequirement.includes('【界面视觉风格强制规约')) {
+    finalRequirement += themeInstruction;
+  }
 
   await updateBatchJob(jobId, (j) => {
     j.progress = 30;
   });
 
   // 4. 执行全自动课程生成管线
-  const result = await generateClassroom(
-    {
-      requirement,
-      pdfContent: {
-        text: combinedText.slice(0, 30000),
-        images: extractedImages.slice(0, 20),
-      },
-      enableTTS: job.enableTTS,
-      enableImageGeneration: job.enableImageGeneration,
-      interactiveMode: job.enableInteractiveMode,
-      courseScale: job.courseScale,
-      interactiveTheme: job.interactiveTheme,
-      slideTheme: job.slideTheme,
+  const { stageId } = await executeAndAwaitGenerationRun({
+    ownerId,
+    input: {
+      requirement: finalRequirement,
+      materialIds: ownerMaterialIds,
+      interactive: !!job.enableInteractiveMode,
+      taskEngine: false,
+      agents: { mode: 'auto' },
+      outlineReview: 'auto',
     },
-    {
-      baseUrl,
-      signal: controller.signal,
-      onProgress: async (p) => {
-        // Map 0-100% of generateClassroom to 30% - 95% of batch job
-        const mappedProgress = Math.round(30 + p.progress * 0.65);
-        await updateBatchJob(jobId, (j) => {
-          j.progress = mappedProgress;
-        });
-      },
+    signal: controller.signal,
+    onProgress: async (p) => {
+      const mappedProgress = Math.round(30 + p.progress * 0.65);
+      await updateBatchJob(jobId, (j) => {
+        j.progress = mappedProgress;
+      });
     },
-  );
-
-  // 5. 写入当前用户的专属 PostgreSQL 存储
-  try {
-    const store = await getOwnerScopedDocumentStore(job.ownerId);
-    await store.saveDocument({
-      stage: result.stage,
-      scenes: result.scenes,
-    });
-    try {
-      const db = await getStageAccessDb();
-      await markStageGenerationComplete(db, result.id);
-    } catch (completeErr) {
-      log.warn(`Failed to mark generation complete for ${result.id}:`, completeErr);
-    }
-    log.info(`Merged course ${result.id} successfully saved to owner store (${job.ownerId})`);
-  } catch (dbError) {
-    log.warn(`Failed to sync merged course ${result.id} to owner store:`, dbError);
-  }
-
-  // 5.5 自动打包并导出互动内容至互动展厅
-  void syncInteractiveLibraryForStage(result.stage, result.scenes).catch((err) => {
-    log.warn(`Failed to sync interactive library for merged course ${result.id}:`, err);
   });
 
+  // 5. 读取生成课程信息并同步互动展厅
+  let scenesCount = 0;
+  try {
+    const store = await getOwnerScopedDocumentStore(ownerId);
+    const doc = await store.loadDocument(stageId);
+    if (doc) {
+      scenesCount = doc.scenes.length;
+      let hasModifiedHtml = false;
+      for (const scene of doc.scenes) {
+        if (scene.type === 'interactive' && scene.content && typeof (scene.content as any).html === 'string') {
+          const { html: cleanHtml, appliedRepairs } = repairInteractiveHtml((scene.content as any).html);
+          if (appliedRepairs.length > 0) {
+            (scene.content as any).html = cleanHtml;
+            hasModifiedHtml = true;
+          }
+        }
+      }
+      if (hasModifiedHtml) {
+        try {
+          await store.saveDocument(doc);
+        } catch (saveErr) {
+          log.warn(`Failed to save repaired document ${stageId}:`, saveErr);
+        }
+      }
+      void syncInteractiveLibraryForStage(doc.stage, doc.scenes).catch((err) => {
+        log.warn(`Failed to sync interactive library for merged course ${stageId}:`, err);
+      });
+    }
+  } catch (dbError) {
+    log.warn(`Failed to read merged course ${stageId} from owner store:`, dbError);
+  }
+
+  // 5.6 自动归档原始课件到本课程的专属材料库
+  for (const t of job.tasks) {
+    if (t.tempFilePath) {
+      try {
+        await archiveClassroomMaterial({
+          classroomId: stageId,
+          sourceFilePath: t.tempFilePath,
+          fileName: t.fileName,
+          size: t.fileSize,
+          mimeType: t.mimeType,
+          promptText: job.requirement || finalRequirement,
+          source: 'batch_merged',
+        });
+        log.info(`Archived original material ${t.fileName} for merged classroom ${stageId}`);
+      } catch (archiveErr) {
+        log.warn(`Failed to archive material ${t.fileName} for merged course ${stageId}:`, archiveErr);
+      }
+    }
+  }
+
   // 6. 标记批次完成
+  const classroomUrl = `/classroom/${stageId}`;
   await updateBatchJob(jobId, (j) => {
     j.status = 'completed';
     j.progress = 100;
     j.completedTasks = j.tasks.length;
-    j.resultClassroomId = result.id;
-    j.resultClassroomUrl = result.url;
-    j.resultStageId = result.stage.id;
-    j.scenesCount = result.scenesCount;
+    j.resultClassroomId = stageId;
+    j.resultClassroomUrl = classroomUrl;
+    j.resultStageId = stageId;
+    j.scenesCount = scenesCount;
     j.completedAt = new Date().toISOString();
   });
 
-  log.info(`Single merged batch job ${jobId} completed successfully: ${result.url}`);
+  log.info(`Single merged batch job ${jobId} completed successfully: ${classroomUrl}`);
 }
 
 /** 模式 B：多文件分别独立生成课程 (一对一批量流水线) */
@@ -586,84 +642,132 @@ async function executeBatchIndependentJob(
           ? cleanFileName
           : extracted.title || cleanFileName;
       const scaleInstruction = buildCourseScaleInstruction(initialJob.courseScale, initialJob.enableInteractiveMode);
-      const requirement = initialJob.enableInteractiveMode
-        ? `【课程主题】：《${courseTitle}》\n${initialJob.requirement ? '【教学总要求】：\n' + initialJob.requirement + '\n' : ''}【教学交互规范】：必须启用深度互动模式（Interactive-First），全课必须生成不少于3~4个生动的高品质可交互场景（涵盖物理/科学过程仿真、动态沙盒、算法可视化或趣味闯关游戏，提供完备的 widgetType 与 widgetOutline），与理论精讲及阶段小测深度交替融合。${scaleInstruction}`
-        : `【课程主题】：《${courseTitle}》\n${initialJob.requirement ? '【教学总要求】：\n' + initialJob.requirement + '\n' : ''}${scaleInstruction}`;
-
-      // 3. 执行生成
-      const result = await generateClassroom(
-        {
-          requirement,
-          pdfContent: {
-            text: extracted.text.slice(0, 25000),
-            images: extracted.images.slice(0, 15),
-          },
-          enableTTS: initialJob.enableTTS,
-          enableImageGeneration: initialJob.enableImageGeneration,
-          interactiveMode: initialJob.enableInteractiveMode,
-          courseScale: initialJob.courseScale,
-          interactiveTheme: initialJob.interactiveTheme,
-          slideTheme: initialJob.slideTheme,
-        },
-        {
-          baseUrl,
-          signal: controller.signal,
-          onProgress: async (p) => {
-            const stepMapping: Record<string, SubTaskStep> = {
-              queued: 'planning_outline',
-              generating_outlines: 'planning_outline',
-              generating_scenes: 'building_scenes',
-              generating_media: 'building_scenes',
-              generating_tts: 'generating_tts',
-              persisting: 'persisting',
-              completed: 'completed',
-              failed: 'failed',
-            };
-            const currentSubStep = stepMapping[p.step] || 'building_scenes';
-
-            await updateBatchJob(jobId, (j) => {
-              const target = j.tasks[taskIndex];
-              if (target && target.status !== 'cancelled') {
-                target.status = currentSubStep;
-                target.progress = p.progress;
-                target.stepMessage = p.message;
-              }
-              // Compute overall batch progress
-              const currentTaskContribution = p.progress / 100;
-              j.progress = Math.min(
-                99,
-                Math.round(((completedCount + currentTaskContribution) / totalTasks) * 100),
-              );
-            });
-          },
-        },
+      const themeInstruction = buildThemeStyleInstruction(
+        initialJob.interactiveTheme || 'dark',
+        initialJob.slideTheme || 'light',
       );
+      let requirement = initialJob.enableInteractiveMode
+        ? `【课程主题】：《${courseTitle}》\n${initialJob.requirement ? '【教学总要求】：\n' + initialJob.requirement + '\n' : ''}【教学交互规范】：必须启用深度互动模式（Interactive-First），全课必须生成不少于3~4个生动的高品质可交互场景（涵盖物理/科学过程仿真、动态沙盒、算法可视化或趣味闯关游戏，提供完备的 widgetType 与 widgetOutline），与理论精讲及阶段小测深度交替融合。`
+        : `【课程主题】：《${courseTitle}》\n${initialJob.requirement ? '【教学总要求】：\n' + initialJob.requirement + '\n' : ''}`;
 
-      // 4. 同步至当前用户的 PostgreSQL 存储
-      try {
-        const store = await getOwnerScopedDocumentStore(initialJob.ownerId);
-        await store.saveDocument({
-          stage: result.stage,
-          scenes: result.scenes,
-        });
-        try {
-          const db = await getStageAccessDb();
-          await markStageGenerationComplete(db, result.id);
-        } catch (completeErr) {
-          log.warn(`Failed to mark generation complete for ${result.id}:`, completeErr);
-        }
-        log.info(`Course ${result.id} successfully saved to owner store (${initialJob.ownerId})`);
-      } catch (dbError) {
-        log.warn(`Failed to sync course ${result.id} to owner store:`, dbError);
+      if (scaleInstruction && !requirement.includes('【课程篇幅与教学结构规范')) {
+        requirement += scaleInstruction;
+      }
+      if (themeInstruction && !requirement.includes('【界面视觉风格强制规约')) {
+        requirement += themeInstruction;
       }
 
-      // 4.5 自动打包并导出互动内容至互动展厅
-      void syncInteractiveLibraryForStage(result.stage, result.scenes).catch((err) => {
-        log.warn(`Failed to sync interactive library for course ${result.id}:`, err);
+      const ownerId = currentJob.ownerId || initialJob.ownerId || 'anon:batch';
+      let ownerMaterialId: string | undefined;
+      if (task.tempFilePath) {
+        try {
+          ownerMaterialId = await createOwnerMaterialFromFile({
+            ownerId,
+            filePath: task.tempFilePath,
+            fileName: task.fileName,
+            mimeType: task.mimeType,
+            extract: true,
+          });
+        } catch (matErr) {
+          log.warn(`Failed to register material ${task.fileName}:`, matErr);
+        }
+      }
+
+      // 3. 执行生成
+      const { stageId } = await executeAndAwaitGenerationRun({
+        ownerId,
+        input: {
+          requirement,
+          materialIds: ownerMaterialId ? [ownerMaterialId] : [],
+          interactive: !!initialJob.enableInteractiveMode,
+          taskEngine: false,
+          agents: { mode: 'auto' },
+          outlineReview: 'auto',
+        },
+        signal: controller.signal,
+        onProgress: async (p) => {
+          const stepMapping: Record<string, SubTaskStep> = {
+            queued: 'planning_outline',
+            initializing: 'planning_outline',
+            researching: 'planning_outline',
+            generating_outlines: 'planning_outline',
+            generating_scenes: 'building_scenes',
+            generating_media: 'building_scenes',
+            completed: 'completed',
+            failed: 'failed',
+          };
+          const currentSubStep = stepMapping[p.step] || 'building_scenes';
+
+          await updateBatchJob(jobId, (j) => {
+            const target = j.tasks[taskIndex];
+            if (target && target.status !== 'cancelled') {
+              target.status = currentSubStep;
+              target.progress = p.progress;
+              target.stepMessage = p.message;
+            }
+            // Compute overall batch progress
+            const currentTaskContribution = p.progress / 100;
+            j.progress = Math.min(
+              99,
+              Math.round(((completedCount + currentTaskContribution) / totalTasks) * 100),
+            );
+          });
+        },
       });
+
+      // 4. 读取生成课程并同步互动展厅
+      let scenesCount = 0;
+      try {
+        const store = await getOwnerScopedDocumentStore(ownerId);
+        const doc = await store.loadDocument(stageId);
+        if (doc) {
+          scenesCount = doc.scenes.length;
+          let hasModifiedHtml = false;
+          for (const scene of doc.scenes) {
+            if (scene.type === 'interactive' && scene.content && typeof (scene.content as any).html === 'string') {
+              const { html: cleanHtml, appliedRepairs } = repairInteractiveHtml((scene.content as any).html);
+              if (appliedRepairs.length > 0) {
+                (scene.content as any).html = cleanHtml;
+                hasModifiedHtml = true;
+              }
+            }
+          }
+          if (hasModifiedHtml) {
+            try {
+              await store.saveDocument(doc);
+            } catch (saveErr) {
+              log.warn(`Failed to save repaired document ${stageId}:`, saveErr);
+            }
+          }
+          void syncInteractiveLibraryForStage(doc.stage, doc.scenes).catch((err) => {
+            log.warn(`Failed to sync interactive library for course ${stageId}:`, err);
+          });
+        }
+      } catch (dbError) {
+        log.warn(`Failed to read course ${stageId} from owner store:`, dbError);
+      }
+
+      // 4.6 自动归档原始课件到本课程的专属材料库
+      if (task.tempFilePath) {
+        try {
+          await archiveClassroomMaterial({
+            classroomId: stageId,
+            sourceFilePath: task.tempFilePath,
+            fileName: task.fileName,
+            size: task.fileSize,
+            mimeType: task.mimeType,
+            promptText: initialJob.requirement || requirement,
+            source: 'batch',
+          });
+          log.info(`Archived original material ${task.fileName} for classroom ${stageId}`);
+        } catch (archiveErr) {
+          log.warn(`Failed to archive material for course ${stageId}:`, archiveErr);
+        }
+      }
 
       // 5. 标记子任务成功
       completedCount++;
+      const classroomUrl = `/classroom/${stageId}`;
       await updateBatchJob(jobId, (j) => {
         j.completedTasks = completedCount;
         j.progress = Math.round((completedCount / totalTasks) * 100);
@@ -671,16 +775,16 @@ async function executeBatchIndependentJob(
         if (target) {
           target.status = 'completed';
           target.progress = 100;
-          target.classroomId = result.id;
-          target.classroomUrl = result.url;
-          target.stageId = result.stage.id;
-          target.scenesCount = result.scenesCount;
-          target.stepMessage = `课程生成完成 (共 ${result.scenesCount} 页)`;
+          target.classroomId = stageId;
+          target.classroomUrl = classroomUrl;
+          target.stageId = stageId;
+          target.scenesCount = scenesCount;
+          target.stepMessage = `课程生成完成 (共 ${scenesCount} 页)`;
           target.completedAt = new Date().toISOString();
         }
       });
 
-      log.info(`[${i + 1}/${totalTasks}] Finished: ${task.fileName} -> ${result.url}`);
+      log.info(`[${i + 1}/${totalTasks}] Finished: ${task.fileName} -> ${classroomUrl}`);
     } catch (err) {
       if (controller.signal.aborted || (err as any)?.name === 'AbortError') {
         log.info(`[${i + 1}/${totalTasks}] Task ${task.fileName} aborted by user cancellation`);
