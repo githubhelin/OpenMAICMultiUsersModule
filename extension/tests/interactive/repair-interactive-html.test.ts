@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest';
+import * as vm from 'node:vm';
 import { repairInteractiveHtml } from '@/lib/interactive/repair-interactive-html';
 
 describe('repairInteractiveHtml (Defensive Self-Healing Cleaner)', () => {
@@ -16,13 +17,14 @@ describe('repairInteractiveHtml (Defensive Self-Healing Cleaner)', () => {
     expect(html).toContain('"key": "val"');
   });
 
-  it('bridges missing onclick functions', () => {
+  it('bridges missing onclick functions even with trailing semicolons or parameters', () => {
     const raw = `
       <div id="modal" class="modal-overlay active">
-        <button onclick="nextLevelOrRestart()">进入下一关</button>
+        <button onclick="nextLevelOrRestart();">进入下一关</button>
+        <button onclick="customCheck(1, 'ok');">验证</button>
       </div>
       <script>
-        function someOtherFn() {}
+        function customCheck(a, b) {}
       </script>
     `;
     const { html, appliedRepairs } = repairInteractiveHtml(raw);
@@ -38,10 +40,11 @@ describe('repairInteractiveHtml (Defensive Self-Healing Cleaner)', () => {
     expect(html).toContain('ondragover="event.preventDefault(); handleOver(event)"');
   });
 
-  it('protects against Canvas negative arc radius and roundRect', () => {
+  it('protects against Canvas negative arc radius, createRadialGradient and roundRect', () => {
     const raw = `
       <script>
         ctx.arc(100, 100, radius - 20, 0, Math.PI * 2);
+        c.createRadialGradient(0, 0, -10, 100, 100, -20);
         function roundRect(ctx, x, y, w, h, r) {
           ctx.beginPath();
         }
@@ -50,6 +53,7 @@ describe('repairInteractiveHtml (Defensive Self-Healing Cleaner)', () => {
     const { html, appliedRepairs } = repairInteractiveHtml(raw);
     expect(appliedRepairs).toContain('Canvas 关键绘制尺寸防负数保护');
     expect(html).toContain('Math.max(0.1, radius - 20)');
+    expect(html).toContain('Math.max(0.1, -10)');
     expect(html).toContain('Math.max(0, Math.min(r || 0');
   });
 
@@ -72,7 +76,7 @@ describe('repairInteractiveHtml (Defensive Self-Healing Cleaner)', () => {
     expect(html).toContain('createMemoryStorage');
   });
 
-  it('injects touch drag-and-drop polyfill for draggable elements', () => {
+  it('injects touch drag-and-drop polyfill without TypeScript-in-browser syntax errors', () => {
     const raw = `
       <!DOCTYPE html>
       <html>
@@ -85,7 +89,13 @@ describe('repairInteractiveHtml (Defensive Self-Healing Cleaner)', () => {
     const { html, appliedRepairs } = repairInteractiveHtml(raw);
     expect(appliedRepairs).toContain('注入电子白板与触控拖拽兼容 Polyfill');
     expect(html).toContain('id="openmaic-touch-dnd-guard"');
-    expect(html).toContain('touchstart');
+    expect(html).not.toContain('(evt as any)');
+
+    // Ensure all injected scripts are 100% valid JavaScript in a real JS engine
+    const scriptMatches = html.matchAll(/<script[^>]*>([\s\S]*?)<\/script>/gi);
+    for (const match of scriptMatches) {
+      expect(() => new vm.Script(match[1])).not.toThrow();
+    }
   });
 
   it('is completely idempotent when run multiple times', () => {

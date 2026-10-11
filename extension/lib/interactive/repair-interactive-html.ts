@@ -8,6 +8,29 @@ export interface RepairResult {
   appliedRepairs: string[];
 }
 
+const BUILTIN_GLOBAL_FUNCTIONS = new Set([
+  'alert',
+  'confirm',
+  'prompt',
+  'console',
+  'setTimeout',
+  'clearTimeout',
+  'setInterval',
+  'clearInterval',
+  'requestAnimationFrame',
+  'cancelAnimationFrame',
+  'preventDefault',
+  'stopPropagation',
+  'history',
+  'location',
+  'window',
+  'close',
+  'print',
+  'focus',
+  'blur',
+  'open',
+]);
+
 function tryRepairJson(raw: string): string {
   // 规则 1: 修复未带双引号的对象键名，例如: label: "..." 或 isExternal: false
   let repaired = raw.replace(/([{,]\s*)([a-zA-Z0-9_$]+)\s*:/g, (_match, prefix, key) => {
@@ -55,18 +78,24 @@ export function repairInteractiveHtml(rawHtml: string): RepairResult {
   });
 
   // 2. 修复多关卡缺失的 onclick 函数 (动态桩函数与关卡流转桥接)
-  const onclickMatches = html.matchAll(/onclick=["']([a-zA-Z0-9_]+)\([^)]*\)["']/gi);
+  const onclickAttrRegex = /onclick=["']([^"']+)["']/gi;
   const referencedFns = new Set<string>();
-  for (const m of onclickMatches) {
-    const fnName = m[1];
-    if (!/^(alert|confirm|prompt|console|location|history)$/.test(fnName)) {
-      referencedFns.add(fnName);
+  for (const match of html.matchAll(onclickAttrRegex)) {
+    const code = match[1];
+    const fnMatches = code.matchAll(/([a-zA-Z0-9_$]+)\s*\(/g);
+    for (const fnMatch of fnMatches) {
+      const fnName = fnMatch[1];
+      if (!BUILTIN_GLOBAL_FUNCTIONS.has(fnName)) {
+        referencedFns.add(fnName);
+      }
     }
   }
 
   const missingFns: string[] = [];
   for (const fn of referencedFns) {
-    const definedPattern = new RegExp(`(function\\s+${fn}\\b|window\\.${fn}\\s*=|var\\s+${fn}\\s*=|let\\s+${fn}\\s*=|const\\s+${fn}\\s*=)`);
+    const definedPattern = new RegExp(
+      `((?:async\\s+)?function\\s+${fn}\\b|window\\.${fn}\\s*=|window\\s*\\[['"]${fn}['"]\\]|var\\s+${fn}\\b|let\\s+${fn}\\b|const\\s+${fn}\\b|\\b${fn}\\s*:)`,
+    );
     if (!definedPattern.test(html)) {
       missingFns.push(fn);
     }
@@ -77,7 +106,7 @@ export function repairInteractiveHtml(rawHtml: string): RepairResult {
       missingFns.map((fn) => `
 window["${fn}"] = function(...args) {
   console.warn('[OpenMAIC AutoBridge] 触发了模型未显式定义的函数: ${fn}', args);
-  var nextModal = document.querySelector('.modal-overlay.active, .modal.show, [id*="modal"].show, [id*="result"].active');
+  var nextModal = document.querySelector('.modal-overlay.active, .modal.show, [id*="modal"].show, [id*="result"].active, [id*="screen"].active, [id*="victory"].active');
   if (nextModal) { nextModal.classList.remove('active'); nextModal.classList.add('hidden'); }
   if (typeof initLevel === 'function') {
     var cur = (window.gameState && typeof window.gameState.currentLevel === 'number') ? window.gameState.currentLevel : 0;
@@ -85,10 +114,12 @@ window["${fn}"] = function(...args) {
   }
   if (typeof nextLevel === 'function') { try { nextLevel(); return; } catch(e) {} }
   if (typeof restartGame === 'function') { try { restartGame(); return; } catch(e) {} }
+  var nextBtn = document.getElementById('next-level-btn') || document.querySelector('.next-btn, .next-level');
+  if (nextBtn && nextBtn !== this) { try { nextBtn.click(); } catch(e) {} }
 };`).join('\n') + `\n</script>\n`;
 
-    html = html.includes('</body>')
-      ? html.replace('</body>', `${bridgeScript}</body>`)
+    html = /<\/body>/i.test(html)
+      ? html.replace(/<\/body>/i, `${bridgeScript}</body>`)
       : `${html}${bridgeScript}`;
     appliedRepairs.push(`自动桥接缺失函数: ${missingFns.join(', ')}`);
   }
@@ -147,19 +178,26 @@ window["${fn}"] = function(...args) {
 })();
 </script>\n`;
 
-    html = html.includes('</body>')
-      ? html.replace('</body>', `${disambiguationScript}</body>`)
+    html = /<\/body>/i.test(html)
+      ? html.replace(/<\/body>/i, `${disambiguationScript}</body>`)
       : `${html}${disambiguationScript}`;
     appliedRepairs.push('注入拖拽与点击互斥消抖拦截器');
   }
 
-  // 6. 修复 Canvas 2D 负半径崩溃 (arc / arcTo / roundRect)
-  if (html.includes('ctx.arc') || html.includes('createRadialGradient') || html.includes('arcTo')) {
+  // 6. 修复 Canvas 2D 负半径崩溃 (arc / createRadialGradient / roundRect)
+  if (html.includes('.arc(') || html.includes('createRadialGradient') || html.includes('arcTo')) {
     const beforeCanvas = html;
-    html = html.replace(/ctx\.arc\(([^,]+),\s*([^,]+),\s*([^,]+),/g, (match, x, y, r) => {
+    html = html.replace(/\b([a-zA-Z0-9_$]+)\.arc\(([^,]+),\s*([^,]+),\s*([^,]+),/g, (match, ctxVar, x, y, r) => {
       if (r.includes('Math.max')) return match;
-      return `ctx.arc(${x}, ${y}, Math.max(0.1, ${r}),`;
+      return `${ctxVar}.arc(${x}, ${y}, Math.max(0.1, ${r}),`;
     });
+    html = html.replace(
+      /\b([a-zA-Z0-9_$]+)\.createRadialGradient\(([^,]+),\s*([^,]+),\s*([^,]+),\s*([^,]+),\s*([^,]+),\s*([^,)]+)\)/g,
+      (match, ctxVar, x0, y0, r0, x1, y1, r1) => {
+        if (r0.includes('Math.max') || r1.includes('Math.max')) return match;
+        return `${ctxVar}.createRadialGradient(${x0}, ${y0}, Math.max(0.1, ${r0}), ${x1}, ${y1}, Math.max(0.1, ${r1}))`;
+      },
+    );
     if (html !== beforeCanvas) {
       appliedRepairs.push('Canvas 关键绘制尺寸防负数保护');
     }
@@ -200,8 +238,14 @@ window["${fn}"] = function(...args) {
       };
     }
     try {
-      window.localStorage = createMemoryStorage();
-      window.sessionStorage = createMemoryStorage();
+      var memStore = createMemoryStorage();
+      try {
+        Object.defineProperty(window, 'localStorage', { value: memStore, configurable: true, writable: true });
+        Object.defineProperty(window, 'sessionStorage', { value: createMemoryStorage(), configurable: true, writable: true });
+      } catch (_) {
+        window.localStorage = memStore;
+        window.sessionStorage = createMemoryStorage();
+      }
     } catch (_) {}
   }
   var _origAlert = window.alert;
@@ -222,6 +266,10 @@ window["${fn}"] = function(...args) {
     _unlocked = true;
     try {
       if (window.audioCtx && window.audioCtx.state === 'suspended') window.audioCtx.resume();
+      if (window.AudioContext || window.webkitAudioContext) {
+        var dummy = new (window.AudioContext || window.webkitAudioContext)();
+        if (dummy && dummy.state === 'suspended') dummy.resume();
+      }
     } catch (_) {}
     window.removeEventListener('click', _unlockAudio, true);
     window.removeEventListener('touchstart', _unlockAudio, true);
@@ -258,13 +306,19 @@ window["${fn}"] = function(...args) {
       data: dragData,
       setData: function(k, v) { dragData[k] = String(v); },
       getData: function(k) { return dragData[k] || ''; },
-      clearData: function() { dragData = {}; }
+      clearData: function(k) { if (k) delete dragData[k]; else dragData = {}; },
+      types: Object.keys(dragData),
+      dropEffect: 'move',
+      effectAllowed: 'all'
     };
   }
   function dispatchSynthetic(elem, type, touch, dt) {
     var evt = new CustomEvent(type, { bubbles: true, cancelable: true });
-    (evt as any).clientX = touch.clientX; (evt as any).clientY = touch.clientY;
-    (evt as any).dataTransfer = dt || createMockDataTransfer();
+    evt.clientX = touch ? touch.clientX : 0;
+    evt.clientY = touch ? touch.clientY : 0;
+    evt.pageX = touch ? touch.pageX : 0;
+    evt.pageY = touch ? touch.pageY : 0;
+    evt.dataTransfer = dt || createMockDataTransfer();
     return elem.dispatchEvent(evt);
   }
   document.addEventListener('touchstart', function(e) {
@@ -321,6 +375,22 @@ window["${fn}"] = function(...args) {
       html = `${touchDndScript}\n${html}`;
     }
     appliedRepairs.push('注入电子白板与触控拖拽兼容 Polyfill');
+  }
+
+  // 9. 自愈清理历史版本遗留的非标准语法 (evt as any)
+  if (html.includes('(evt as any)')) {
+    const beforeClean = html;
+    html = html.replace(
+      /\(evt as any\)\.clientX = touch\.clientX;\s*\(evt as any\)\.clientY = touch\.clientY;/g,
+      'evt.clientX = touch ? touch.clientX : 0; evt.clientY = touch ? touch.clientY : 0;',
+    );
+    html = html.replace(
+      /\(evt as any\)\.dataTransfer = dt \|\| createMockDataTransfer\(\);/g,
+      'evt.dataTransfer = dt || createMockDataTransfer();',
+    );
+    if (html !== beforeClean) {
+      appliedRepairs.push('清理历史 Touch Guard 非标准语法');
+    }
   }
 
   return { html, appliedRepairs };
