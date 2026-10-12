@@ -7920,10 +7920,10 @@ index 00000000..0c78b654
 +  );
 +}
 diff --git a/components/edit/PlaybackChromeRoot.tsx b/components/edit/PlaybackChromeRoot.tsx
-index 0c47e3b2..abf4d1ee 100644
+index 69e9c8ff..3bb208f1 100644
 --- a/components/edit/PlaybackChromeRoot.tsx
 +++ b/components/edit/PlaybackChromeRoot.tsx
-@@ -1216,7 +1216,8 @@ export const PlaybackChromeRoot = forwardRef<PlaybackChromeRootHandle, PlaybackC
+@@ -1218,7 +1218,8 @@ export const PlaybackChromeRoot = forwardRef<PlaybackChromeRootHandle, PlaybackC
      // still reads as complete.
      const isCourseComplete =
        generationComplete ||
@@ -11621,10 +11621,10 @@ index 00000000..51d37393
 +  }
 +}
 diff --git a/lib/server/generation/run/engine.ts b/lib/server/generation/run/engine.ts
-index fda37e10..31528f21 100644
+index aff72380..2bf837f5 100644
 --- a/lib/server/generation/run/engine.ts
 +++ b/lib/server/generation/run/engine.ts
-@@ -976,6 +976,16 @@ async function executeClaimedRun(
+@@ -978,6 +978,16 @@ async function executeClaimedRun(
    const narrateScene = async (sceneIndex: number, stepId: string): Promise<void> => {
      const actions = output<SceneActionsResult>(sceneStepId(sceneIndex, 'actions'))!;
      const scene: Scene = structuredClone(actions.scene) as Scene;
@@ -11641,7 +11641,7 @@ index fda37e10..31528f21 100644
      const target = await services.narrationTarget(owner);
      if (!target) {
        await appendScene(sceneIndex, stepId, scene);
-@@ -1697,6 +1707,34 @@ async function executeClaimedRun(
+@@ -1699,6 +1709,34 @@ async function executeClaimedRun(
      run = committed!;
      reportCommittedRunEvents(run, events, currentOwnerOf);
      for (const checkpoint of unplaced.steps) steps.set(checkpoint.id, checkpoint.output);
@@ -13324,7 +13324,7 @@ index 673b9d76..f4fef3a0 100644
  
  export interface WidgetOutline {
 diff --git a/packages/@openmaic/generation/src/scene-generator.ts b/packages/@openmaic/generation/src/scene-generator.ts
-index 32be5758..268af399 100644
+index 1cdad441..a409374a 100644
 --- a/packages/@openmaic/generation/src/scene-generator.ts
 +++ b/packages/@openmaic/generation/src/scene-generator.ts
 @@ -113,6 +113,8 @@ export interface SceneContentOptions {
@@ -13388,7 +13388,7 @@ index 32be5758..268af399 100644
    const response = await aiCall(prompts.system, userPrompt, visionImages);
    const generatedData = parseJsonResponse<GeneratedSlideData>(response);
  
-@@ -845,6 +864,13 @@ async function generateSlideContent(
+@@ -850,6 +869,13 @@ async function generateSlideContent(
      }
    }
  
@@ -13402,7 +13402,7 @@ index 32be5758..268af399 100644
    return {
      elements: processedElements,
      background,
-@@ -1217,11 +1243,13 @@ export async function generateWidgetContent(
+@@ -1222,11 +1248,13 @@ export async function generateWidgetContent(
    languageDirective?: string,
    options: {
      allowProceduralSkill?: boolean;
@@ -13416,7 +13416,7 @@ index 32be5758..268af399 100644
    const widgetType = outline.widgetType;
    const widgetOutline = outline.widgetOutline;
  
-@@ -1242,7 +1270,10 @@ export async function generateWidgetContent(
+@@ -1247,7 +1275,10 @@ export async function generateWidgetContent(
          conceptOverview: outline.description,
          keyPoints: (outline.keyPoints || []).join('\n'),
          variables: widgetOutline.keyVariables?.join(', ') || '',
@@ -13428,7 +13428,7 @@ index 32be5758..268af399 100644
          languageDirective: languageDirective || '',
        };
        break;
-@@ -1335,8 +1366,27 @@ export async function generateWidgetContent(
+@@ -1340,8 +1371,27 @@ export async function generateWidgetContent(
      return null;
    }
  

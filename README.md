@@ -1,11 +1,11 @@
 # 👥 OpenMAIC 模块化扩展补丁集 (Multi-Users, Course-Manager, Batch-Studio & Interactive-Hub)
 
-[![OpenMAIC](https://img.shields.io/badge/OpenMAIC-v1.2.0--rc.1-blue?style=flat-square)](https://github.com/THU-MAIC/OpenMAIC)
+[![OpenMAIC](https://img.shields.io/badge/OpenMAIC-v1.2.0--rc.2-blue?style=flat-square)](https://github.com/THU-MAIC/OpenMAIC)
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-16+-336791?style=flat-square&logo=postgresql&logoColor=white)](https://www.postgresql.org/)
 [![Next.js](https://img.shields.io/badge/Next.js-16-black?style=flat-square&logo=next.js)](https://nextjs.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg?style=flat-square)](LICENSE)
 
-本仓库是针对清华大学开源项目 [**THU-MAIC/OpenMAIC**](https://github.com/THU-MAIC/OpenMAIC) 的**高可用模块化生产级扩展套件**。全面适配官方最新 **v1.2.0-rc.1** 服务端优先（Server-First Generation Runs）基线架构。
+本仓库是针对清华大学开源项目 [**THU-MAIC/OpenMAIC**](https://github.com/THU-MAIC/OpenMAIC) 的**高可用模块化生产级扩展套件**。全面适配官方最新 **v1.2.0-rc.2** 服务端优先（Server-First Generation Runs）基线架构。
 
 包含八大核心模块，支持按需独立安装或统一全量部署：
 1. **👥 多用户管理与统一身份认证模块**：开箱即用的多用户注册/登录、RBAC 角色权限、超级管理员全站控制台与多端云端漫游，**全面接入官方 Owner Identity Seam 与 PersistenceHooks 宿主标准接口**；
