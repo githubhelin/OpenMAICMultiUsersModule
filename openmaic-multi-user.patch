@@ -1545,10 +1545,10 @@ index 00000000..63dcf0fe
 +}
 diff --git a/app/api/classroom/[id]/materials/route.ts b/app/api/classroom/[id]/materials/route.ts
 new file mode 100644
-index 00000000..9c0b294e
+index 00000000..303aaaef
 --- /dev/null
 +++ b/app/api/classroom/[id]/materials/route.ts
-@@ -0,0 +1,113 @@
+@@ -0,0 +1,123 @@
 +import { NextRequest, NextResponse } from 'next/server';
 +import { promises as fs } from 'node:fs';
 +import path from 'node:path';
@@ -1558,6 +1558,7 @@ index 00000000..9c0b294e
 +  findBatchJobInfoForClassroom,
 +  CLASSROOM_MATERIALS_DIR,
 +} from '@/lib/persistence/classroom-materials';
++import { MATERIAL_DOCUMENT_UPLOAD_LIMIT } from '@/lib/server/materials/upload-limits';
 +import { getServerPersistenceProvider } from '@/lib/persistence/server-provider';
 +import { createLogger } from '@/lib/logger';
 +
@@ -1628,6 +1629,15 @@ index 00000000..9c0b294e
 +
 +    if (!file) {
 +      return NextResponse.json({ success: false, error: 'No file uploaded' }, { status: 400 });
++    }
++
++    if (file.size > MATERIAL_DOCUMENT_UPLOAD_LIMIT) {
++      const maxMb = (MATERIAL_DOCUMENT_UPLOAD_LIMIT / (1024 * 1024)).toFixed(0);
++      const fileMb = (file.size / (1024 * 1024)).toFixed(1);
++      return NextResponse.json(
++        { success: false, error: `文件体积过大 (${fileMb} MB)，已超出单文件限制 (${maxMb} MB)` },
++        { status: 413 }
++      );
 +    }
 +
 +    const classroomDir = path.join(CLASSROOM_MATERIALS_DIR, classroomId);
@@ -7231,10 +7241,10 @@ index 00000000..5239f696
 +}
 diff --git a/components/classroom/ClassroomMaterialsDialog.tsx b/components/classroom/ClassroomMaterialsDialog.tsx
 new file mode 100644
-index 00000000..0c78b654
+index 00000000..be45e74a
 --- /dev/null
 +++ b/components/classroom/ClassroomMaterialsDialog.tsx
-@@ -0,0 +1,684 @@
+@@ -0,0 +1,690 @@
 +'use client';
 +
 +import React, { useState, useEffect, useRef } from 'react';
@@ -7374,6 +7384,12 @@ index 00000000..0c78b654
 +  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
 +    const file = e.target.files?.[0];
 +    if (!file) return;
++
++    if (file.size > 50 * 1024 * 1024) {
++      alert(`文件体积过大 (${(file.size / (1024 * 1024)).toFixed(1)} MB)，单文件限制为 50 MB`);
++      if (fileInputRef.current) fileInputRef.current.value = '';
++      return;
++    }
 +
 +    setUploading(true);
 +    try {
